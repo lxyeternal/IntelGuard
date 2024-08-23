@@ -1,0 +1,107 @@
+
+With the release of the Phylum Community Edition, we have added support for Software Supply Chain Extensions: scriptable extensions to the product that enable a layer of automation and customizability on top of what Phylum provides.
+Keep reading to see a detailed example of how to get started or find some pre-built extension samples here.
+Better automation is critically important to maintaining development velocity and ensuring that major problems aren’t missed - in short, it is the entire cornerstone of DevOps. Without strong automation (and tooling to support it), CI/CD is no longer continuous. With this in mind, we developed an automation framework to enable the development of tooling to help facilitate orchestration, findings management, and triage automation (among other things). As such, we strive to be automation first, and provide better tooling to help design toward more proactive solutions.
+Several guiding principles were applied in selecting the correct tools to enable this vision: the mechanism for managing extensions must be flexible, it should provide security controls (as a software supply chain security company, we want to ensure that the tooling from community is also adequately secure) and sandboxing and should be simple to utilize.
+With this in mind we chose to leverage Deno as the base framework for our automation tooling. It runs in a sandbox with a robust permission management system, comes with a feature-rich standard library, and supports many languages (through its ability to run Web Assembly). Additionally, it provides first-class integrations with Rust (as the Deno embeddable sandbox itself ships as a crate), and is easily extensible.
+Given that the API itself has relatively robust documentation, and is not extraordinarily complex, we won’t focus too heavily on that specifically for this exercise - rather, we’ll spend more time focused on what we can actually do with the extension framework.
+To that end, we will work through the exercise of building an alerting tool - the end result being an extension that can filter issues and push critical alerts into Jira via REST API. This is also quite well documented and will serve as a good example to showcase where the extension framework can be helpful.
+As we start working on this problem, we will first add a manifest to outline what resources our extension will need to operate properly:
+name = "jira" 
+description = "blindly put critical issues into jira!" 
+entry_point = "main.ts" 
+[permissions] 
+  env = ["JIRA_USER_EMAIL", "JIRA_USER_TOKEN"] 
+  net = ["example-domain.atlassian.net"]
+Where example-domain should be replaced with whatever subdomain is appropriate.
+Next, we will begin to build out our actual extension - starting in main.ts, which we identified as our extension’s entry point (above). Here we will start by:
+
+Parsing the lockfile provided by the user.
+Performing an analysis on the loaded packages.
+Collecting the returned issues that are of critical severity.
+import { PhylumApi } from "phylum"; 
+ 
+ 
+// First, we will check to ensure that we have the appropriate arguments -
+// for this example, we will assume that it takes the form:
+// phylum jira  
+// NOTE: the phylum CLI itself utilizes the first two of those arguments before
+//       calling into Deno, so `Deno.args[0]` will be the value provided for 
+//       , and `Deno.args[1]` will contain .
+if(Deno.args.length < 2) {
+  console.error("Usage: phylum jira  ");
+  Deno.exit(1);
+}
+ 
+const ecosystem = Deno.args[0]; 
+const lockfile = Deno.args[1]; 
+// Parse the provided lockfile 
+const lockData = await PhylumApi.parseLockfile(lockfile, ecosystem); 
+ 
+// Perform analysis 
+const jobId = await PhylumApi.analyze(ecosystem, lockData.packages); 
+const status = await PhylumApi.getJobStatus(jobId); 
+ 
+let criticalIssues = {}; 
+// Now, we will loop through the packages and check the issues that came back: 
+for(const package of status.packages) { 
+  // Issues are as follows: 
+  // {  
+  //   tag: "",  
+  //   title: "issue title",  
+  //   description: "issue description", 
+  //   severity: "low | medium | high | critical", 
+  //   domain: "malicious_code | vulnerability | author | license | engineering"  
+  // } 
+  const issues = package.issues.filter(issue => issue.severity === 'critical'); 
+  if(issues.length) 
+    criticalIssues[`${package.name}:${package.version}`] = issues; 
+}
+Now we can refer back to the docs for the Jira API we will be hitting in order to generate Jira issues for each critical issue returned by the Phylum API. In practice, we would likely want to pull existing issues and de-duplicate (if the issue we are about to create already exists for an existing package/version), and would want to paginate for situations where 50 or more packages with critical issues are identified, but for the sake of keeping this example simple, we will just attempt bulk creation.
+import { encode } from "https://deno.land/std/encoding/base64.ts"; 
+ 
+// ... 
+ 
+let bodyData = { 
+  issueUpdates: [] 
+}; 
+ 
+// First we will loop through our packages with critical issues, and generate 
+// an entry for each: 
+for(const packageId of Object.keys(criticalIssues)) { 
+   // Populate whatever fields are appropriate given the package/version 
+   // tuple provided as the key, and the issue information as the value 
+} 
+ 
+const email = Deno.env.get("JIRA_USER_EMAIL"); 
+const token = Deno.env.get("JIRA_USER_TOKEN"); 
+ 
+if(!email || !token) { 
+  console.error("Please ensure that you provide the user email and token via env!") 
+  Deno.exit(2); 
+} 
+ 
+const encodedToken = encode(`${email}:${token}`); 
+ 
+const result = await fetch("https://example-domain.atlassian.net", { 
+  method: "POST", 
+  headers: { 
+    'Authorization': `Basic ${encodedToken}`, 
+    'Accept': 'application/json', 
+    'Content-Type': 'application/json' 
+  }, 
+  body: JSON.stringify(bodyData) 
+}); 
+ 
+if(200 !== result.status) { 
+  console.error(`Request to create issues failed! Got a ${result.status} back.`); 
+  Deno.exit(3); 
+} 
+ 
+const data = result.json(); 
+ 
+if(data.errors.length > 0) { 
+  // Handle errors 
+}
+Followed by a phylum extension install ./jira-extension and now, execution!
+To learn more, see our documentation or contact support: support@phylum.io.

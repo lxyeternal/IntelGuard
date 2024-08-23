@@ -1,0 +1,103 @@
+
+On December 6, 2022, Microsoft researchers reported technical details of a campaign targeting cryptocurrency organizations globally using what they describe as complex tactics.
+Community Impact
+Many retail, travel, and hospitality organizations maintain financial relationships with cryptocurrency firms for business reasons or accept cryptocurrency as payment and maintain relationships with organizing firms for financial reasons. As such, while the current campaign does not explicitly target the RH-ISAC community, it does present a potential supply chain threat.
+Technical Details
+Organizations appear to be targeted through cryptocurrency investment groups via Telegram by leveraging fake employee profiles. According to Microsoft researchers, after gaining initial entry, the campaign, which they associate with a cluster of activity designated “DEV-0139,” leverages a weaponized Excel file that does the following:
+
+A malicious macro in the weaponized Excel file abuses a VBA UserForm to obfuscate the code and retrieve some data.
+The malicious macro extracts another Excel sheet embedded in the form and executes it in invisible mode. The second Excel sheet is encoded in base64, and dropped into C:\ProgramData\Microsoft Media\ with the name VSDB688.tmp
+The file VSDB688.tmp downloads a PNG file containing three executables: a legitimate Windows file named logagent.exe, a malicious version of the DLL wsock32.dll, and an XOR encoded backdoor.
+The file logagent.exe is used to sideload the malicious wsock32.dll, which acts as a DLL proxy to the legitimate wsock32.dll. The malicious DLL file is used to load and decrypt the XOR encoded backdoor that lets the threat actor remotely access the infected system.
+Next, the campaign drops a second payload: an MSI package for a CryptoDashboardV2 app.
+Note on attribution: Volexity published research on the same activity recently, attributing the campaign to the North Korean Lazarus Group based on similarities to previous campaigns.
+Detection Options
+Microsoft provided the following hunting queries:
+Query that looks for Office apps that create a file within one of the known bad directories:
+DeviceFileEvents
+| where InitiatingProcessFileName has_any (“word”, “excel”, “access”, “outlook” “powerpnt”)
+| where ActionType == “FileCreated”
+| where parse_path( FolderPath ).DirectoryPath has_any(
+@ “C:\ProgramData\Microsoft Media”,
+@”C:\ProgramData\SoftwareCache”,
+@”Roaming\Dashboard_v2″
+)
+| project Timestamp, DeviceName, FolderPath, InitiatingProcessFileName, SHA256, InitiatingProcessAccountName, InitiatingProcessAccountDomain
+Query that looks for Office apps that create a file within an uncommon directory (less than five occurrences), makes a set of each machine this is seen on, and each user that has executed it to help look for how many users/hosts are compromised:
+| where InitiatingProcessFileName has_any (“word”, “excel”, “access”, “outlook”, “powerpnt”)
+| extend Path = tostring(parse_path(FolderPath).DirectoryPath)
+| summarize PathCount=count(), DeviceList=make_set(DeviceName), AccountList=make_set(InitiatingProcessAccountName) by FileName, Path, InitiatingProcessFileName, SHA256
+| where PathCount < 5
+Query that summarizes child process of Office apps, looking for less than five occurrences:
+DeviceProcessEvents
+| where InitiatingProcessFileName has_any (“word”, “excel”, “access”, “powerpnt”)
+| summarize ProcessCount=count(), DeviceList=make_set(DeviceName), AccountList=make_set(InitiatingProcessAccountName) by FileName, FolderPath, SHA256, InitiatingProcessFileName
+| where ProcessCount < 5
+Query that lists of all executables with Microsoft as ProcessVersionInfoCompanyName, groups them together by path, then looks for uncommon paths, with less than five occurrences:
+| where ProcessVersionInfoCompanyName has “Microsoft”
+| summarize ProcessList=make_set(FileName) by Path
+| where array_length( ProcessList ) < 5
+Query that searches for connections to malicious domains and IP addresses:
+DeviceNetworkEvents
+| where (RemoteUrl has_any (“strainservice.com”))
+or (RemoteIP has_any (“198.54.115.248”))
+Query that searches for files downloaded from malicious domains and IP addresses.
+| where (FileOriginUrl  has_any (“strainservice.com”))
+or (FileOriginIP  has_any (“198.54.115.248”))
+Query that searchers for Office apps downloading files from uncommon domains, groups users, filenames, and devices together:
+| where isnotempty( FileOriginUrl ) or isnotempty( FileOriginIP )
+| summarize DomainCount=count(), UserList=make_set(InitiatingProcessAccountName), DeviceList=make_set(DeviceName),
+FileList=make_set(FileName) by FileOriginUrl, FileOriginIP, InitiatingProcessFileName
+Looks for downloaded files with uncommon file extensions, groups remote IPs, URLs, filenames, users, and devices:
+| where InitiatingProcessFileName has_any (“word”, “excel”, “access”, “powerpnt”, “outlook”)
+| extend Extension=tostring(parse_path(FolderPath).Extension)
+| extend  Path=tostring(parse_path(FolderPath).DirectoryPath)
+| summarize ExtensionCount=count(), IpList=make_set(FileOriginIP), UrlList=make_set(FileOriginUrl), FileList=make_set(FileName),
+UserList=make_set(InitiatingProcessAccountName), DeviceList=make_set(DeviceName) by Extension, InitiatingProcessFileName
+Looks for Office apps that have child processes that match the GUID command line, with a check for Microsoft binaries to reduce the results before the regex:
+| where ProcessCommandLine matches regex
+@”[A-Za-z0-9]+\.exe [A-Za-z0-9]{8}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{12} /[A-Za-z0-9]$”
+IOCs
+Microsoft researchers provided the following indicators of compromise:
+
+
+abca3253c003af67113f83df2242a7078d5224870b619489015e4fde060acad0	OKX Binance & Huobi VIP fee comparision[.]xls	Weaponized Excel file
+17e6189c19dedea678969e042c64de2a51dd9fba69ff521571d63fd92e48601b	OKX Binance & Huobi VIP fee comparision[.]xls	Weaponized Excel file
+a2d3c41e6812044573a939a51a22d659ec32aea00c26c1a2fdf7466f5c7e1ee9	VSDB688[.]tmp	Second worksheet dropped
+2e8d2525a523b0a47a22a1e9cc9219d6526840d8b819d40d24046b17db8ea3fb	wsock32[.]dll / HijackingLib[.]dll	Malicious dropper that acts as a DLL proxy to legit wsock32[.]dll
+82e67114d632795edf29ce1d50a4c1c444846d9e16cd121ce26e63c8dc4a1629	Duser[.]dll	
+90b0a4c9fe8fd0084a5d50ed781c7c8908f6ade44e5654acffea922e281c6b33	Duser[.]dll / HijackingLib[.]dll	Malicious dropped that acts as a DLL proxy to the legit Duser[.]dll
+e5980e18319027f0c28cd2f581e75e755a0dace72f10748852ba5f63a0c99487	4acbe3[.]msi	Fake CryptoDashboard application MSI package  delivering Duser[.]dll
+82e67114d632795edf29ce1d50a4c1c444846d9e16cd121ce26e63c8dc4a1629	43d972[.]msi	Second fake application BloxHolder delivering Duser[.]dll
+ea31e626368b923419e8966747ca33473e583376095c48e815916ff90382dda5	DLL	Implant loaded by Duser[.]dll
+C:\ProgramData\SoftwareCache\wsock32[.]dll	Path	Path of wsock32[.]dll
+C:\Users\user\AppData\Roaming\Dashboard_v2\DUser[.]dll	Path	Path of Duser[.]Dll
+C:\Program Files\CryptoDashboardV2\	Path	Path of the fake app
+C:\ProgramData\Microsoft Media\VSDB688[.]tmp	Path	Path of the second worksheet
+hxxps://od[.]lk/d/d021d412be456a6f78a0052a1f0e3557dcfa14bf25f9d0f1d0d2d7dcdac86c73/Background[.]png	Background[.]png downloaded from OpenDrive	Png file downloaded on the victim machines
+strainservice[.]com	Domain/C2	Command and control server
+198[.]54[.]115[.]248	IP/C2	IP of the C2
+56762eb9-411c-4842-9530-9922c46ba2da	GUID	GUID used
+27E57D84-4310-4825-AB22-743C78B8F3AA	GUID	GUID used
+TPLink[.]exe” 27E57D84-4310-4825-AB22-743C78B8F3AA /sven	Command line	Command line runs by the legit exe
+logagent[.]exe 56762eb9-411c-4842-9530-9922c46ba2da /shadow	Command line	Command line runs by the legit file
+TTPs
+Microsoft researchers also provided the following MITRE ATT&CK tactics, techniques, and procedures (TTPs):
+
+
+Reconnaissance	T1591	Gather Victim Org Information	The attackers gathered information about the targets reaching them on Telegram with a clear understanding of their challenges.
+	T1593.001	Social Media	Attackers identified the targets on specific cryptocurrencies group on Telegram.
+Resource Development	T1583.001	Acquire Infrastructure: Domains	Attackers registered the domain “strainservice.com” on June 18
+Initial Access	T1566.001	Spearphishing Attachment	Attackers sent a weaponized Excel document.
+
+Execution
+Execution	T1204.002	User Execution: Malicious File	The targeted user must open the weaponized Excel document and enable macros.
+	T1059.005	Command and Scripting Interpreter: Visual Basic	Attackers used VBA in the malicious excel document “OKX Binance & Huobi VIP fee comparision.xls” to deliver the implant.
+	T1106	Native API	Usage of CreateProcess API in the excel document to run the executable.
+Persistence, Privilege Escalation, Defense Evasion	T1574.002	DLL side-Loading	The attackers abused the legitimate Logagent.exe to sideload the malicious wsock32.dll and the legitimate TPLink.Exe to side load Duser.dll
+Defense Evasion	T1027	Obfuscated file or information	The malicious VBA is obfuscated using UserForm to hide variable and data.
+	T1036.005	Masquerading: Match Legitimate Name or Location	The attackers are using legitimate DLL name that acts as DLL Proxy to the original one (wsock32.dll and Duser.dll).
+	T1027.009	Obfuscated Files or Information: Embedded Payloads	The malicious DLL are dropping the implant into the machine.
+Command & Control	T1071.001	Application Layer Protocol: Web Protocols	The implant is communicating to the remote domain through port 80 or 443.
+	T1132	Data Encoding	The implant is encoding the data exchanged with the C2.
+Exfiltration	T1041	Exfiltration over C2 channel	The implant has the ability to exfiltrate information.

@@ -1,0 +1,76 @@
+
+Improving cloud native software supply chain security on OCI with Cosign and Kyverno
+Ali Mukadam
+Follow
+Oracle Developers
+4
+Listen
+Share
+The year 2022 saw a significant rise in cyberattacks. Out of these, it’s estimated 40% of these are targeting the software supply chain. Accenture estimates losses due to general supply chain disruptions at €112.7 billion, or 0.9% of GDP in the Eurozone.
+Fortunately, software developers have not been sitting idle. In the last 18 months, the CNCF Security Tag published the 2nd version of its white paper on cloud native security as well as on cloud native supply chain security. Heck, even the White House got interested and Oracle was there. Cosign, part of the Sigstore project, also reached its 1.0 milestone. Subsequently, the Kubernetes community announced its adoption of Sigstore for signing artifacts and verifying signatures.
+If you are doing cloud native on OCI, how do you make use of this?
+Let’s provision an OKE cluster with the terraform OKE module. Ensure you have both the bastion and operator enabled. But instead of provisioning everything, we’ll provision just the vcn, bastion and operator:
+Once provisioned, ssh to the operator host. For the purpose of this article, we’ll use it for development.
+Install podman
+On Oracle Linux, podman is part of container-tools:ol8 module so we let’s install it so we can manipulate container images:
+The podman-docker package allows you to use podman on Oracle Linux 8 but instead of using podman commands, you can still keep using docker commands.
+Create an Authentication Token
+Next, create an Authentication Token for your user. This token is needed in order to login to OCIR.
+Login to OCIR:
+Pushing a container to OCIR
+Create a repository in OCIR:
+Let’s now pull a container image which we want to use as a base image:
+We can tag the image:
+And push it:
+Signing a container image with cosign
+Install go using your preferred method. I’ll use go:
+Generate a key pair:
+This will create a public key (cosign.pub) and a private key (cosign.key).
+We can now sign the container image. You can obtain the digest in the OCI console.
+Refresh the OCI Console and you should see the signature:
+Verify a container against the key
+Let’s first remove the local copies:
+And verify there are no local images:
+We can now verify the image against the key:
+Enforcing the use of signed images
+Now that we have signed our container images, we need to enforce the use of signed images. In OKE, there are a couple of ways to achieve this:
+
+Using an admission controller such as OPA Gatekeeper or Kyverno
+Using OKE itself: at creation time, OKE allows you to specify a list of image signing keys that you can store in OCI KMS. In order for pods to be successfully created, the container images used need to be signed with those image signing keys.
+Create the OKE cluster and deploy Kyverno
+First, let’s create our cluster:
+We’ll use Kyverno because it looks like the OPA Gatekeeper is still a work in progress:
+Testing Kyverno
+We now want to verify the image before deployment by creating a policy but first let’s try to see if a deployment succeeds. Let’s create a deployment:
+Since our container image is in a private OCIR repo, we need to provide an imagePullSecret:
+We can now test the deployment without image verification:
+Let’s look at the pod:
+Don’t worry about it going into CrashLoopBackoff. Let’s instead look at the events:
+What we see is that OKE pulls the image and can deploy it.
+Let’s now create an image verification policy:
+You can obtain the public key contents from the cosign.pub file. Create the policy:
+We can test the deployment again and this will fail:
+The reason this fails is that Kyverno is unable to access OCIR where we stored the signature. So, we need a way for Kyverno to authenticate. Recall that we create a secret ocirsecret in the default namespace which contains the OCI authentication token. Let’s copy the secret to the Kyverno namespace:
+In order for the check-image step to suceed, we need to update the Kyverno deployment:
+Locate the containers section and add the following:
+Redeploy again and this time the deployment will succeed:
+Let’s describe the deployment:
+And you’ll see the following:
+Okay, we’ve successfully done a deployment. Let’s now try deploying an unsigned image. First, update the verify-image ClusterPolicy:
+And apply again:
+Let’s make a new deployment:
+And deploy again:
+This time, as the nodejs image was not signed with the key, the deployment fails.
+Summary
+In this short article, we have shown a few things:
+
+Improving your software supply chain security on OCI by using images signed by the cosign
+Storing your container image and the signature in OCI Container Registry
+Using Kyverno to create Kubernetes Policies, in this case, to enforce the deployment of container images signed with certain keys by verifying the signature stored in OCIR
+Obviously, we are barely scratching the surface of cloud native security here but if you are running on OCI and using OKE and you’ve been looking at improving your software supply chain, I hope you find this article useful enough to get started.
+References:
+Cosign: https://docs.sigstore.dev/cosign/overview/
+Kyverno: https://kyverno.io/
+Secret copy command: https://fabianlee.org/2021/04/09/kubernetes-copying-a-secret-from-one-namespace-to-another/
+CNCF Cloud Native Security whitepaper: https://github.com/cncf/tag-security/blob/main/security-whitepaper/v2/CNCF_cloud-native-security-whitepaper-May2022-v2.pdf
+CNCF Software Secure Software Factory whitepaper: https://github.com/cncf/tag-security/blob/main/supply-chain-security/secure-software-factory/Secure_Software_Factory_Whitepaper.pdf

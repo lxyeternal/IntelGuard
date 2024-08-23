@@ -1,0 +1,24 @@
+
+本次分享的论文“Continuous Intrusion: Characterizing the Security of Continuous Integration Services”主题是持续集成服务（Continuous Integration，简称CI）的安全，关注的是广为使用的CI服务中存在的安全问题。论文由奇安信技术研究院、清华大学和特拉华大学合作完成，已被IEEE S&P‘23录用，也是该团队在S&P‘23上发表的第二篇软件供应链安全的论文。
+
+image: gjj_images\qianxin\20240708_103545_269030\Untitled.png
+
+持续集成（CI）是一种响应代码变化，实现自动构建、自动测试、自动集成的软件开发实践。CI能够在降低开发成本的同时，显著提升开发效率。CI在软件开发团队中广泛使用：据统计，70%的软件开发团队使用了CI技术。CI在软件供应链中的角色也很特殊：其向上连接了开发者和代码托管平台，向下则连接持续发布系统和制品托管平台。因此，CI系统的安全性对于确保软件开发过程安全、避免供应链攻击等安全风险至关重要。
+论文对当前7个主流的CI系统进行了深入分析，包括三个代码托管平台自带的CI服务：GitHub Actions, GitLab CI, Bitbucket Pipelines，以及4个独立的CI服务：CircleCI, TravisCI, TeamCity, Jenkins。论文重点分析了这些CI服务的工作流程和实现细节，特别是它们与代码托管平台（如GitHub）、第三方服务平台（如S3云存储）之间的授权方式，以及CI任务执行时的资源隔离、授权级别等细节，从中发现4大类安全风险，并基于这些风险提出了4个新的攻击向量。
+如图1所示，CI平台可分为controller、runner和executor三大部分。Controller时CI平台的核心，负责处理与GitHub等代码托管平台（Code Hosting Platforms，简称CHP）的授权，解析CI配置文件，处理CI触发事件，安排CI task执行等；Runner则是安装到host上的一个agent，runner必须注册到controller，从而接收CI task执行指令；Executor则是CI task的实际执行环境，通常来说，executor由runner直接调用，因此二者运行在同一台host上。Executor主要包括shell、docker、virtual machine三种类型。
+典型的CI系统工作流程如图1所示。1）代码托管平台授予controller一个CHP token，作为CI平台访问CHP的凭据；2）runner使用runner registration token将自身注册到controller；3）当CI task触发事件发生时（如新的代码提交或新的pull request提交），CHP通知controller；4）controller响应触发事件，生成一个CI task，并分发给一个runner，此时通常会生成task token，用于runner回传执行日志、返回执行结果等；5）runner启动一个executor来实际执行CI task；6）executor利用deploy token，从CHP下载源代码；7）在CI task执行过程中可能生成artifact，executor通过artifact token上传至第三方服务；8）CI task执行完成后，executor通过task token向controller回报执行结果。
+
+image: gjj_images\qianxin\20240708_103545_269030\Untitled-1.png
+
+在复杂的CI task执行过程中，多种类型的token被广泛用于不同组件之间的授权。然而，安全风险随之而来：一方面，这些token的权限是否遵循最小权限原则？另一方面，如果CI task执行的代码不可信，这些token是否可被attacker窃取？论文分析了多种潜在的token泄漏风险：1）将token设置为环境变量；2）将token明文写入文件；3）将token存入内存，但attacker可任意读取该进程的内存。
+
+image: gjj_images\qianxin\20240708_103545_269030\Untitled-2.png
+
+论文通过实验发现，所有的7个CI平台都存在token泄漏风险：1）所有的CI平台均泄漏了task token。这是由于CI平台均将task token传入executor，而executor可能会执行来自attacker的代码；2）同样传入executor的deploy token也容易泄漏；3）除了GitLab CI外，其他6个平台均泄漏了runner registration token；4）所有的CI平台均会泄漏artifact token。详细的泄漏情况，以及泄漏方式如下表所示：
+
+image: gjj_images\qianxin\20240708_103545_269030\Untitled-3.png
+
+论文还发现了部分CI平台的token存在over-privilege问题。例如，TeamCity和Jenkins的deploy token的权限，不止被授予了当前repo_1的读/写权限，还被授予了repo_1的owner具备访问权限的所有repositories的读/写权限，这就意味着一旦deploy token泄漏，attacker可窃取其它repository的源代码。此外，TravisCI、CircleCI和Jenkins的artifact token并未正确遵循WORM（write-once-read-many）模型，该token一旦泄漏则可能被attack用于篡改已发布的artifact。论文还分析了CI平台存在的token复用和token有效期过长的问题。
+基于发现的问题，论文提出了四种新的攻击方式。攻击者可利用这些攻击窃取源代码、篡改CI task执行结果等。1）Task Hijacking Attack。攻击者通过窃取runner registration token，将一台attacker控制的host注册成为runner（即malicious runner），随后等待controller将新的CI task分发给malicious runner，从而窃取项目源码、窃取CI secrets等；2）Repository Privilege Escalation Attack。Attacker窃取over-privileged deploy token，并通过这些token窃取其不具备访问权限的项目的源代码；3）Task Result Hijacking Attack。CI task的执行结果往往被用来判断是否能够进行代码合并、是否能够发布release等。例如，GitHub提供了一项安全特性，仅当CI task执行成功时才允许pull request的代码合并。然而，论文发现利用泄漏的task token，attacker可任意篡改CI task执行结果，乃至CI task执行日志，使得恶意的pull request可绕过基于CI task执行结果的安全检查；4）Artifact Hijacking Attack。攻击者可通过窃取over-privileged artifact token，对已发布的artifact进行篡改，如植入恶意代码等。论文通过对GitHub上169万个公开仓库的大规模测量分析，发现了大量受影响的项目，包括Google, Microsoft, NVIDIA, Apache等知名组织的项目。
+论文将发现的问题反馈至7个CI平台，均得到了确认，目前多个问题已经被修复。论文工作再次表明，软件供应链安全问题普遍存在，并且影响巨大，亟需引起软件开发过程各个环节参与者的关注和重视。
+论文研究工作是奇安信技术研究院“天问”软件供应链安全分析平台相关研究的一部分，“天问”平台网址：https://tianwen.qianxin.com/

