@@ -169,24 +169,6 @@ class LTMGPT:
             decode_segments.append(segment_text)
         return decode_segments[0]
 
-    # 分割第一步的输出
-    def devide_output(self, input_str):
-        # 使用正则表达式从输入字符串中提取 replaced text
-        replaced_text = re.search(r'replaced text:\s*"(.+?)"', input_str, re.DOTALL)
-        if replaced_text:
-            replaced_text = replaced_text.group(1).strip()
-        else:
-            replaced_text = ""
-
-        # 使用正则表达式从输入字符串中提取 extracted entity
-        extracted_entity = re.search(r'extracted entity:(.*)', input_str, re.DOTALL)
-        if extracted_entity:
-            extracted_entity = extracted_entity.group(1).strip()
-        else:
-            extracted_entity = ""
-
-        return replaced_text, extracted_entity
-
     def azure_query(self, message_text, max_tokens):
         max_tokens = 16000
         wait_time = 10
@@ -304,18 +286,22 @@ class LTMGPT:
             print(f"Processing: {file_name}")
             self.process_content(txt_content, json_file_path)
 
-    def start1(self, source_dir):
-        file_name = "rhisac/20240708_171646_556576.txt"
-        # 生成对应 JSON 文件路径
-        json_file_name = file_name.replace(".txt", "")
-        json_file_path = os.path.join(self.json_dir, self.source_dir, json_file_name)
-        txt_content = self.read_txt(os.path.join(self.content_dir, self.source_dir, file_name))  # 读取文本内容
-        print(f"Processing: {file_name}")
-        self.process_content(txt_content, json_file_path)
+    # source_dir: "(Json/)case"
+    # self.json_dir: "Json/"
+    # case_dir: "Case"
+    def case_test(self, source_dir):
+        case_dir = "../../Dataset/Case/"
+        # 遍历 Case 目录中所有文件
+        for file_name in os.listdir(case_dir):
+            # 生成对应 JSON 文件路径
+            json_file_name = file_name.replace(".txt", "")
+            json_file_path = os.path.join(self.json_dir, source_dir, json_file_name)
+            txt_content = self.read_txt(os.path.join(case_dir, file_name))  # 读取文本内容
+            print(f"Processing: {file_name}")
+            self.process_content(txt_content, json_file_path)
 
 
 if __name__ == '__main__':
     # 使用示例
     ltmgpt = LTMGPT()
-    ltmgpt.start1("rhisac")
-    # datadoghq phylum snyk socket
+    ltmgpt.case_test("case")
