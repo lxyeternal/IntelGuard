@@ -31,7 +31,7 @@ class RedditCollect:
         self.post_link_list = []
 
     def post_links(self):
-        with open('pagelinks/malicious-Reddit-Search.csv', 'r') as f:
+        with open('pagelinks/malicious-Reddit-Search.csv', 'a') as f:
             csvreader = csv.reader(f)
             # 跳过第一行
             next(csvreader)
@@ -65,20 +65,17 @@ class RedditCollect:
         # 搜索关键词
         query = 'malicious'
         # 执行搜索
-        search_results = subreddit.search(query, sort='Relevance', limit=100)  # 你可以调整 sort 和 limit 参数
+        search_results = subreddit.search(query, sort='Relevance', limit=200)  # 你可以调整 sort 和 limit 参数
         # 遍历搜索结果，打印每个帖子的标题和链接
         for post in search_results:
             post_url = post.url
             post_title = post.title
             created_time = datetime.utcfromtimestamp(post.created_utc)  # 将 Unix 时间戳转换为 UTC datetime
-            print(post_title)  # 打印帖子的标题
-            print(post_url)
-            print(created_time)  # 打印帖子的创建时间
 
 
 
 
 if __name__ == '__main__':
     reddit = RedditCollect()
-    reddit.post_collect()
+    # reddit.post_collect()
     # reddit.post_search()

@@ -915,8 +915,6 @@ class WebPageContent:
 if __name__ == '__main__':
     webpage_content = WebPageContent()
     webpage_content.read_txt()
-
-    # webpage_content.aabbcc_content()
     # webpage_content.qianxin_content()
     # webpage_content.jfrog_content()
     # webpage_content.phylum_content()
@@ -938,4 +936,3 @@ if __name__ == '__main__':
     # webpage_content.checkmax_content()
     # webpage_content.medium_content()
     # webpage_content.medium_recommand_content()
-    webpage_content.aabbcc_content()

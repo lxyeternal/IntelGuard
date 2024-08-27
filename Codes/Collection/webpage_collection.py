@@ -11,11 +11,8 @@
 """
 
 import os
-import re
 import csv
-import sys
 import praw
-# csv.field_size_limit(sys.maxsize)
 import time
 import requests
 from bs4 import BeautifulSoup
@@ -45,22 +42,22 @@ class WebPageCollection:
         self.datadoghq = "https://securitylabs.datadoghq.com/articles"
         self.qianxin = "https://tianwen.qianxin.com/blog/page/{}/"
         self.phylum = "https://blog.phylum.io/page/{}/"
-        self.snyk = "https://snyk.io/blog/?tag=open-source-security&page={}"
+        self.snyk = "https://snyk.io/blog/?page={}&tag=open-source-security"
         self.reversinglabs = "https://www.reversinglabs.com/blog/tag/appsec-supply-chain-security/page/{}/"
         self.checkpoint = "https://research.checkpoint.com/intelligence-reports/page/{}/"
         self.fortinet = "https://www.fortinet.com/blog/threat-research"
-        self.securityaffairs = "https://securityaffairs.com/tag/pypi/page/{}"
+        self.securityaffairs = "https://securityaffairs.com/tag/npm/page/{}"
         self.rhisac = "https://rhisac.org/blog/page/{}/"
         self.collected_webpage_txt = "./pagelinks/collected_pagelinks.txt"
         self.waiting_webpage_txt = "./pagelinks/waiting_collection.txt"
         self.old_webpage_dict = {}
-        self.chromedriver = os.path.join(project_dir, "utils/chromedriver/win32/chromedriver.exe")
+        self.chromedriver = os.path.join(project_dir, "Utils/chromedriver/macarm/chromedriver")
         self.service = Service(executable_path=self.chromedriver)
         self.options = webdriver.ChromeOptions()
         self.driver = webdriver.Chrome(service=self.service, options=self.options)
 
     def load_old_webpages(self):
-        with open(self.collected_webpage_txt) as txtfile:
+        with open(self.waiting_webpage_txt) as txtfile:
             urlslist = txtfile.readlines()
             for url in urlslist:
                 url_split = url.split("\t")
@@ -97,9 +94,9 @@ class WebPageCollection:
             txtfile.write(timestamp + "\t" + source + "\t" + datetime + "\t" + pageurl + "\n")
 
     def bleepingcomputer_blog(self):
-        for page_index in range(1, 4):
+        for page_index in range(1, 3):
             if page_index == 1:
-                pageurl = "https://www.bleepingcomputer.com/tag/npm/"
+                pageurl = "https://www.bleepingcomputer.com/tag/pypi/"
             else:
                 pageurl = self.bleepingcomputer.format(page_index)
             self.driver.get(pageurl)
@@ -108,12 +105,12 @@ class WebPageCollection:
             bc_latest_news = self.driver.find_element(By.ID, "bc-home-news-main-wrap")
             bc_latest_news_imgs = bc_latest_news.find_elements(By.CLASS_NAME, "bc_latest_news_text")
             for li_tag in bc_latest_news_imgs:
-                li_url = li_tag.find_elements(By.TAG_NAME, "a")[1].get_attribute("href").strip()
+                li_url = li_tag.find_elements(By.TAG_NAME, "a")[0].get_attribute("href").strip()
                 datetime_str = li_tag.find_element(By.CLASS_NAME, "bc_news_date").text.strip()
                 formatted_date = self.convert_date_format(datetime_str.lower())
-                if li_url not in self.old_webpage_dict.get("bleepingcomputer_pypi", []):
-                    self.write_txt("bleepingcomputer_pypi", formatted_date, li_url)
-                    print("bleepingcomputer_pypi", formatted_date, li_url)
+                if li_url not in self.old_webpage_dict.get("bleepingcomputer_oss", []):
+                    self.write_txt("bleepingcomputer_oss", formatted_date, li_url)
+                    print("bleepingcomputer_oss", formatted_date, li_url)
 
     def medium_blog(self):
         # 使用selenium的driver打开Medium网站
@@ -124,47 +121,63 @@ class WebPageCollection:
             time.sleep(2)  # 每次滚动后等待2秒，以便页面内容加载
 
         # 使用CSS选择器查找包含新闻的所有元素
-        news_rows = self.driver.find_element(By.CSS_SELECTOR, ".io.s")
+        news_rows = self.driver.find_element(By.CSS_SELECTOR, ".in.x")
         n_p_elements = news_rows.find_elements(By.CSS_SELECTOR, ".n.p")
 
         for news_row in n_p_elements:
             # 获取新闻链接的href属性
-            target_element = news_row.find_element(By.CSS_SELECTOR, ".s .m.s")
-            div_with_data_href = target_element.find_element(By.CSS_SELECTOR, 'div[data-href]')
-            news_href = div_with_data_href.get_attribute('data-href')
-            # 去除可能存在的查询参数，只保留基本的URL
-            # news_href = news_href.split("?source")[0].strip()
-            # 获取新闻发布日期的字符串，有的是 Aug 7，有的是 Oct 12, 2023 注意要规范化
-            datetime_label = div_with_data_href.find_element(By.CSS_SELECTOR, ".lj.n.lk.cn .n.o")
-            span_element = datetime_label.find_element(By.TAG_NAME, 'span')
-            datetime_str0 = span_element.text
-            # 格式化日期
-            if ',' not in datetime_str0:
-                datetime_str0 = datetime_str0 + ", 2024"
-            datetime_str = self.convert_date_format(datetime_str0)
-
-            # 如果新闻链接不在已记录的旧网页字典中
-            if news_href not in self.old_webpage_dict.get("medium", []):
-                # 将日期和链接写入文本文件
-                self.write_txt("medium", datetime_str, news_href)
-                # 打印日志信息
-                print("medium", datetime_str, news_href)
+            try:
+                target_element = news_row.find_element(By.CSS_SELECTOR, ".mf.m.x")
+                div_with_data_href = target_element.find_element(By.CSS_SELECTOR, 'div[data-href]')
+                news_href = div_with_data_href.get_attribute('data-href')
+                # 去除可能存在的查询参数，只保留基本的URL
+                # news_href = news_href.split("?source")[0].strip()
+                # 获取新闻发布日期的字符串，有的是 Aug 7，有的是 Oct 12, 2023 注意要规范化
+                datetime_label = div_with_data_href.find_element(By.CSS_SELECTOR, ".li.n.lj.cr .n.o")
+                span_element = datetime_label.find_element(By.TAG_NAME, 'span')
+                datetime_str0 = span_element.text
+                # 格式化日期
+                if "days ago" in datetime_str0 or "d ago" in datetime_str0:
+                    days_ago = int(datetime_str0.split()[0])
+                    specific_date = datetime.now() - timedelta(days=days_ago)
+                    formatted_date = specific_date.strftime('%Y-%m-%d')
+                else:
+                    try:
+                        # 处理格式如 "Feb 1" 的日期，将其转换为今年的日期
+                        specific_date = datetime.strptime(datetime_str0, '%b %d')
+                        specific_date = specific_date.replace(year=datetime.now().year)
+                        formatted_date = specific_date.strftime('%Y-%m-%d')
+                    except ValueError:
+                        try:
+                            # 处理格式如 "Sep 24, 2023" 的日期
+                            specific_date = datetime.strptime(datetime_str0, '%b %d, %Y')
+                            formatted_date = specific_date.strftime('%Y-%m-%d')
+                        except ValueError:
+                            # 处理其他格式的日期
+                            formatted_date = self.convert_date_format(datetime_str0)
+                # 如果新闻链接不在已记录的旧网页字典中
+                if news_href not in self.old_webpage_dict.get("medium", []):
+                    # 将日期和链接写入文本文件
+                    self.write_txt("medium", formatted_date, news_href)
+                    # 打印日志信息
+                    print("medium", formatted_date, news_href)
+            except:
+                pass
 
 
     def medium_recommand(self):
         page_url = "https://medium.com/tag/supply-chain-security/recommended"
         self.driver.get(page_url)
         self.driver.implicitly_wait(10)
-        for count in range(50):
+        for count in range(20):
             self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(2)
-        news_blogs = self.driver.find_elements(By.CSS_SELECTOR, ".bg.jd.je.jf.jg")
+        news_blogs = self.driver.find_elements(By.CSS_SELECTOR, ".jc.l")
         for news_blog in news_blogs:
-            news_url_div = news_blog.find_element(By.CSS_SELECTOR, ".l.er.ju")
-            news_url = news_url_div.find_element(By.TAG_NAME, "a").get_attribute("href").strip().split("?source")[
-                0].strip()
+            news_url_div = news_blog.find_element(By.CSS_SELECTOR, ".l.es.jy")
+            news_url = news_url_div.find_element(By.TAG_NAME, "a").get_attribute("href").strip().split("?source")[0].strip()
             # datetime_str = news_blog.find_element(By.CSS_SELECTOR, ".lg.lh.li.lj.lk.ab.q").text.strip()
-            datetime_str = news_blog.find_element(By.CSS_SELECTOR, ".lg.db.lh.dd.li.df.lk.ll .ab").text.strip()
+            datetime_str = news_blog.find_element(By.CSS_SELECTOR, ".lr.ab.dv.ae").text.strip()
             datetime_str_split = datetime_str.split("\n")[0].strip().lower()
             # 判断日期格式并转换
             if "days ago" in datetime_str_split or "d ago" in datetime_str_split:
@@ -222,42 +235,29 @@ class WebPageCollection:
                     pass
 
     def sonatype_oss_blog(self):
-        blog_url = "https://blog.sonatype.com/topic/everything-open-source/page/{}"
-        for page_index in range(12):
+        blog_url = "https://www.sonatype.com/blog/tag/everything-open-source?category=all&type=blog&page={}#resource-grid"
+        for page_index in range(15):
             page_url = blog_url.format(page_index)
             response = requests.get(page_url, headers=HEADER)
             soup = BeautifulSoup(response.text, 'html.parser')
-            blog_section = soup.find_all(class_='blog-section')[1]
-            row_fluids = blog_section.find_all(class_='row-fluid')
-            for row_fluid in row_fluids:
-                listing_boxs = row_fluid.find_all("div", class_="span4 listing-box")
-                for listing_box in listing_boxs:
-                    boxs_behind = listing_box.find(class_="behind")
-                    a_tag = boxs_behind.find('a', class_='hs-featured-image-link')
-                    datetime_str = listing_box.find("div", class_="hubspot-editable").text.strip()
-                    date_pattern = r"\b(\w+)\s+(\d{1,2}),\s+(\d{4})\b"
-                    match = re.search(date_pattern, datetime_str)
-                    formatted_date = "None"
-                    if match:
-                        # 提取年、月、日
-                        month = match.group(1)
-                        day = match.group(2)
-                        year = match.group(3)
-                        # 构建日期字符串
-                        date_string = f"{month} {day}, {year}".lower()
-                        formatted_date = self.convert_date_format(date_string)
-                    if a_tag:
-                        href_value = a_tag.get('href').strip()
-                        if href_value not in self.old_webpage_dict.get("sonatype_oss", []):
-                            self.write_txt("sonatype_oss", formatted_date, href_value)
-                            print("sonatype_oss", formatted_date, href_value)
-                    else:
-                        pass
+            row_fluids = soup.find(class_='resources mt-5')
+            others = row_fluids.find_all(class_='resource-card col-12 col-md-12 col-lg-4 mb-3')
+            rows = row_fluids.find_all(class_='row')
+            for row_fluid in others:
+                try:
+                    link_div = row_fluid.find(class_="resource-title h4 my-3")
+                    href_value = link_div.find('a').get('href')
+                    if href_value not in self.old_webpage_dict.get("sonatype_oss", []):
+                        self.write_txt("sonatype_oss", "None", href_value)
+                        print("sonatype_oss", "None", href_value)
+                except:
+                    pass
+
 
     def checkmarx_blog(self):
         self.driver.get(self.checkmarx)
         # 模拟滚动到页面底部的JavaScript代码
-        for _ in range(5):
+        for _ in range(30):
             try:
                 # 等待并点击“加载更多”按钮
                 load_more_link = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".pagination-show-more a")))
@@ -323,7 +323,7 @@ class WebPageCollection:
         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         count = 0
         # while True:
-        while count < 10:
+        while count < 50:
             try:
                 self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 # 查找"Next"按钮并等待它可点击
@@ -388,6 +388,7 @@ class WebPageCollection:
             recent_post_items = soup.find_all("article", class_="recent-post-item")
             for item in recent_post_items:
                 formatted_date = item.find('time', class_='time').get('datetime')
+                formatted_date = formatted_date.split("T")[0]
                 href_value = item.find("a", class_="title").get('href')
                 full_link = "https://tianwen.qianxin.com" + href_value
                 if full_link not in self.old_webpage_dict.get("qianxin", []):
@@ -396,11 +397,12 @@ class WebPageCollection:
 
 
     def snyk_blog(self):
-        for page_index in range(1, 10):
+        for page_index in range(1, 28):
             page_url = self.snyk.format(page_index)
             resource = requests.get(page_url, headers=HEADER)
             soup = BeautifulSoup(resource.text, 'html.parser')
-            news_blogs = soup.find_all("div", class_="w-full marg-h-auto p-relative h-full")
+            news_container = soup.find("div", class_="brandui-container")
+            news_blogs = news_container.find_all('div', attrs={'data-component': 'Media Card'})
             for news_blog in news_blogs:
                 datetime_str = news_blog.find("p", class_="txt-body txt-color-body txt-line-clamp-4").text.strip().lower()
                 formatted_date = self.convert_date_format(datetime_str)
@@ -429,7 +431,7 @@ class WebPageCollection:
 
     def fortinet_blog(self):
         self.driver.get(self.fortinet)
-        flag = 20
+        flag = 30
         while flag:
             flag -= 1
             try:
@@ -454,7 +456,7 @@ class WebPageCollection:
 
 
     def phylum_blog(self):
-        for page_index in range(1, 10):
+        for page_index in range(1, 28):
             page_url = self.phylum.format(page_index)
             response = requests.get(page_url, headers=HEADER)
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -469,7 +471,7 @@ class WebPageCollection:
 
 
     def reversinglabs_blog(self):
-        for page_index in range(1, 10):
+        for page_index in range(1, 24):
             page_url = self.reversinglabs.format(page_index)
             response = requests.get(page_url, headers=HEADER)
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -516,7 +518,7 @@ class WebPageCollection:
                     print("cybersecuritynews", str(formatted_date), article_link)
 
     def rhisac_blog(self):
-        for page_index in range(1, 20):
+        for page_index in range(1, 83):
             page_url = self.rhisac.format(page_index)
             response = requests.get(page_url, headers=HEADER)
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -532,7 +534,7 @@ class WebPageCollection:
 
 
     def checkpoint_blog(self):
-        for page_index in range(1, 5):
+        for page_index in range(1, 81):
             page_url = self.checkpoint.format(page_index)
             response = requests.get(page_url, headers=HEADER)
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -557,18 +559,21 @@ class WebPageCollection:
             client_secret=self.client_secret,  # 替换为你的客户端密钥
             user_agent='SCC'  # 替换为你的用户代理字符串
         )
-        with open("./pagelinks/malicious-Reddit-Search.csv", "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                url_link = row[1].strip()
-                try:
-                    submission = self.reddit.submission(url=url_link)
-                    # 打印帖子的创建时间
-                    created_time = datetime.utcfromtimestamp(submission.created_utc)
-                    formatted_date = created_time.strftime('%Y-%m-%d')
-                except:
-                    formatted_date = "None"
-                self.write_txt("reddit", formatted_date, url_link)
+        # 指定搜索的子版块
+        subreddit = self.reddit.subreddit('Python')
+        # 搜索关键词
+        query = 'malicious'
+        # 执行搜索
+        search_results = subreddit.search(query, sort='Relevance', limit=200)  # 你可以调整 sort 和 limit 参数
+        # 遍历搜索结果，打印每个帖子的标题和链接
+        for post in search_results:
+            post_url = post.url
+            post_title = post.title
+            created_time = datetime.utcfromtimestamp(post.created_utc)  # 将 Unix 时间戳转换为 UTC datetime
+            formatted_date = created_time.strftime('%Y-%m-%d')  # 格式化日期
+            if post_url not in self.old_webpage_dict.get("reddit", []):
+                self.write_txt("reddit", formatted_date, post_url)
+                print("reddit", formatted_date, post_url)
 
 
 
@@ -585,7 +590,7 @@ if __name__ == '__main__':
     # webpagecollection.checkmarx_blog()
     # webpagecollection.sonatype_oss_blog()
     # webpagecollection.sonatype_blog()
-    # webpagecollection.bleepingcomputer_blog()
+    webpagecollection.bleepingcomputer_blog()
     # webpagecollection.securityaffairs_blog()
     # webpagecollection.fortinet_blog()
     # webpagecollection.phylum_blog()
