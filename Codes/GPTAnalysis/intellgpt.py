@@ -19,19 +19,19 @@ import openai  # 0.28.1
 import tiktoken
 
 
-class LTMGPT:
+class IntelliLLM:
     def __init__(self):
         self.source_dir = ""
         current_dir = os.path.dirname(__file__)
         codes_dir = os.path.dirname(current_dir)
         project_dir = os.path.dirname(codes_dir)
-        self.json_dir = os.path.join(project_dir, "Dataset", "Json")
+        self.json_dir = os.path.join(project_dir, "Dataset", "IntelliJson")
         self.content_dir = os.path.join(project_dir, "Dataset", "Content")
-        self.entity_file_easy = os.path.join(current_dir, "EntityRules", "entity-4")
-        self.entity_file_complex = os.path.join(current_dir, "EntityRules", "entity-5")
-        self.entity_easy_prompt_path = os.path.join(current_dir, "LtM_prompts", "easy_extract")
-        self.entity_complex_prompt_path = os.path.join(current_dir, "LtM_prompts", "complex_extract")
-        self.info_verify_prompt_path = os.path.join(current_dir, "LtM_prompts", "infoverify")
+        self.entity_file_easy = os.path.join(current_dir, "EntityRules", "intelli_entity-4")
+        self.entity_file_complex = os.path.join(current_dir, "EntityRules", "intelli_entity-5")
+        self.entity_easy_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_easy_extract")
+        self.entity_complex_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_complex_extract")
+        self.info_verify_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_entity_verify")
         self.entity_easy_prompt = self.read_file(self.entity_easy_prompt_path)
         self.entity_complex_prompt = self.read_file(self.entity_complex_prompt_path)
         self.info_verify_prompt = self.read_file(self.info_verify_prompt_path)
@@ -254,5 +254,5 @@ class LTMGPT:
 
 if __name__ == '__main__':
     # 使用示例
-    ltmgpt = LTMGPT()
+    ltmgpt = IntelliLLM()
     ltmgpt.case_test("case")
