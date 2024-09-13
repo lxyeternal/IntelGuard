@@ -29,16 +29,20 @@ stop_words = set(stopwords.words('english'))
 class IntelliLLM:
     def __init__(self):
         self.source_dir = ""
-        self.json_dir = "../../Dataset/Json/"
+        self.json_dir = "../../Dataset/IntelliJson/"
         self.content_dir = "../../Dataset/Content/"
         self.entity_file_easy = "./EntityRules/intelli_entity-4"
         self.entity_file_complex = "./EntityRules/intelli_entity-5"
+        self.functionality_file = "./functionality_list"
+        self.exoutput_file = "./Exoutput/intelli_output2"
         # self.common_words_file = "../../archive/words.txt"
         self.entityextract_prompt1 = ""
         self.entityextract_prompt2 = ""
         self.infoverify_prompt = ""
         self.easy_entity = ""
         self.complex_entity = ""
+        self.functionality_list = ""
+        self.exoutput = ""
         self.common_words = set()
         self.dealt_pkgs = list()
         self.regex = r"(?:@[a-zA-Z0-9\-]+\/)?[a-zA-Z0-9][a-zA-Z0-9\._\-]+"
@@ -58,12 +62,16 @@ class IntelliLLM:
             prompt = file.read()
         return prompt
 
-    # 读取实体规则文件内容
+    # 读取实体规则和功能列表
     def read_entity(self):
         with open(self.entity_file_easy, 'r', encoding='utf-8') as file:
             self.easy_entity = file.read()
         with open(self.entity_file_complex, 'r', encoding='utf-8') as file:
             self.complex_entity = file.read()
+        with open(self.functionality_file, 'r', encoding='utf-8') as file:
+            self.functionality_list = file.read()
+        with open(self.exoutput_file, 'r', encoding='utf-8') as file:
+            self.exoutput = file.read()
 
     # # 加载常见词汇到集合中
     # def load_common_words(self):
@@ -212,7 +220,7 @@ class IntelliLLM:
         # self.easy_entity 简单实体
         # self.entityextract_prompt1 提示词
         message_text = [
-            {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
+            {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
             {"role": "user", "content": "[**content**]:\n" + content + "\n\n[**entity description**]:\n" + self.easy_entity + "\n\n" + self.entityextract_prompt1 + "\n\n"}  # prompt-4
         ]
         # 调用 azure_query 发送请求并获取提取的实体
@@ -233,8 +241,8 @@ class IntelliLLM:
         # self.complex_entity 复杂实体
         # self.entityextract_prompt2 提示词
         message_text = [
-            {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
-            {"role": "user", "content": "[**content**]:\n" + content + "\n\n[**extracted entities**]:\n" + extracted_entity + "\n\n[**entity description**]:\n" + self.complex_entity + "\n\n" + self.entityextract_prompt2 + "\n\n"}
+            {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
+            {"role": "user", "content": "[**content**]:\n" + content + "\n\n[**extracted entities**]:\n" + extracted_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n[**example output**]:\n" + self.exoutput + "\n\n[**entity description**]:\n" + self.complex_entity + "\n\n" + self.entityextract_prompt2 + "\n\n"}
         ]
         complex_entity = self.azure_query(message_text, max_tokens)
         return complex_entity
@@ -286,8 +294,8 @@ class IntelliLLM:
             print(f"Processing: {file_name}")
             self.process_content(txt_content, json_file_path)
 
-    # source_dir: "(Json/)case"
-    # self.json_dir: "Json/"
+    # source_dir: "(IntelliJson/)case"
+    # self.json_dir: "IntelliJson/"
     # case_dir: "Case"
     def case_test_all(self, source_dir):
         case_dir = "../../Dataset/Case/"
