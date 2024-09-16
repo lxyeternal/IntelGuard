@@ -312,7 +312,7 @@ class IntelliLLM:
 
     def case_test_single(self, source_dir):
         case_dir = "../../Dataset/Case/"
-        file_name = "thehackernews_case.txt"
+        file_name = "cybersecuritynews_20240708_171638_920166.txt"
 
         json_file_name = file_name.replace(".txt", "")
         json_file_path = os.path.join(self.json_dir, source_dir, json_file_name)
@@ -320,7 +320,9 @@ class IntelliLLM:
         print(f"Processing: {file_name}")
         self.process_content(txt_content, json_file_path)
 
+
 if __name__ == '__main__':
     # 使用示例
     ltmgpt = IntelliLLM()
-    ltmgpt.case_test_all("case")
+    # ltmgpt.case_test_all("case")
+    ltmgpt.case_test_single("case")
