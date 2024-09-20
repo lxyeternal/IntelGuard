@@ -1,0 +1,292 @@
+
+The Phylum Research Team has reported on emerging threat campaigns and on novel techniques threat actors are using when writing malware hosted on open source package repositories. No matter how unique these attacks appear, they still only work if they can get a victim to run the code. More times than not, that comes back to simple techniques like typosquatting or dependency confusion. It might even just be a "random" package that does not appear to be related to anything, like the onyxproxy package that was discovered using unicode normalization in the Python parser to evade simple detection heuristics.
+
+A common remark seen in response to these research findings is "I don't even know how or why someone would install onyxproxy." This post will show how bad packages can be slipped into lockfiles without a corresponding entry or change in the manifest.
+The scheme here uses Python packages, the Poetry dependency management tool, and its poetry.lock lockfile to illustrate the point. After all, April was National Poetry Month in the United States and the annual Python developer's conference, PyCon, just ended.
+Opening Stanza
+Dependency manifest files are used to specify the direct dependencies of your library or application. Package management tools, like poetry, can then take a manifest as input to produce a lockfile as output. Poetry makes use of pyproject.toml as the manifest and then resolves the full dependency graph to generate poetry.lock as the lockfile.
+If you didn't already know, lockfiles are worth using. There are many to choose from in the Python ecosystem, which were covered in a previous blog post. Basically, lockfiles are important because they allow for repeatable and deterministic installations. Even though it was rejected, PEP 665 reminds us that reproducibility is more secure:
+Hmm...certain risks, you say? There are three common ways malicious code in a Python package can gain execution:
+
+During package installation
+
+Code inserted in a top-level setup.py will run when a package is installed from a source distribution
+
+Code inserted in a top-level setup.py will run when a package is installed from a source distribution
+During package or module import
+
+Code inserted in an __init__.py file will run when the corresponding package or module is imported
+
+Code inserted in an __init__.py file will run when the corresponding package or module is imported
+By calling a function
+
+An expected function may be trojanized with additional, malicious, side effects
+
+An expected function may be trojanized with additional, malicious, side effects
+There are other techniques but they are less common. There is a package on PyPI that helps to demonstrate the first two methods: purposefully-malicious. Despite the name, the package merely writes a benign file to disk, with a message proving that the code ran simply by installing the package or by importing it. This package will serve as the villanelle, something that sounds bad, but is really just a poetic form with a particular structure educators use to teach poetry. The package is used here to demonstrate the technique of adding malware to a lockfile.
+purposefully-malicious
+How to Slam Poetry
+For this demo, an attempt is made to inject purposefully-malicious into the phylum-ci repository since it makes use of Poetry for package and workflow management. The latest version of poetry and poetry-core is used, as of the time of writing:
+❯ poetry --version
+Poetry (version 1.4.2)
+
+❯ poetry self show | grep poetry-core
+poetry-core          1.5.2     Poetry PEP 517 Build Backend
+The first step is to get the content-hash of the poetry.lock file before making any changes:
+❯ grep 'content-hash' poetry.lock
+content-hash = "f3453c1dca3d0f6c94b85f0be3883a0af6e135b8172f316f998d42385a271d9f"
+Then, add the purposefully-malicious package to the lockfile:
+❯ poetry add --lock "purposefully-malicious==*"
+Creating virtualenv phylum in /Users/maxrake/dev/phylum/phylum-ci/.venv
+
+Updating dependencies
+Resolving dependencies... (3.7s)
+
+Writing lock file
+This added an entry to the pyproject.toml manifest and updated the poetry.lock lockfile to include a fully updated and resolved set of dependencies, as well as the purposefully-malicious package. Since updates to the manifest are very obvious in code reviews, that entry needs to be reverted:
+❯ git diff pyproject.toml
+diff --git a/pyproject.toml b/pyproject.toml
+index a5f5fde..fd5b946 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -52,6 +52,7 @@ packaging = "*"
+ "ruamel.yaml" = "*"
+ pathspec = "*"
+ rich = "*"
++purposefully-malicious = "*"
+
+ [tool.poetry.group.test]
+ optional = true
+
+❯ git diff poetry.lock | grep -B5 -A3 'purposefully-malicious'
+@@ -935,6 +935,17 @@ nodeenv = ">=0.11.1"
+ pyyaml = ">=5.1"
+ virtualenv = ">=20.10.0"
+
++[[package]]
++name = "purposefully-malicious"
++version = "1.0.1"
++description = "Demonstrates what a malicious PyPI package could do to you :O"
++category = "main"
++optional = false
++python-versions = ">=3.6"
++files = [
++    {file = "purposefully-malicious-1.0.1.tar.gz", hash = "sha256:2bf0bee5c919f6092bdf4db27c1b8e371565dce8923e404872dd60c1851d8d7c"},
++]
++
+ [[package]]
+
+❯ git restore pyproject.toml
+Without a matching entry in pyproject.toml, poetry will complain when performing a check of the lockfile:
+❯ poetry lock --check
+Error: poetry.lock is not consistent with pyproject.toml. Run `poetry lock [--no-update]` to fix it.
+Instead of following the advice in the error output, manually update the lockfile's content-hash to the previous value so the check will once again succeed:
+❯ grep 'content-hash' poetry.lock
+content-hash = "778020df9f06c7f5c968f71e0bbeebe4447b5888e89d78e0b0f99517086ae823"
+
+❯ sed -i '' -e 's/778020df9f06c7f5c968f71e0bbeebe4447b5888e89d78e0b0f99517086ae823/f3453c1dca3d0f6c94b85f0be3883a0af6e135b8172f316f998d42385a271d9f/' poetry.lock
+
+❯ grep 'content-hash' poetry.lock
+content-hash = "f3453c1dca3d0f6c94b85f0be3883a0af6e135b8172f316f998d42385a271d9f"
+
+❯ poetry lock --check
+poetry.lock is consistent with pyproject.toml.
+The last thing to do to the lockfile is to add purposefully-malicious as a dependency of a main requirement, to ensure it will be installed with the project. Look for the top-level dependencies (i.e., those that will be installed when the project is, regardless of the group(s) that are specified) and select one where the addition is less likely to get noticed.
+❯ poetry show --tree
+cryptography 40.0.2 cryptography is a package which provides cryptographic recipes and primitives to Python developers.
+└── cffi >=1.12
+    └── pycparser *
+packaging 23.1 Core utilities for Python packages
+pathspec 0.11.1 Utility library for gitignore style pattern matching of file paths.
+requests 2.29.0 Python HTTP for Humans.
+├── certifi >=2017.4.17
+├── charset-normalizer >=2,<4
+├── idna >=2.5,<4
+└── urllib3 >=2.21.1,<1.27
+rich 12.6.0 Render rich text, tables, progress bars, syntax highlighting, markdown and more to the terminal
+├── commonmark >=0.9.0,<0.10.0
+├── pygments >=2.6.0,<3.0.0
+└── typing-extensions >=4.0.0,<5.0
+ruamel-yaml 0.17.21 ruamel.yaml is a YAML parser/emitter that supports roundtrip preservation of comments, seq/map flow style, and map key order
+└── ruamel-yaml-clib >=0.2.6
+
+# `requests` already has at least one dependency, which means adding another
+# will only add one line. Plus, it's dependencies were updated as part of the
+# resolution process so it looks like just another one, to get lost in the noise.
+
+❯ vim poetry.lock
+
+# Add the line `purposefully-malicious = ">=1.0.1"` to the
+# `[package.dependencies]` table of the `requests` package
+
+❯ poetry show --tree
+cryptography 40.0.2 cryptography is a package which provides cryptographic recipes and primitives to Python developers.
+└── cffi >=1.12
+    └── pycparser *
+packaging 23.1 Core utilities for Python packages
+pathspec 0.11.1 Utility library for gitignore style pattern matching of file paths.
+requests 2.29.0 Python HTTP for Humans.
+├── certifi >=2017.4.17
+├── charset-normalizer >=2,<4
+├── idna >=2.5,<4
+├── purposefully-malicious >=1.0.1
+└── urllib3 >=1.21.1,<1.27
+rich 12.6.0 Render rich text, tables, progress bars, syntax highlighting, markdown and more to the terminal
+├── commonmark >=0.9.0,<0.10.0
+├── pygments >=2.6.0,<3.0.0
+└── typing-extensions >=4.0.0,<5.0
+ruamel-yaml 0.17.21 ruamel.yaml is a YAML parser/emitter that supports roundtrip preservation of comments, seq/map flow style, and map key order
+└── ruamel-yaml-clib >=0.2.6
+With that, poetry.lock has been surreptitiously updated to add the purposefully-malicious package, and with only twelve additional lines:
+❯ git diff poetry.lock | grep -B5 -A3 'purposefully-malicious'
+@@ -935,6 +935,17 @@ nodeenv = ">=0.11.1"
+ pyyaml = ">=5.1"
+ virtualenv = ">=20.10.0"
+
++[[package]]
++name = "purposefully-malicious"
++version = "1.0.1"
++description = "Demonstrates what a malicious PyPI package could do to you :O"
++category = "main"
++optional = false
++python-versions = ">=3.6"
++files = [
++    {file = "purposefully-malicious-1.0.1.tar.gz", hash = "sha256:2bf0bee5c919f6092bdf4db27c1b8e371565dce8923e404872dd60c1851d8d7c"},
++]
++
+ [[package]]
+--
+ [package.dependencies]
+ certifi = ">=2017.4.17"
+ charset-normalizer = ">=2,<4"
+ idna = ">=2.5,<4"
+-urllib3 = ">=1.21.1,<1.27"
++purposefully-malicious = ">=1.0.1"
++urllib3 = ">=2.21.1,<1.27"
+
+ [package.extras]
+The lockfile, with both its good and bad changes, can now be used to install an environment:
+❯ poetry install --sync
+Creating virtualenv phylum in /Users/maxrake/dev/phylum/phylum-ci/.venv
+Installing dependencies from lock file
+
+Package operations: 15 installs, 0 updates, 2 removals
+
+  • Removing setuptools (67.7.2)
+  • Removing wheel (0.40.0)
+  • Installing pycparser (2.21)
+  • Installing certifi (2022.12.7)
+  • Installing cffi (1.15.1)
+  • Installing charset-normalizer (3.1.0)
+  • Installing commonmark (0.9.1)
+  • Installing idna (3.4)
+  • Installing purposefully-malicious (1.0.1): Failed
+
+  ChefBuildError
+
+  Backend subprocess exited when trying to invoke get_requires_for_build_wheel
+
+  Traceback (most recent call last):
+    File "/Users/maxrake/.local/pipx/venvs/poetry/lib/python3.11/site-packages/pyproject_hooks/_in_process/_in_process.py", line 353, in 
+      main()
+    File "/Users/maxrake/.local/pipx/venvs/poetry/lib/python3.11/site-packages/pyproject_hooks/_in_process/_in_process.py", line 335, in main
+      json_out['return_val'] = hook(**hook_input['kwargs'])
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/Users/maxrake/.local/pipx/venvs/poetry/lib/python3.11/site-packages/pyproject_hooks/_in_process/_in_process.py", line 118, in get_requires_for_build_wheel
+      return hook(config_settings)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/var/folders/gh/wnf14j7n4q34y2t36hq2jz800000gn/T/tmp1klkcb4e/.venv/lib/python3.11/site-packages/setuptools/build_meta.py", line 341, in get_requires_for_build_wheel
+      return self._get_build_requires(config_settings, requirements=['wheel'])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/var/folders/gh/wnf14j7n4q34y2t36hq2jz800000gn/T/tmp1klkcb4e/.venv/lib/python3.11/site-packages/setuptools/build_meta.py", line 323, in _get_build_requires
+      self.run_setup()
+    File "/var/folders/gh/wnf14j7n4q34y2t36hq2jz800000gn/T/tmp1klkcb4e/.venv/lib/python3.11/site-packages/setuptools/build_meta.py", line 488, in run_setup
+      self).run_setup(setup_script=setup_script)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/var/folders/gh/wnf14j7n4q34y2t36hq2jz800000gn/T/tmp1klkcb4e/.venv/lib/python3.11/site-packages/setuptools/build_meta.py", line 338, in run_setup
+      exec(code, locals())
+    File "", line 6, in 
+    File "/Users/maxrake/.pyenv/versions/3.11.3/lib/python3.11/pathlib.py", line 1116, in mkdir
+      os.mkdir(self, mode)
+  OSError: [Errno 30] Read-only file system: '/temp'
+
+
+  at ~/.local/pipx/venvs/poetry/lib/python3.11/site-packages/poetry/installation/chef.py:152 in _prepare
+      148│
+      149│                 error = ChefBuildError("\n\n".join(message_parts))
+      150│
+      151│             if error is not None:
+    → 152│                 raise error from None
+      153│
+      154│             return path
+      155│
+      156│     def _prepare_sdist(self, archive: Path, destination: Path | None = None) -> Path:
+
+Note: This error originates from the build backend, and is likely not a problem with poetry but with purposefully-malicious (1.0.1) not supporting PEP 517 builds. You can verify this by running 'pip wheel --use-pep517 "purposefully-malicious (==1.0.1)"'.
+
+  • Installing pygments (2.15.1)
+  • Installing urllib3 (1.26.15)
+Hmm...it didn't work...but not for lack of trying. The purposefully-malicious "payload" attempted to create a file in the /temp directory, which resulted in an error on the macOS system used for this demo:
+OSError: [Errno 30] Read-only file system: '/temp'
+This is proof that the code in the setup.py file of purposefully-malicious ran. A truly malicious package would likely be tested against the target environment to be more silent and stealthy. The lockfile changes are good in that they do not cause poetry to recognize a mis-match between the manifest and the lockfile.
+Can a Linguist Review Beat Poetry?
+The real trick is in getting those new lockfile lines to pass through a code review as part of a larger pull request (PR). Thankfully, GitHub will help us there with their linguist library, another good fit with the poetry theme!
+The changes to the lockfile are added to a normal PR that offers a clear benefit:
+Nothing unusual going on here. The dependencies were updated like any good open source citizen would do! When going to review the files, the poetry.lock file has been collapsed by GitHub, with a message about how "Large diffs are not rendered by default."
+In this case the diff is 490 lines, which is not unusual for lockfiles. In fact, it might even be considered small compared to other ecosystems! It turns out that size does not matter. The diff could have been a single line and the file would still show in its "collapsed" form with a link to load/expand it.
+This is because GitHub uses a library named linguist to "Detect blob languages, ignore binary or vendored files, suppress generated files in diffs, and generate language breakdown graphs." There are some generated code files that linguist detects and suppresses by default. These are defined in generated.rb and cover many lockfiles, including poetry.lock.
+If this all seems a bit too convenient for threat actors, that is because it is. Warnings identifying the security implications date back to 2018:
+yarn.lock
+package.json
+Still, some reviewers might be curious and will click to load the diff:
+It would take a bit of scrolling and a keen eye to find the untethered additional package or the entry that causes it to be installed when the project is:
+Now, imagine that the malicious package was not named as obviously as this. Would onyxproxy raise any suspicions by a reviewer combing over hundreds of lines of lockfile changes? How about crpytography or python3-dateutil or jeIlyfish? These are real, historical, examples of malicious packages relying on typosquatting attacks, with the last one surviving on PyPI for almost a year (this was before Phylum existed) to steal SSH and GPG keys.
+For all anyone knows, onyxproxy was the name of an internally developed package in a target's corporate environment and the creation of it was done as part of a dependency confusion attack. Some skeptics of security research findings may note that a malicious package only has on the order of tens or hundreds of downloads. This is more than enough when the point of publishing the package was to direct a hyper focused attack on a specific victim; one download in the right environment could yield all the treasure needed to cash in on the campaign.
+An Ode to Counter Measures
+Perhaps an obvious criticism of the attack laid out here is that it uses GitHub and maybe true poets won't use GitHub in an effort to avoid censorship from a zealous linguist. Sure, it is possible to use a .gitattributes file to override the default behavior:
+# .gitattributes
+
+# Override the default detection of `poetry.lock` by `linguist` as
+# a "generated" file so that it will not be collapsed in a GitHub PR
+poetry.lock linguist-generated=false
+Such a change will put GitHub PRs on the same footing as other CI/CD ecosystems, but it comes at the cost of possibly distorting those cool language stats shown for a repository:
+Plus, even with the lockfile fully expanded in code reviews, it still requires careful reviewers with a distrusting eye. Relying on manual human intervention to avert disaster is planning to fail.
+Installing from a trusted lockfile where all the packages are known to be good is a best practice for avoiding risk from malware running during package installation. Therefore, it is imperative that modifications to the lockfile be guarded and automatically monitored for the introduction of nefarious packages.
+Luckily, the poetry lock command offers a few options to help in that quest.
+# Run this to "Check that the `poetry.lock` file corresponds to the current
+# version of `pyproject.toml`." Really all it is doing is comparing the
+# `content-hash` in the `poetry.lock` file is the SHA-256 hash of the sorted
+# content for specific keys in the `pyproject.toml` file. It will return
+# non-zero when there is a mis-match.
+poetry lock --check
+
+# Run this before installing a `poetry.lock` environment to "refresh" the
+# lockfile. It will remove any entries in the lockfile that are not actually
+# dependencies of packages defined in the `pyproject.toml` file. It does not
+# produce an error or non-zero return code when changes are made, but at
+# least the lockfile will be in a better state before it gets used.
+poetry lock --no-update
+
+# Unfortunately, the two options can not be used in the same command
+# invocation. The `--check` option takes precedence and the `--no-update`
+# actions are skipped.
+poetry lock --check --no-update
+
+# Use the checked and refreshed lockfile to create an environment.
+poetry install ...
+Making use of this sequence of commands for poetry projects is recommended. The pattern can be seen in the phylum-ci repository as a common step used in all GitHub Actions workflows where the project is meant to be installed in a CI environment:
+- name: Install the project with poetry
+        run: |
+          poetry env use python3.11
+          poetry lock --check
+          poetry lock --no-update
+          poetry install --verbose --sync --with test,ci
+The steps recommended here only go so far. What is a developer to do when the lockfile has changed and all indications in the PR are that it was for a valid reason? How are they supposed to know that onyxproxy is malicious? That is what automated dependency scanning tools are meant to do. There are many to choose from, but this post recommends Phylum. Phylum is able to detect, report, and block malicious packages. Other solutions are merely looking for known vulnerabilities and will therefore miss this entire risk domain.
+Of course, Phylum will also report on vulnerabilities (and author, engineering, and license risk) but it doesn't wait for a CVE to be published before alerting consumers of bad package versions. Malware may never get assigned a CVE since the goal upon discovery is to have the software removed from package registries entirely. The gap in time between malware discovery by Phylum, which is minutes after package publication, to removal by the affected registry can be hours, days, or longer depending on the availability of a skeleton crew of dedicated administrators. Threat actors only need their package to survive long enough to deliver the targeted effect.
+Don't expose your projects to that risk. Use Phylum to analyze dependencies. Integrations exist to guard PRs with a free GitHub app or a GitHub action. There is also a CLI and pre-commit hook for local development, as well as a phylum Python package that can be pip/pipx installed. Additional supported CI platforms include GitLab CI, Azure Pipelines, and Bitbucket Pipelines, with more coming.
+Closing Haiku
+Malware is sneaky.
+Don't be fooled by bad actors.
+Phylum for the win!
+Poetry is great! This post could have been written about other package managers since most are just as susceptible to this kind of lockfile manipulation. No matter which one you use, be sure to use a lockfile every time an environment is created to ensure reproducibility. Then, be sure to guard against any changes to that lockfile by automatically monitoring the health of the lockfile and the dependencies contained therein.
+At the time of this writing Phylum offers support for lockfiles consumed by a range of ecosystems, with more coming. A free community edition is available for everyone to automate software supply chain security to block new risks, prioritize existing issues, and only use trusted open source code.

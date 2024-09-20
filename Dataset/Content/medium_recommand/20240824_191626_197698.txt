@@ -1,0 +1,68 @@
+
+Code signing with HashiCorp Vault and GitHub Actions
+image: ../../Dataset/Image\medium_recommand\20240824_191626_197698\0d71O4ptdYPy6W1WW
+image: ../../Dataset/Image\medium_recommand\20240824_191626_197698\14CNLqJ2svVN4tHiTHcNLsA.png
+Guilherme "Gui" Santos
+Follow
+HashiCorp Solutions Engineering Blog
+2
+Listen
+Share
+Code signing is an essential element of software supply chain security, enabling users of your code to verify that the code they are running is actually code you released. This helps defend against supply chain attacks such as dependency confusion attacks.
+At a high level, code signing workflows depend on four components:
+
+An artifact that must be signed before being distributed. Artifacts may include things like container images, Windows executables and libraries, and Java .jar files.
+A code signing scheme that establishes how the artifact is signed and how signatures are verified. Examples of code signing schemes include:
+- Microsoft Authenticode for Windows executables and libraries
+- Docker Content Trust for container images
+- Cosign for generic OCI artifacts (including container images and more).
+A code signing key and certificate that establish the identity of the person or system signing the artifact.
+A trusted certificate authority (CA) that verifies the identity of a person or system and issues a corresponding code signing certificate attesting that identity. The end user is ultimately responsible for deciding which CAs should be trusted. Software vendors (Microsoft, Apple, Google, Mozilla) provide default lists of trusted CAs, but enterprises will tweak those lists to add and remove CAs as needed.
+This blog post focuses on leveraging HashiCorp Vault as a trusted CA to issue short-lived code signing certificates to a GitHub Actions workflow that signs a PowerShell script using Microsoft Authenticode.
+This post was originally published on the HashiCorp blog.
+Workflow and PKI architecture
+The diagram below illustrates the workflow adopted by this post’s solution.
+This workflow uses a two-tier public key infrastructure (PKI). The root CA will be “managed” by OpenSSL, whereas the code signing issuing CA will be managed by Vault.
+You can see an entire sample code repository of this post’s solution in the code signing with Vault GitHub repository.
+Generating the root CA
+Once you have a copy of the sample code, navigate to the root-ca directory, then review and execute the generate script (./generate).
+This script will generate an Elliptic Curve P-521 key pair and issue a self-signed “root” certificate. You’ll find the corresponding certificate in root.crt, and the EC parameters and private key will be in root.key.
+Configuring Vault
+The sample code in the repository also includes a Terraform module that provisions the required resources in Vault for this solution.
+Once you have a Vault cluster up and running (HashiCorp Cloud Platform (HCP) makes this step much easier):
+
+Review the Terraform code in the terraform directory.
+Create a Terraform variables file and populate it with values appropriate to your environment. Important: Set pki_codesign_cert to null for the time being (more on that later).
+Run terraform apply, review the plan, and deploy the changes to your Vault cluster.
+At this point, you’ll have the following in your Vault cluster:
+
+PKI secrets engine with
+1. The code signing CA’s EC key pair and corresponding certificate
+2. The PKI role for controlling the issuance of code signing certificates
+JWT authentication backend for authenticating GitHub Actions pipelines into Vault
+Sample ACL policy to authorize access to the code signing certificate PKI role
+Issuing Vault’s CA certificate
+Since the root CA is offline under OpenSSL, the next step is to have the root CA issue a certificate for Vault’s code signing CA.
+Retrieve the Vault CA’s certificate signing request from the Terraform outputs and paste it into a file under the root-ca directory. Name that file codesigning-ca.csr. You can inspect the contents of the CSR with OpenSSL:
+If you’re satisfied with the parameters of the CSR, run the sign script (./sign) to have the root CA issue the certificate for Vault's CA. The certificate will be stored in codesign-ca.crt.
+Now, import Vault’s CA certificate by modifying your Terraform variables file to include both the Vault CA certificate and the root CA certificate:
+Running a GitHub pipeline
+The repository for this post includes a sample GitHub workflow you can use to test this code signing pipeline concept.
+Note that this is not a production-ready workflow. At the very least, you wouldn’t want to be downloading the Vault CLI every time and without further security checks.
+Verifying a signed script
+Once the hello-world.ps1 script is signed by your pipeline, you can check its Authenticode signature by running:
+Be sure that your computer trusts the root CA used for this exercise; otherwise, signature verification will fail. If you’re not using a discardable environment, remember to remove the root CA certificate from the trust store after.
+Why not use DigiCert or GlobalSign?
+Code signing traditionally relies on certificates issued by CAs trusted by the major software vendors, such as DigiCert and GlobalSign. These CAs must verify the identity of the individual or organization requesting the certificate, a process that is often manual, lengthy , and expensive.
+If you are distributing software broadly, it makes sense to go through that process: you’ll be issued a certificate that is automatically trusted by all your users by virtue of the CA being part of the major vendors’ trusted CA programs.
+But what if you’re looking to secure internal distribution of software, e.g. ensuring that a line-of-business application was built by an approved system and not tampered with since?
+
+Do you buy a certificate for your organization and allow all your developers to use it? What’s your process for authenticating and authorizing individual signing requests?
+Do you buy individual developer certificates and incur the expense and overhead of managing the certificates’ lifecycles?
+If your CA requires you to keep private keys in a hardware token, how do you integrate the signature process into automated build pipelines?
+The solution outlined in this post provides your business with the following benefits when internally distributing software:
+
+Minimize the risk of compromised signing keys by adopting short-lived certificates — the key is useless an hour after it’s generated.
+Reduce toil by automating the issuance of certificates in accordance with rules established in advance by your security team.
+Future-proof your code signing workflow by leveraging Vault’s many sources of identity — if tomorrow you want users to be able to manually sign code, they can authenticate to Vault with OIDC, SAML, or Kerberos and obtain certificates in the same way.
+Learn more about using building your own certificate authority with Vault on HashiCorp Developer.

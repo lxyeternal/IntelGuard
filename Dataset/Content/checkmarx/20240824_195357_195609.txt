@@ -1,0 +1,105 @@
+
+image: ../../Dataset/Image\checkmarx\20240824_195357_195609\shutterstock_1890805243.png
+For those who don’t know me, I am a mother to two brilliant children who are better at the game of chess than an average kid their age, and their chess teacher advised them to find suitable chess opponents online.
+Since Minecraft and their YouTube heroes are often more appealing to them than the online chess platform, they broke their promises more than once, and instead of doing something to improve their critical thinking skills playing chess, I found them listening to idle talks about gaming in general.
+I felt like I had to find a way to ensure they were using their idle time wisely. But the question remained, “What is the best way to ensure my children only use lichess.org, which is the online chess game I have approved?” Knowing that other parents are likely facing the same challenges, I started researching a few options.
+I tried using some browser extensions, but my 10-year-old figured out how to defeat that approach only after few minutes. So I was thinking, “Now what? Should I develop an internet filtering solution myself? Naaaah…” Instead, I began looking for another solution that would not be as easy to evade – something that someone else already created.
+With the help of CTparental, which is an open-source project that allows parents to better control where their children go on the internet, I managed to block every website other than lichess.org. My children tried to get past the block I implemented, but after a while, they gave up. My children now play chess much more often and I am delighted about that.
+Now as a responsible Application Security Researcher whose career is based upon researching applications to find coding errors, poor coding practices, exploitable vulnerabilities, etc., I wanted to make sure CTparental was safe and its protections are not easy to evade.
+After doing some investigation on CTparental, I did find a few vulnerabilities. And I am happy to report that the project’s maintainer was a true professional and responded very quickly to resolve them. Since the vulnerabilities have been resolved, here are the exact details of what I found.
+Vulnerability #1 – Reflected XSS, CWE-79, CVE-2021-37365
+In CTParental versions before 4.45.03, the file “bl_categories_help.php” is vulnerable to XSS.
+CVSS Score
+CVSS: 3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N
+Score: 6.1 (Medium)
+Vulnerability Impact
+If a child had some level of ingenuity, they could potentially trick their parent into clicking a crafted link that sends the parent authentication cookie to a server under the child’s control and they would able to gain access to the parent admin panel.
+Proof of Concept
+To reproduce exploiting the vulnerability, enter the following link in the browser:
+https://admin.ct.local/bl_categories_help.php?cat=<script>alert(`xss`);</script>
+Cause of the Reflected XSS Vulnerability
+At line 85 of bl_categires_help.php, the ‘categories’ variable is assigned with the content of the query string param ‘cat’ without sanitization or encoding, enabling an attacker to inject malicious code into the output webpage with echo in line 145.
+083: if (isset($_GET['cat']))
+084: {
+085:     $categorie = $_GET['cat'];
+086: }
+087: 
+.
+.
+.
+137:    <div class="container">
+138:             <div class="header clearfix">
+139:                 <nav>
+140:                     <ul class="nav nav-pills pull-right">
+141:                         <li class="active" role="<?php echo "$l_close"; ?>">
+142:                             <a href="javascript:window.close();"><?php echo "$l_close"; ?></a></li>
+143:                     </ul>
+144:                 </nav>
+145:                 <h3 class="text-muted"><?php echo $categorie ;?></h3>
+Even though I found the vulnerability manually, I scanned the CTparental lines of code using Checkmarx SAST. CxSAST easily detected this vulnerability as shown in the screenshot below:
+Suggested Mitigation
+In the context of secure coding practices, never trust the user input. Always sanitize or encode user input before further processing. The input should be encoded according to the context, from URL, from HTTP form, etc. A recommended solution, in this case, is to use a dedicated library that prevents XSS or a templating engine that does all the encoding under the hood.
+Vulnerability #2 – CSRF, CWE-352, CVE-2021-37366
+An attacker can trick an administrator into clicking a malicious link to a crafted web page in the child’s control that would add the attacker to a privileged group and cancel the filtering for herself and other users. By combining it with XSS, it’s possible to perform the same attack without an external webpage but entirely in CTparental admin panel.
+CVSS Score
+CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H
+Score: 8.8 (High)
+Vulnerability Impact
+Again, if a child had some level of ingenuity, they could trick their parent into clicking a link to a certain web page. The webpage would run on the parent browser, redirect the browser to the CTparental admin panel, and cause a permission change. Combine this vulnerability with the XSS vulnerability, a child could save the effort of creating a web page, and instead, trick their parent into clicking a crafted link that changes their and/or any other user’s permission in the system and, as a result, cancel the desired filtering.
+Proof of Concept
+The following POC demonstrates the exploitation of both XSS and CSRF vulnerabilities. To reproduce it, enter the following link below into the browser. The link contains an XML HTTP request that sets the second user as privileged.
+https://admin.ct.local/bl_categories_help.php?cat=<script>var xhr=new XMLHttpRequest(); xhr.open(“POST”, “https://admin.ct.local/index.php?dgfile=privileged%20group/”, true); xhr.setRequestHeader(“Content-Type”, “application/x-www-form-urlencoded”);xhr.send(“chk-2%3don%26choix%3dchange_user”); </script>
+Cause of the CSRF Vulnerability
+The code at line 21 in file gctoff.php generates a form that updates the gctoff.conf without validating that the HTTP POST request is from an authenticated admin panel. (i.e., lack of anti-CSRF protection)
+21:     echo "<form action='".$_SERVER["PHP_SELF"]."?dgfile=privileged group' method='post'>";
+22:     echo "<input type=hidden name='choix' value="gct_Off">";
+23:     echo "<input class='btn btn-success' type=submit value=".gettext('Disable privileged group.').">";
+24:     echo "</form>";
+Suggested Mitigation
+Critical actions like adding a user to the privileged group should be protected against CSRF. The application should utilize anti-CSRF protection, such as synchronizer tokens. For more information, check the following link:
+https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html
+Vulnerability #3: Code Execution, CWE-94, CVE-2021-37367
+Because The file “bl_categories_help.php” is vulnerable to directory traversal, an attacker can create a file with a name that contains bash scripts and run arbitrary OS commands.
+CVSS Score
+CVSS:AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H
+Score: 7.8 (High)
+Vulnerability Impact
+Finally, if a child had some level of ingenuity, they could create a file with a name that contains OS commands and craft a link that traverses to this file and runs an OS command with www-data OS user permission.
+Proof of Concept
+The attacker has a user on the CTparental machine, and they create a file with the following name:
+/tmp/ 1;whoami;#.conf
+The attacker clicks the following link:
+https://admin.ct.local/bl_categories_help.php?cat=../../../../../../..//tmp/1;whoami;%23
+We used the whoami command as a proof-of-concept, but it could be any arbitrary OS command, thus giving an attacker control over the server with www-data user privileges.
+Cause of the Vulnerability
+The code in the bl_categories_help.php file does not validate that the file from the ‘cat’ query string param is one of CTparental’s configuration files, allowing an attacker to pick up a configuration file of their choice. Later, the code concatenates the file name with an exec command without sanitization or escaping.
+83: if (isset($_GET['cat']))
+84: {
+85:     $categorie = $_GET['cat'];
+86: }
+87: 
+88: $bl_categorie_domain_file = $bl_dir.$categorie.".conf";
+89: $ipv4_categorie_domain_file = $ipv4_dir.$categorie.".conf";
+90: $ipv6_categorie_domain_file = $ipv6_dir.$categorie.".conf";
+91:
+92: if (file_exists($bl_categorie_domain_file))
+93: {
+94:     $nb_domains = exec ("wc -w $bl_categorie_domain_file|cut -d' ' -f1");
+95: }
+96: else
+97: {
+98:     $nb_domains = $l_error_openfilei." ".$bl_categorie_domain_file;
+99: }
+CxSAST easily detected this vulnerability as well as shown in the screenshot below:
+Suggested Mitigation
+Never trust the user input and concatenate user input to an exec command. Always sanitize or encode user input before further processing. The input should be encoded according to the context, from URL, from HTTP form, etc. In this scenario, check that the requested file matches one from the allowed list of the CTparental configuration files.
+Timeline of Disclosure
+July 12, 2021 – Disclosure to CTparental
+July 14, 2021 – release 4.45.03, mitigating the XSS and CSRF
+July 22, 2021 – release 4.45.07, mitigating the OS Command execution
+August 10, 2021 – CVE-2021-37365, CVE-2021-37366, CVE-2021-37367 assigned
+August 19, 2021 – Public disclosure
+Conclusion
+I’m delighted to have discovered and helped resolve these issues, to not only protect my children, but other children as well. Again, the maintainer of the CTparental project was a pleasure to work with and they should be commended for their due diligence.
+I’m also satisfied when I use my skills and experience to increase security for all parents who may use CTparental or other similar tools. In doing so, I had the chance to research, report, and contribute to the safety of children world wide.
+This type of research activity is part of the Checkmarx Security Research Team’s ongoing efforts to drive the necessary changes in secure coding practices for those who contribute to open source projects, and in doing so, improve security for everyone overall.

