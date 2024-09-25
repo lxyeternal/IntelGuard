@@ -15,6 +15,7 @@ import re
 import os
 import json
 import time
+import base64
 import nltk
 import openai  # 0.28.1
 import tiktoken
@@ -29,15 +30,18 @@ stop_words = set(stopwords.words('english'))
 class IntelliLLM:
     def __init__(self):
         self.source_dir = ""
-        self.json_dir = "../../Dataset/IntelliJson/"
-        self.content_dir = "../../Dataset/Content/"
-        self.entity_file_easy = "./EntityRules/intelli_entity-4"
-        self.entity_file_complex = "./EntityRules/intelli_entity-5"
-        self.functionality_file = "./functionality_list"
-        self.exoutput_file = "./Exoutput/intelli_output2"
-        # self.common_words_file = "../../archive/words.txt"
-        self.entityextract_prompt1 = ""
-        self.entityextract_prompt2 = ""
+        current_dir = os.path.dirname(__file__)
+        codes_dir = os.path.dirname(current_dir)
+        project_dir = os.path.dirname(codes_dir)
+        self.json_dir = os.path.join(project_dir, "Dataset", "IntelliJson")
+        self.content_dir = os.path.join(project_dir, "Dataset", "Content")
+        self.entity_easy_prompt_path = os.path.join(current_dir, "EntityRules", "intelli_entity-4")
+        self.entity_complex_prompt_path = os.path.join(current_dir, "EntityRules", "intelli_entity-5")
+        self.info_verify_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_entity_verify")
+        self.functionality_file = os.path.join(current_dir, "EntityRules", "functionality_list")
+        self.exoutput_file = os.path.join(current_dir, "Exoutput", "intelli_output2")
+        self.entity_easy_prompt = self.read_file(self.entity_easy_prompt_path)
+        self.entity_complex_prompt = self.read_file(self.entity_complex_prompt_path)
         self.infoverify_prompt = ""
         self.easy_entity = ""
         self.complex_entity = ""
@@ -57,10 +61,15 @@ class IntelliLLM:
         openai.api_key = self.config['azure_api_key']
 
     # 读取提示文件内容
-    def read_prompt(self, prompt_file):
-        with open(prompt_file, 'r', encoding='utf-8') as file:
-            prompt = file.read()
-        return prompt
+    def read_file(self, file_path):
+        with open(file_path, 'r', encoding='utf-8') as file:
+            content = file.read()
+        return content
+
+    def encode_image(self, image_path):
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode('utf-8')
+
 
     # 读取实体规则和功能列表
     def read_entity(self):
@@ -206,6 +215,61 @@ class IntelliLLM:
         print(output)
         return output
 
+    def parse_text_with_images(self, text, source_dir, fixed_base_path):
+        """
+        解析文本，识别出所有 image: 路径 的标记，并返回一个按顺序排列的消息列表
+        """
+        messages = []
+        # 正则匹配所有 image: 路径
+        pattern = r'image:\s*([^\s]+)'
+        parts = re.split(pattern, text)
+        for index, part in enumerate(parts):
+            if index % 2 == 0:
+                # 偶数索引是文本
+                if part.strip():
+                    messages.append({
+                        "type": "text",
+                        "text": part.strip()
+                    })
+            else:
+                # 奇数索引是图片路径
+                image_rel_path = part.strip()
+                # 处理路径分隔符，兼容反斜杠和斜杠
+                image_rel_path = image_rel_path.replace('\\', '/')
+                path_parts = image_rel_path.split('/')
+                if len(path_parts) >= 2:
+                    # 提取最后两个部分
+                    last_two_parts = path_parts[-2:]
+                    # 拼接成新的相对路径
+                    new_rel_path = os.path.join(*last_two_parts)
+                    # 拼接固定的基础路径
+                    full_image_path = os.path.join(fixed_base_path, source_dir, new_rel_path)
+                    # 规范化路径
+                    full_image_path = os.path.normpath(full_image_path)
+                    if os.path.exists(full_image_path):
+                        base64_image = self.encode_image(full_image_path)
+                        if base64_image:
+                            messages.append({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{base64_image}"
+                                }
+                            })
+                    else:
+                        print(f"图片路径不存在: {full_image_path}")
+                        # 如果图片不存在，可以选择将原始标记保留或替换为占位符
+                        messages.append({
+                            "type": "text",
+                            "text": f"[图片不存在: {new_rel_path}]"
+                        })
+                else:
+                    print(f"图片路径格式不正确: {image_rel_path}")
+                    messages.append({
+                        "type": "text",
+                        "text": f"[无效的图片路径: {image_rel_path}]"
+                    })
+        return messages
+
     # 提取简单实体
     def entity_extract_llm(self, content):
         # 设置token
@@ -213,7 +277,6 @@ class IntelliLLM:
         max_tokens = 110000 - int(1.0 * token_length)
         if token_length > 110000:
             content = self.token_slice(content)
-
         # # 构造发送给 ChatGPT 的消息文本
         # content 文本
         # images 图片
@@ -258,6 +321,7 @@ class IntelliLLM:
         message_text = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in verifying the accuracy of extracted information about malicious code detection. Your task is to cross-check the extracted entities and their relationships against the original content, ensuring all information is accurate and supported by the text."},
             {"role": "user", "content": "[**content**]:\n" + content + "\n\n[**simple entities**]:\n" + self.easy_entity + "\n\n[**entities**]:\n" + entity + "\n\n" + self.infoverify_prompt + "\n\n"}
+            {"role": "user", "content": "[**content**]:\n" + content + "\n\n[**simple entities**]:\n" + self.easy_entity + "\n\n[**entities**]:\n" + entity + "\n\n" + self.infoverify_prompt + "\n\n"}
         ]
         entity_validated = self.azure_query(message_text, max_tokens)
         return entity_validated
@@ -294,35 +358,10 @@ class IntelliLLM:
             print(f"Processing: {file_name}")
             self.process_content(txt_content, json_file_path)
 
-    # source_dir: "(IntelliJson/)case"
-    # self.json_dir: "IntelliJson/"
-    # case_dir: "Case"
-    def case_test_all(self, source_dir):
-        case_dir = "../../Dataset/Case/"
-        # 遍历 Case 目录中所有 .txt 文件
-        for file_name in os.listdir(case_dir):
-            file_path = os.path.join(case_dir, file_name)
-            if os.path.isfile(file_path):
-                # 生成对应 JSON 文件路径
-                json_file_name = file_name.replace(".txt", "")
-                json_file_path = os.path.join(self.json_dir, source_dir, json_file_name)
-                txt_content = self.read_txt(os.path.join(case_dir, file_name))  # 读取文本内容
-                print(f"Processing: {file_name}")
-                self.process_content(txt_content, json_file_path)
 
-    def case_test_single(self, source_dir):
-        case_dir = "../../Dataset/Case/"
-        file_name = "cybersecuritynews_20240708_171638_920166.txt"
-
-        json_file_name = file_name.replace(".txt", "")
-        json_file_path = os.path.join(self.json_dir, source_dir, json_file_name)
-        txt_content = self.read_txt(os.path.join(case_dir, file_name))  # 读取文本内容
-        print(f"Processing: {file_name}")
-        self.process_content(txt_content, json_file_path)
 
 
 if __name__ == '__main__':
     # 使用示例
     ltmgpt = IntelliLLM()
-    # ltmgpt.case_test_all("case")
-    ltmgpt.case_test_single("case")
+    ltmgpt.start("case")
