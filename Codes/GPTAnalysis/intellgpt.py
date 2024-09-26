@@ -16,15 +16,8 @@ import os
 import json
 import time
 import base64
-import nltk
 import openai  # 0.28.1
 import tiktoken
-import google.generativeai as genai
-from nltk.corpus import stopwords
-# 首次使用时需要下载停用词集
-# nltk.download('stopwords')
-# 获取英语停用词集xw
-stop_words = set(stopwords.words('english'))
 
 
 class IntelliLLM:
@@ -35,23 +28,27 @@ class IntelliLLM:
         project_dir = os.path.dirname(codes_dir)
         self.json_dir = os.path.join(project_dir, "Dataset", "IntelliJson")
         self.content_dir = os.path.join(project_dir, "Dataset", "Content")
-        self.entity_easy_prompt_path = os.path.join(current_dir, "EntityRules", "intelli_entity-4")
-        self.entity_complex_prompt_path = os.path.join(current_dir, "EntityRules", "intelli_entity-5")
+        self.images_dir = os.path.join(project_dir, "Dataset", "Image")
+        self.entity_file_easy = os.path.join(current_dir, "EntityRules", "intelli_entity-4")
+        self.entity_file_complex = os.path.join(current_dir, "EntityRules", "intelli_entity-5")
+        self.all_entity_file = os.path.join(current_dir, "EntityRules", "all_entity")
+        self.entity_easy_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_easy_extract")
+        self.entity_complex_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_complex_extract")
         self.info_verify_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_entity_verify")
         self.functionality_file = os.path.join(current_dir, "EntityRules", "functionality_list")
         self.exoutput_file = os.path.join(current_dir, "Exoutput", "intelli_output2")
         self.entity_easy_prompt = self.read_file(self.entity_easy_prompt_path)
         self.entity_complex_prompt = self.read_file(self.entity_complex_prompt_path)
-        self.infoverify_prompt = ""
-        self.easy_entity = ""
-        self.complex_entity = ""
-        self.functionality_list = ""
-        self.exoutput = ""
+        self.infoverify_prompt = self.read_file(self.info_verify_prompt_path)
+        self.easy_entity = self.read_file(self.entity_file_easy)
+        self.complex_entity = self.read_file(self.entity_file_complex)
+        self.all_entity = self.read_file(self.all_entity_file)
+        self.functionality_list = self.read_file(self.functionality_file)
+        self.exoutput = self.read_file(self.exoutput_file)
         self.common_words = set()
         self.dealt_pkgs = list()
         self.regex = r"(?:@[a-zA-Z0-9\-]+\/)?[a-zA-Z0-9][a-zA-Z0-9\._\-]+"
         self.max_attempts = 5  # 最大尝试次数
-
         self.config_path = os.path.join(os.path.dirname(__file__), "..", "..", "Configs", "config.json")
         with open(self.config_path, 'r') as file:
             self.config = json.load(file)
@@ -70,50 +67,13 @@ class IntelliLLM:
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
 
-
-    # 读取实体规则和功能列表
-    def read_entity(self):
-        with open(self.entity_file_easy, 'r', encoding='utf-8') as file:
-            self.easy_entity = file.read()
-        with open(self.entity_file_complex, 'r', encoding='utf-8') as file:
-            self.complex_entity = file.read()
-        with open(self.functionality_file, 'r', encoding='utf-8') as file:
-            self.functionality_list = file.read()
-        with open(self.exoutput_file, 'r', encoding='utf-8') as file:
-            self.exoutput = file.read()
-
-    # # 加载常见词汇到集合中
-    # def load_common_words(self):
-    #     with open(self.common_words_file, 'r', encoding='utf-8') as file:
-    #         for line in file:
-    #             self.common_words.add(line.strip().lower())
-
     # 读取处理过的包名文件列表
     def load_dealt_pkgs(self):
-        self.dealt_pkgs = os.listdir(os.path.join(self.json_dir, self.source_dir))
-        self.dealt_pkgs = [json_file.replace("_verify_gpt4.json", ".txt").replace("_relation_gpt4.json", ".txt").replace("_extract_gpt4.json", ".txt") for json_file in self.dealt_pkgs if json_file != ".DS_Store"]
-
-    # 使用正则表达式从内容中提取包名
-    def extract_package_names(self, content):
-        # PyPI 和 npm 的正则表达式
-        try:
-            unique_words = list()
-            matches = re.findall(self.regex, content)
-            # 去除重复的匹配项
-            unique_matches = set(matches)
-            for word in unique_matches:
-                if word.endswith(".") or word.endswith(","):
-                    word = word[:-1]
-                    if word.lower() not in self.common_words:
-                        unique_words.append(word)
-                else:
-                    if word.lower() not in self.common_words:
-                        unique_words.append(word)
-            unique_words = set(unique_words)
-            return unique_words
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            return set()
+        target_dir = os.path.join(self.json_dir, self.source_dir)
+        if not os.path.exists(target_dir):
+            return
+        self.dealt_pkgs = os.listdir(target_dir)
+        self.dealt_pkgs = [json_file.replace("_easy_extract_gpt4.json", ".txt").replace("_complex_extract_gpt4.json", ".txt").replace("_verify_gpt4.json", ".txt") for json_file in self.dealt_pkgs if json_file != ".DS_Store"]
 
     @staticmethod
     def read_txt(file_name):
@@ -215,129 +175,119 @@ class IntelliLLM:
         print(output)
         return output
 
-    def parse_text_with_images(self, text, source_dir, fixed_base_path):
-        """
-        解析文本，识别出所有 image: 路径 的标记，并返回一个按顺序排列的消息列表
-        """
+    def parse_text_with_images(self, content):
         messages = []
         # 正则匹配所有 image: 路径
         pattern = r'image:\s*([^\s]+)'
-        parts = re.split(pattern, text)
+        parts = re.split(pattern, content)
+        combined_content = []  # 用于存储组合后的 text 和 image_url
+
         for index, part in enumerate(parts):
             if index % 2 == 0:
                 # 偶数索引是文本
                 if part.strip():
-                    messages.append({
+                    combined_content.append({
                         "type": "text",
                         "text": part.strip()
                     })
             else:
                 # 奇数索引是图片路径
-                image_rel_path = part.strip()
-                # 处理路径分隔符，兼容反斜杠和斜杠
-                image_rel_path = image_rel_path.replace('\\', '/')
+                image_rel_path = part.strip().replace('\\', '/')
                 path_parts = image_rel_path.split('/')
                 if len(path_parts) >= 2:
                     # 提取最后两个部分
-                    last_two_parts = path_parts[-2:]
-                    # 拼接成新的相对路径
-                    new_rel_path = os.path.join(*last_two_parts)
+                    new_rel_path = os.path.join(*path_parts[-2:])
                     # 拼接固定的基础路径
-                    full_image_path = os.path.join(fixed_base_path, source_dir, new_rel_path)
+                    full_image_path = os.path.join(self.images_dir, self.source_dir, new_rel_path)
                     # 规范化路径
                     full_image_path = os.path.normpath(full_image_path)
                     if os.path.exists(full_image_path):
                         base64_image = self.encode_image(full_image_path)
                         if base64_image:
-                            messages.append({
+                            combined_content.append({
                                 "type": "image_url",
                                 "image_url": {
                                     "url": f"data:image/png;base64,{base64_image}"
                                 }
                             })
                     else:
-                        print(f"图片路径不存在: {full_image_path}")
-                        # 如果图片不存在，可以选择将原始标记保留或替换为占位符
-                        messages.append({
+                        combined_content.append({
                             "type": "text",
                             "text": f"[图片不存在: {new_rel_path}]"
                         })
                 else:
-                    print(f"图片路径格式不正确: {image_rel_path}")
-                    messages.append({
+                    combined_content.append({
                         "type": "text",
                         "text": f"[无效的图片路径: {image_rel_path}]"
                     })
+
+        # 将组合后的文本和图片内容一起作为 "content" 发送
+        if combined_content:
+            messages.append({
+                "role": "user",
+                "content": combined_content
+            })
+
         return messages
 
     # 提取简单实体
-    def entity_extract_llm(self, content):
+    def easy_entity_extract_llm(self, content):
         # 设置token
         token_length = self.num_tokens_from_messages(content)
         max_tokens = 110000 - int(1.0 * token_length)
         if token_length > 110000:
             content = self.token_slice(content)
-        # # 构造发送给 ChatGPT 的消息文本
-        # content 文本
-        # images 图片
-        # self.easy_entity 简单实体
-        # self.entityextract_prompt1 提示词
-        message_text = [
+        content_message = self.parse_text_with_images(content)
+        prompt_message = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
-            {"role": "user", "content": "[**content**]:\n" + content + "\n\n[**entity description**]:\n" + self.easy_entity + "\n\n" + self.entityextract_prompt1 + "\n\n"}  # prompt-4
+            {"role": "system", "content": "\n\n[**entity description**]:\n" + self.easy_entity + "\n\n" + self.entity_easy_prompt + "\n\n"}
         ]
+        combined_message = prompt_message + content_message
+        # 将数据写入到JSON文件，带有格式化
+        with open("test.json", "w", encoding="utf-8") as f:
+            json.dump(combined_message, f, ensure_ascii=False, indent=4)
         # 调用 azure_query 发送请求并获取提取的实体
-        extracted_entity = self.azure_query(message_text, max_tokens)
-        # new_content, easy_entity = self.devide_output(extracted_entity)
-        return extracted_entity
+        easy_entity = self.azure_query(combined_message, max_tokens)
+        return easy_entity
 
     # 提取复杂实体
-    def complex_entity_extract_llm(self, content, extracted_entity):
+    def complex_entity_extract_llm(self, content, easy_entity):
         # 统计 token 的数量
         token_length = self.num_tokens_from_messages(content)
         max_tokens = 110000 - int(1.0 * token_length)
         if token_length > 110000:
             content = self.token_slice(content)
-
-        # content 文本
-        # extracted_entity 提取出的简单实体
-        # self.complex_entity 复杂实体
-        # self.entityextract_prompt2 提示词
-        message_text = [
+        content_message = self.parse_text_with_images(content)
+        prompt_message = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
-            {"role": "user", "content": "[**content**]:\n" + content + "\n\n[**extracted entities**]:\n" + extracted_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n[**example output**]:\n" + self.exoutput + "\n\n[**entity description**]:\n" + self.complex_entity + "\n\n" + self.entityextract_prompt2 + "\n\n"}
+            {"role": "user", "content": "\n\n[**extracted entities By LLM**]:\n" + easy_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n[**example output**]:\n" + self.exoutput + "\n\n[**entity description**]:\n" + self.complex_entity + "\n\n" + self.entity_complex_prompt + "\n\n"}
         ]
-        complex_entity = self.azure_query(message_text, max_tokens)
+        combined_message = prompt_message + content_message
+        complex_entity = self.azure_query(combined_message, max_tokens)
         return complex_entity
 
     # 验证提取的信息的准确性
-    def info_verify_llm(self, content, entity):
+    def info_verify_llm(self, content, complex_entity):
         # 统计 token 的数量
         token_length = self.num_tokens_from_messages(content)
         max_tokens = 110000 - int(1.0 * token_length)
         if token_length > 110000:
             content = self.token_slice(content)
-        # content, entity, infoverify_prompt
-        message_text = [
+        content_message = self.parse_text_with_images(content)
+        prompt_message = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in verifying the accuracy of extracted information about malicious code detection. Your task is to cross-check the extracted entities and their relationships against the original content, ensuring all information is accurate and supported by the text."},
-            {"role": "user", "content": "[**content**]:\n" + content + "\n\n[**simple entities**]:\n" + self.easy_entity + "\n\n[**entities**]:\n" + entity + "\n\n" + self.infoverify_prompt + "\n\n"}
-            {"role": "user", "content": "[**content**]:\n" + content + "\n\n[**simple entities**]:\n" + self.easy_entity + "\n\n[**entities**]:\n" + entity + "\n\n" + self.infoverify_prompt + "\n\n"}
+            {"role": "user", "content": "Extract entity from content by LLM:\n\n" + complex_entity + "\n\n" + self.all_entity + "\n\n" + self.infoverify_prompt + "\n\n"}
         ]
-        entity_validated = self.azure_query(message_text, max_tokens)
+        combined_message = prompt_message + content_message
+        entity_validated = self.azure_query(combined_message, max_tokens)
         return entity_validated
 
     # 完成从提取实体到验证信息的整个流程，并保存结果
     def process_content(self, content, file_name):
-        self.read_entity()  # 读取实体
-        # self.load_common_words()  # 加载常用词
-        self.entityextract_prompt1 = self.read_prompt("LtM_prompts/intelli_easy_extract")  # 读取分简单实体的提示
-        self.entityextract_prompt2 = self.read_prompt("LtM_prompts/intelli_complex_extract")  # 读取复杂实体的提示
-        self.infoverify_prompt = self.read_prompt("LtM_prompts/intelli_entity_verify")  # 读取验证信息的提示
-
-        easy_entities = self.entity_extract_llm(content)  # 调用 entity_extract_llm 提取简单实体
-        self.save_json(easy_entities, file_name + "_easyextract_gpt4.json")  # 将提取的实体保存为_easyextract_gpt4格式的 JSON 文件
-        complete_entity = self.complex_entity_extract_llm(content, easy_entities)  # 提取复杂实体
-        self.save_json(complete_entity, file_name + "_complexextract_gpt4.json")
+        easy_entities = self.easy_entity_extract_llm(content)  # 调用 entity_extract_llm 提取简单实体
+        self.save_json(easy_entities, file_name + "_easy_extract_gpt4.json")  # 将提取的实体保存为_easy_extract_gpt4格式的 JSON 文件
+        complete_entity = self.complex_entity_extract_llm(content, easy_entities)  # 调用 entity_extract_llm 提取复杂实体
+        self.save_json(complete_entity, file_name + "_complex_extract_gpt4.json")
         llm_verify = self.info_verify_llm(content, complete_entity)  # 验证
         self.save_json(llm_verify, file_name + "_verify_gpt4.json")
 
@@ -364,4 +314,4 @@ class IntelliLLM:
 if __name__ == '__main__':
     # 使用示例
     ltmgpt = IntelliLLM()
-    ltmgpt.start("case")
+    ltmgpt.start("checkmarx")
