@@ -29,19 +29,13 @@ class IntelliLLM:
         self.json_dir = os.path.join(project_dir, "Dataset", "IntelliJson")
         self.content_dir = os.path.join(project_dir, "Dataset", "Content")
         self.images_dir = os.path.join(project_dir, "Dataset", "Image")
-        self.entity_file_easy = os.path.join(current_dir, "EntityRules", "intelli_entity-4")
-        self.entity_file_complex = os.path.join(current_dir, "EntityRules", "intelli_entity-5")
         self.all_entity_file = os.path.join(current_dir, "EntityRules", "all_entity")
-        self.entity_easy_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_easy_extract")
-        self.entity_complex_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_complex_extract")
+        self.intelli_direct_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_direct")
         self.info_verify_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_entity_verify")
         self.functionality_file = os.path.join(current_dir, "EntityRules", "functionality_list")
         self.exoutput_file = os.path.join(current_dir, "Exoutput", "intelli_output2")
-        self.entity_easy_prompt = self.read_file(self.entity_easy_prompt_path)
-        self.entity_complex_prompt = self.read_file(self.entity_complex_prompt_path)
+        self.intelli_direct_prompt = self.read_file(self.intelli_direct_prompt_path)
         self.infoverify_prompt = self.read_file(self.info_verify_prompt_path)
-        self.easy_entity = self.read_file(self.entity_file_easy)
-        self.complex_entity = self.read_file(self.entity_file_complex)
         self.all_entity = self.read_file(self.all_entity_file)
         self.functionality_list = self.read_file(self.functionality_file)
         self.exoutput = self.read_file(self.exoutput_file)
@@ -227,31 +221,10 @@ class IntelliLLM:
                 "role": "user",
                 "content": combined_content
             })
-
         return messages
 
-    # 提取简单实体
-    def easy_entity_extract_llm(self, content):
-        # 设置token
-        token_length = self.num_tokens_from_messages(content)
-        max_tokens = 110000 - int(1.0 * token_length)
-        if token_length > 110000:
-            content = self.token_slice(content)
-        content_message = self.parse_text_with_images(content)
-        prompt_message = [
-            {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
-            {"role": "system", "content": "\n\n[**entity description**]:\n" + self.easy_entity + "\n\n" + self.entity_easy_prompt + "\n\n"}
-        ]
-        combined_message = prompt_message + content_message
-        # 将数据写入到JSON文件，带有格式化
-        with open("test.json", "w", encoding="utf-8") as f:
-            json.dump(combined_message, f, ensure_ascii=False, indent=4)
-        # 调用 azure_query 发送请求并获取提取的实体
-        easy_entity = self.azure_query(combined_message, max_tokens)
-        return easy_entity
-
     # 提取复杂实体
-    def complex_entity_extract_llm(self, content, easy_entity):
+    def entity_extract_llm(self, content):
         # 统计 token 的数量
         token_length = self.num_tokens_from_messages(content)
         max_tokens = 110000 - int(1.0 * token_length)
@@ -260,9 +233,12 @@ class IntelliLLM:
         content_message = self.parse_text_with_images(content)
         prompt_message = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
-            {"role": "user", "content": "\n\n[**extracted entities By LLM**]:\n" + easy_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n[**example output**]:\n" + self.exoutput + "\n\n[**entity description**]:\n" + self.complex_entity + "\n\n" + self.entity_complex_prompt + "\n\n"}
+            {"role": "user", "content": "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n[**example output**]:\n" + self.exoutput + "\n\n[**entity description**]:\n" + self.all_entity + "\n\n" + self.intelli_direct_prompt + "\n\n"}
         ]
-        combined_message = prompt_message + content_message
+        combined_message = content_message + prompt_message
+        # 将数据写入到JSON文件，带有格式化
+        with open("test.json", "w", encoding="utf-8") as f:
+            json.dump(combined_message, f, ensure_ascii=False, indent=4)
         complex_entity = self.azure_query(combined_message, max_tokens)
         return complex_entity
 
@@ -276,18 +252,16 @@ class IntelliLLM:
         content_message = self.parse_text_with_images(content)
         prompt_message = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in verifying the accuracy of extracted information about malicious code detection. Your task is to cross-check the extracted entities and their relationships against the original content, ensuring all information is accurate and supported by the text."},
-            {"role": "user", "content": "Extract entity from content by LLM:\n\n" + complex_entity + "\n\n" + self.all_entity + "\n\n" + self.infoverify_prompt + "\n\n"}
+            {"role": "user", "content": "Extract entity from content by LLM:\n\n" + complex_entity + "\n\n" + "\n\n[**entity description**]:\n" + self.all_entity + "\n\n" + self.infoverify_prompt + "\n\n"}
         ]
-        combined_message = prompt_message + content_message
+        combined_message = content_message + prompt_message
         entity_validated = self.azure_query(combined_message, max_tokens)
         return entity_validated
 
     # 完成从提取实体到验证信息的整个流程，并保存结果
     def process_content(self, content, file_name):
-        easy_entities = self.easy_entity_extract_llm(content)  # 调用 entity_extract_llm 提取简单实体
-        self.save_json(easy_entities, file_name + "_easy_extract_gpt4.json")  # 将提取的实体保存为_easy_extract_gpt4格式的 JSON 文件
-        complete_entity = self.complex_entity_extract_llm(content, easy_entities)  # 调用 entity_extract_llm 提取复杂实体
-        self.save_json(complete_entity, file_name + "_complex_extract_gpt4.json")
+        complete_entity = self.entity_extract_llm(content)  # 调用 entity_extract_llm 提取复杂实体
+        self.save_json(complete_entity, file_name + "_extract_gpt4.json")
         llm_verify = self.info_verify_llm(content, complete_entity)  # 验证
         self.save_json(llm_verify, file_name + "_verify_gpt4.json")
 
@@ -307,8 +281,6 @@ class IntelliLLM:
             txt_content = self.read_txt(os.path.join(self.content_dir, self.source_dir, file_name))  # 读取文本内容
             print(f"Processing: {file_name}")
             self.process_content(txt_content, json_file_path)
-
-
 
 
 if __name__ == '__main__':
