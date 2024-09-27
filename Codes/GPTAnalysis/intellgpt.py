@@ -41,7 +41,6 @@ class IntelliLLM:
         self.exoutput = self.read_file(self.exoutput_file)
         self.common_words = set()
         self.dealt_pkgs = list()
-        self.regex = r"(?:@[a-zA-Z0-9\-]+\/)?[a-zA-Z0-9][a-zA-Z0-9\._\-]+"
         self.max_attempts = 5  # 最大尝试次数
         self.config_path = os.path.join(os.path.dirname(__file__), "..", "..", "Configs", "config.json")
         with open(self.config_path, 'r') as file:
@@ -233,7 +232,7 @@ class IntelliLLM:
         content_message = self.parse_text_with_images(content)
         prompt_message = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
-            {"role": "user", "content": "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n[**example output**]:\n" + self.exoutput + "\n\n[**entity description**]:\n" + self.all_entity + "\n\n" + self.intelli_direct_prompt + "\n\n"}
+            {"role": "user", "content": "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n" + self.intelli_direct_prompt + "\n\n" + "\n\n[**example output**]:\n" + self.exoutput}
         ]
         combined_message = content_message + prompt_message
         # 将数据写入到JSON文件，带有格式化
@@ -274,7 +273,6 @@ class IntelliLLM:
             if (file_name in [".DS_Store"]) or (file_name in self.dealt_pkgs):
                 print(f"Skipping: {file_name}")
                 continue
-
             # 生成对应 JSON 文件路径
             json_file_name = file_name.replace(".txt", "")
             json_file_path = os.path.join(self.json_dir, self.source_dir, json_file_name)
@@ -286,4 +284,4 @@ class IntelliLLM:
 if __name__ == '__main__':
     # 使用示例
     ltmgpt = IntelliLLM()
-    ltmgpt.start("checkmarx")
+    ltmgpt.start("medium_recommand")
