@@ -33,13 +33,16 @@ from urllib.parse import urlparse, unquote
 
 class WebPageContent:
     def __init__(self):
-        self.webpage_txt = "pagelinks/waiting_collection.txt"
-        self.collected_pagelinks = 'pagelinks/collected_pagelinks.txt'
+        current_dir = os.path.dirname(__file__)
+        codes_dir = os.path.dirname(current_dir)
+        project_dir = os.path.dirname(codes_dir)
+        self.webpage_txt = os.path.join(current_dir, "pagelinks", "waiting_collection.txt")
+        self.collected_pagelinks = os.path.join(current_dir, "pagelinks", "collected_pagelinks.txt")
+        self.text_dir = os.path.join(project_dir, "Dataset", "Content")
+        self.img_dir = os.path.join(project_dir, "Dataset", "Image")
+        self.chromedriver = os.path.join(project_dir, "utils", "chromedriver", "win32", "chromedriver.exe")
         self.webpage_dict = {}
         self.processed_files = []
-        self.text_dir = "../../Dataset/Content/"
-        self.img_dir = "../../Dataset/Image"
-        self.chromedriver = '../../utils/chromedriver/win32/chromedriver.exe'
         self.service = Service(executable_path=self.chromedriver)
         self.options = webdriver.ChromeOptions()
         self.options.add_argument("--disable-gpu")
@@ -187,18 +190,7 @@ class WebPageContent:
             print(f"Exception occurred while downloading image: {str(e)}")
             return False
 
-    # 处理图片
-    def parse_img(self, img_tag, web_name, timestamp, driver):
-        if 'srcset' in img_tag:
-            # 如果存在srcset属性，则使用srcset的URL
-            srcset_urls = img_tag['srcset'].split(',')
-            img_url = srcset_urls[0].strip().split(' ')[0]  # 获取第一个URL
-        else:
-            # 否则使用src属性的URL
-            img_url = img_tag['src']
-        return img_url
-
-    def format_url(self, img_url, web_name, timestamp, driver):
+    def format_filename(self, img_url, web_name, timestamp):
         # 解析url
         parsed_url = urlparse(img_url)
         img_path = parsed_url.path  # 获取路径部分
@@ -212,16 +204,13 @@ class WebPageContent:
         img_save_dir = os.path.join(self.img_dir, web_name, timestamp)
         img_save_path = os.path.join(img_save_dir, img_filename)  # 保存到 dataset 的文件夹中
 
-        if not img_url.startswith(('http://', 'https://')):  # 检查是否为绝对路径
-            base_url = driver.current_url
-            img_url = urljoin(base_url, img_url)
-
-        return img_url, img_save_dir, img_save_path
+        return img_filename, img_save_dir, img_save_path
 
     # 解析传入的网页元素element中的各种标签，并将其内容处理成文本形式返回
     def parse_elements(self, driver, element, web_name, timestamp):
         page_content = ""  # 存储页面内容的字符串
         processed_tags = set()  # 用于跟踪已处理的标签
+        images = set()
 
         def process_tag(tag):
             nonlocal page_content
@@ -231,20 +220,26 @@ class WebPageContent:
             # 替换 <br> 标签为换行符
             for br in tag.find_all("br"):
                 br.replace_with("\n")
+
+            # 寻找图片
+            for img_tag in tag.find_all(src=True):
+                src = img_tag['src']
+                base_url = driver.current_url
+                img_url = urljoin(base_url, src)
+                if img_url.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    if img_url not in images:
+                        img_filename, img_save_dir, img_save_path = self.format_filename(img_url, web_name, timestamp)
+                        images.add(img_url)
+                        if self.save_image_from_url(img_url, img_save_dir, img_save_path):
+                            page_content += '\nimage: ' + img_save_path
+                        else:
+                            print(f"Failed to save image from {img_url}")
+
             # 对特定标签应用特定处理函数
             # 段落、代码块、标题
             if tag.name in ['p', 'code', 'h1', 'h2', 'h3']:
                 tag_content = tag.get_text().strip()
                 page_content += '\n' + tag_content
-
-                # 寻找当前标签下的所有img标签
-                img_tags = tag.find_all('img')
-                for img_tag in img_tags:
-                    img_url, img_save_dir, img_save_path = self.parse_img(img_tag, web_name, timestamp, driver)
-                    if self.save_image_from_url(img_url, img_save_dir, img_save_path):
-                        page_content += f"\nimage: {img_save_path}"  # 如果成功保存，记录保存路径
-                    else:
-                        print(f"Failed to save image from {img_url}")
                 return
             # 表格
             elif tag.name == 'table':
@@ -265,38 +260,6 @@ class WebPageContent:
                     with open("iframe.txt", "a") as txtfile:
                         txtfile.write(iframe_content)
                         txtfile.write("\n")
-                return
-            # img
-            elif tag.name == 'img':
-                img_url = self.parse_img(tag, web_name, timestamp, driver)
-                img_url, img_save_dir, img_save_path = self.format_url(img_url, web_name, timestamp, driver)
-                if self.save_image_from_url(img_url, img_save_dir, img_save_path):
-                    page_content += f"\nimage: {img_save_path}"  # 成功保存则记录保存路径
-                else:
-                    print(f"Failed to save image from {img_url}")
-                return
-            # figure
-            elif tag.name == 'figure':
-                a_tag = tag.find('a')
-                img_tag = tag.find('img')
-                pic_tag = tag.find('picture')
-                img_url = None
-                if img_tag:
-                    if img_tag and 'src' in img_tag:
-                        img_url = img_tag['src']
-                elif a_tag:
-                    img_url = a_tag['href']
-                elif pic_tag:
-                    src_tag = pic_tag.find('source')
-                    srcset_urls = src_tag['srcset'].split(',')
-                    img_url = srcset_urls[0].strip().split(' ')[0]  # 获取第一个URL
-                if img_url:
-                    # 解析url
-                    img_url, img_save_dir, img_save_path = self.format_url(img_url, web_name, timestamp, driver)
-                    if self.save_image_from_url(img_url, img_save_dir, img_save_path):
-                        page_content += f"\nimage: {img_save_path}"  # 如果成功保存，记录保存路径
-                    else:
-                        print(f"Failed to save image from {img_url}")
                 return
             # 处理其他标签，遍历其子标签
             else:
@@ -955,5 +918,5 @@ if __name__ == '__main__':
     # webpage_content.medium_content()
     # webpage_content.sonatype_content()
     # webpage_content.checkmarx_content()
-    webpage_content.medium_recommand_content()
+    # webpage_content.medium_recommand_content()
     # webpage_content.phylum_content()
