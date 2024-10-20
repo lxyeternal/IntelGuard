@@ -40,13 +40,15 @@ class WebPageContent:
         self.collected_pagelinks = os.path.join(current_dir, "pagelinks", "collected_pagelinks.txt")
         self.text_dir = os.path.join(project_dir, "Dataset", "Content")
         self.img_dir = os.path.join(project_dir, "Dataset", "Image")
-        self.chromedriver = os.path.join(project_dir, "utils", "chromedriver", "win32", "chromedriver.exe")
+        self.chromedriver = os.path.join(project_dir, "utils", "chromedriver", "macarm", "chromedriver")
         self.webpage_dict = {}
         self.processed_files = []
         self.service = Service(executable_path=self.chromedriver)
         self.options = webdriver.ChromeOptions()
         self.options.add_argument("--disable-gpu")
         self.options.add_argument("--enable-javascript")
+
+        self.webpage_dict = {"medium_recommand": [("20240824_191625_CCCCCC", "https://zero.checkmarx.com/over-170k-users-affected-by-attack-using-fake-python-infrastructure-05a04b7e058a"), ("20240824_191625_BBBBBB", "https://zero.checkmarx.com/17-malicious-python-packages-targeting-selenium-users-to-steal-crypto-8d24628ec656")]}
 
     def write_text(self, content, filename):
         # 获取文件夹路径
@@ -166,10 +168,11 @@ class WebPageContent:
             html = driver_iframe.page_source
             soup = BeautifulSoup(html, 'html.parser')
             table = soup.find_all('table')
-            for tr in table[0].find_all('tr'):
-                # 提取每行的单元格并用'\t'拼接
-                row = '\t'.join(td.get_text().strip() for td in tr.find_all('td'))
-                table_data += row + '\n'
+            if table:
+                for tr in table[0].find_all('tr'):
+                    # Extract each row's cells and join with '\t'
+                    row = '\t'.join(td.get_text().strip() for td in tr.find_all('td'))
+                    table_data += row + '\n'
         except:
             pass
         return table_data
@@ -214,9 +217,10 @@ class WebPageContent:
 
         def process_tag(tag):
             nonlocal page_content
-            if tag in processed_tags:
+            tag_id = id(tag)
+            if tag_id in processed_tags:
                 return
-            processed_tags.add(tag)
+            processed_tags.add(tag_id)
             # 替换 <br> 标签为换行符
             for br in tag.find_all("br"):
                 br.replace_with("\n")
@@ -240,19 +244,17 @@ class WebPageContent:
             if tag.name in ['p', 'code', 'h1', 'h2', 'h3']:
                 tag_content = tag.get_text().strip()
                 page_content += '\n' + tag_content
-                return
             # 表格
             elif tag.name == 'table':
                 table_content = self.parsetable(tag)
                 page_content += '\n' + table_content
-                return
             # 无序列表和有序列表
             elif tag.name in ['ul', 'ol']:
                 list_content = self.parse_list_tags(tag)
                 page_content += '\n' + list_content
-                return
             # iframe
             elif tag.name == 'iframe':
+                time.sleep(5)
                 if tag.get('src'):
                     iframe_src = tag.get('src')
                     iframe_content = self.process_iframe(iframe_src)
@@ -260,7 +262,6 @@ class WebPageContent:
                     with open("iframe.txt", "a") as txtfile:
                         txtfile.write(iframe_content)
                         txtfile.write("\n")
-                return
             # 处理其他标签，遍历其子标签
             else:
                 # 如果标签不是特定的标签，则遍历其子标签
@@ -273,13 +274,14 @@ class WebPageContent:
                     tag_content = tag.get_text().strip()
                     page_content += '\n' + tag_content
 
-        children = element.find_elements(By.XPATH, "./*")  # 获取元素的所有子元素
+        children = element.find_elements(By.XPATH, ".//*")  # 获取元素的所有子元素
         for child in children:
             # 如果子元素是 iframe 标签，处理 iframe 内容
             if child.tag_name.lower() == "iframe":
+                time.sleep(5)
                 iframe_src = child.get_attribute('src')
                 iframe_content = self.process_iframe(iframe_src)
-                page_content += iframe_content
+                page_content += '\n' + iframe_content
                 with open("iframe.txt", "a") as txtfile:
                     txtfile.write(iframe_content)
                     txtfile.write("\n")
@@ -562,8 +564,7 @@ class WebPageContent:
 
             webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)  # 解析页面内容
             print(webpage_content)  # 打印页面内容
-            self.write_text(webpage_content,
-                            os.path.join(os.path.join(self.text_dir, "sonatype"), filename))  # 写入内容到文件
+            self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "sonatype"), filename))  # 写入内容到文件
             self.write_collected_pagelinks(timestamp, 'sonatype', page_url)
 
     def checkmarx_content(self):
@@ -898,7 +899,7 @@ class WebPageContent:
 
 if __name__ == '__main__':
     webpage_content = WebPageContent()
-    webpage_content.read_txt()
+    # webpage_content.read_txt()
     # webpage_content.qianxin_content()
     # webpage_content.jfrog_content()
     # webpage_content.tuxcare_content()
@@ -918,5 +919,5 @@ if __name__ == '__main__':
     # webpage_content.medium_content()
     # webpage_content.sonatype_content()
     # webpage_content.checkmarx_content()
-    # webpage_content.medium_recommand_content()
+    webpage_content.medium_recommand_content()
     # webpage_content.phylum_content()
