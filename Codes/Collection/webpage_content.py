@@ -211,22 +211,24 @@ class WebPageContent:
 
     # 解析传入的网页元素element中的各种标签，并将其内容处理成文本形式返回
     def parse_elements(self, driver, element, web_name, timestamp):
-        page_content = ""  # 存储页面内容的字符串
-        processed_tags = set()  # 用于跟踪已处理的标签
+        page_content = ""  # Stores the content of the page
+        processed_tags = set()  # To keep track of processed tags
         images = set()
 
+        # Use recursive traversal of the BeautifulSoup tag tree
         def process_tag(tag):
             nonlocal page_content
             tag_id = id(tag)
             if tag_id in processed_tags:
                 return
             processed_tags.add(tag_id)
-            # 替换 <br> 标签为换行符
+
+            # Replace <br> tags with newlines
             for br in tag.find_all("br"):
                 br.replace_with("\n")
 
-            # 寻找图片
-            for img_tag in tag.find_all(src=True):
+            # Handle images
+            for img_tag in tag.find_all('img', src=True):
                 src = img_tag['src']
                 base_url = driver.current_url
                 img_url = urljoin(base_url, src)
@@ -239,22 +241,24 @@ class WebPageContent:
                         else:
                             print(f"Failed to save image from {img_url}")
 
-            # 对特定标签应用特定处理函数
-            # 段落、代码块、标题
+            # Handle paragraphs, code blocks, headings
             if tag.name in ['p', 'code', 'h1', 'h2', 'h3']:
                 tag_content = tag.get_text().strip()
                 page_content += '\n' + tag_content
-            # 表格
+
+            # Handle tables
             elif tag.name == 'table':
                 table_content = self.parsetable(tag)
                 page_content += '\n' + table_content
-            # 无序列表和有序列表
+
+            # Handle lists
             elif tag.name in ['ul', 'ol']:
                 list_content = self.parse_list_tags(tag)
                 page_content += '\n' + list_content
-            # iframe
+
+            # Handle iframes
             elif tag.name == 'iframe':
-                time.sleep(5)
+                time.sleep(5)  # Wait for iframe content to load
                 if tag.get('src'):
                     iframe_src = tag.get('src')
                     iframe_content = self.process_iframe(iframe_src)
@@ -262,37 +266,21 @@ class WebPageContent:
                     with open("iframe.txt", "a") as txtfile:
                         txtfile.write(iframe_content)
                         txtfile.write("\n")
-            # 处理其他标签，遍历其子标签
-            else:
-                # 如果标签不是特定的标签，则遍历其子标签
-                if tag.children:
-                    for child in tag.children:
-                        if isinstance(child, Tag):  # 确保子元素是一个标签
-                            process_tag(child)
-                else:
-                    # 如果标签没有子标签，则直接提取其文本
-                    tag_content = tag.get_text().strip()
-                    page_content += '\n' + tag_content
 
-        children = element.find_elements(By.XPATH, ".//*")  # 获取元素的所有子元素
-        for child in children:
-            # 如果子元素是 iframe 标签，处理 iframe 内容
-            if child.tag_name.lower() == "iframe":
-                time.sleep(5)
-                iframe_src = child.get_attribute('src')
-                iframe_content = self.process_iframe(iframe_src)
-                page_content += '\n' + iframe_content
-                with open("iframe.txt", "a") as txtfile:
-                    txtfile.write(iframe_content)
-                    txtfile.write("\n")
-            # 如果子元素不是 iframe 标签，获取其 outerHTML，并用 BeautifulSoup 解析
+            # Process all other tags recursively
             else:
-                child_html = child.get_attribute('outerHTML')
-                child_soup = BeautifulSoup(child_html, 'html.parser')
-                # 仅处理顶层标签
-                for tag in child_soup.children:
-                    if tag.name:  # 确保是 BeautifulSoup 标签
-                        process_tag(tag)
+                for child in tag.children:
+                    if isinstance(child, Tag):  # Ensure child is a tag
+                        process_tag(child)
+
+        # Get all elements, including nested ones
+        element_html = element.get_attribute('outerHTML')
+        soup = BeautifulSoup(element_html, 'html.parser')
+
+        # Process all tags recursively
+        for tag in soup.find_all(recursive=True):
+            process_tag(tag)
+
         return page_content
 
     def print_all_child_tags(self, element):
