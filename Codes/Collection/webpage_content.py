@@ -41,6 +41,7 @@ class WebPageContent:
         self.text_dir = os.path.join(project_dir, "Dataset", "Content")
         self.img_dir = os.path.join(project_dir, "Dataset", "Image")
         self.chromedriver = os.path.join(project_dir, "utils", "chromedriver", "macarm", "chromedriver")
+        self.chromedriver = os.path.join(project_dir, "utils", "chromedriver", "win32", "chromedriver.exe")  # gjx
         self.webpage_dict = {}
         self.processed_files = []
         self.service = Service(executable_path=self.chromedriver)
@@ -214,6 +215,7 @@ class WebPageContent:
         page_content = ""  # Stores the content of the page
         processed_tags = set()  # To keep track of processed tags
         images = set()
+        img_data = dict()
 
         # Use recursive traversal of the BeautifulSoup tag tree
         def process_tag(tag):
@@ -228,16 +230,19 @@ class WebPageContent:
                 br.replace_with("\n")
 
             # Handle images
-            for img_tag in tag.find_all('img', src=True):
+            for img_tag in tag.find_all(src=True):
                 src = img_tag['src']
                 base_url = driver.current_url
                 img_url = urljoin(base_url, src)
                 if img_url.lower().endswith(('.png', '.jpg', '.jpeg')):
                     if img_url not in images:
-                        img_filename, img_save_dir, img_save_path = self.format_filename(img_url, web_name, timestamp)
+                        img_filename, img_save_dir, img_save_path = self.format_filename(img_url, web_name,
+                                                                                         timestamp)
                         images.add(img_url)
                         if self.save_image_from_url(img_url, img_save_dir, img_save_path):
-                            page_content += '\nimage: ' + img_save_path
+                            # page_content += '\nimage: ' + img_save_path
+                            img_id = id(img_tag)
+                            img_data[img_id] = img_save_path
                         else:
                             print(f"Failed to save image from {img_url}")
 
@@ -245,6 +250,10 @@ class WebPageContent:
             if tag.name in ['p', 'code', 'h1', 'h2', 'h3']:
                 tag_content = tag.get_text().strip()
                 page_content += '\n' + tag_content
+
+            elif id(tag) in img_data:
+                page_content += '\n' + 'image: ' + img_data[id(tag)] + '\n'
+
 
             # Handle tables
             elif tag.name == 'table':
@@ -294,53 +303,20 @@ class WebPageContent:
     def aabbcc_content(self):
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
-        timestamp = "123456"
-        page_url = "https://zero.checkmarx.com/alert-cdn-service-polyfill-io-f9999bb1eb8f"
-        filename = timestamp + ".txt"
+        timestamp = "checkmarx1"
+        # page_url = "https://snyk.io/blog/securing-artifactory-using-snyk/"
+        page_url = "https://checkmarx.com/blog/ericsson-sensitive-data-exposure-via-trace-axd/"
         print(timestamp, page_url)
-        driver = webdriver.Chrome(service=self.service, options=self.options)
-        driver.implicitly_wait(5)
-        web_name = 'medium'
-        # try:
+        web_name = 'checkmarx'
         driver.get(page_url)
-        # 定义JavaScript脚本实现平滑滚动
-        smooth_scroll_script = """
-        let intervalId = setInterval(function() {
-            window.scrollBy(0, 200); // 每次向下滚动50像素
-        }, 100); // 每100毫秒滚动一次
-
-        // 设置一个超时，以防无限滚动
-        setTimeout(function() {
-            clearInterval(intervalId);
-        }, 15000); // 10秒后停止滚动
-        """
-        # 执行JavaScript脚本
-        driver.execute_script(smooth_scroll_script)
-        # driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(20)
-
-        try:
-            # 尝试定位 .ch.bg.ga.gb.gc.gd 的元素
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".ch.bg.ga.gb.gc.gd"))
-            )
-            content_div = driver.find_elements(By.CSS_SELECTOR, ".ch.bg.ga.gb.gc.gd")[1]
-        except NoSuchElementException:
-            try:
-                # 如果找不到 .ch.bg.ga.gb.gc.gd，则尝试定位 .ci.bh.fz.ga.gb.gc 的元素
-                WebDriverWait(driver, 20).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, ".ci.bh.fz.ga.gb.gc"))
-                )
-                content_div = driver.find_elements(By.CSS_SELECTOR, ".ci.bh.fz.ga.gb.gc")[1]
-            except NoSuchElementException:
-                # 如果两个选择器都找不到，可以在这里处理，例如打印错误信息或者其他操作
-                print("Both CSS selectors not found")
-                content_div = None  # 或者做其他处理
-        page_content = self.parse_elements(driver, content_div, web_name, timestamp)
+        time.sleep(3)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        # 等待10秒直到找到<article>
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "article")))
+        # 找到 <article> 标签的元素
+        article_content = driver.find_element(By.TAG_NAME, "article")
+        page_content = self.parse_elements(driver, article_content, web_name, timestamp)
         print(page_content)
-        self.write_text(page_content, os.path.join(os.path.join(self.text_dir, "medium"), filename))
-        # except:
-        #     print("------Error-------")
 
     def medium_content(self):
         driver = webdriver.Chrome(service=self.service, options=self.options)
@@ -907,5 +883,6 @@ if __name__ == '__main__':
     # webpage_content.medium_content()
     # webpage_content.sonatype_content()
     # webpage_content.checkmarx_content()
-    webpage_content.medium_recommand_content()
+    # webpage_content.medium_recommand_content()
     # webpage_content.phylum_content()
+    webpage_content.aabbcc_content()
