@@ -1,5 +1,5 @@
 
-image: ../../Dataset/Image\checkmarx\20240824_195356_354844\shutterstock_1744222322.jpg
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\shutterstock_1744222322.jpg
 NPM, the package manager for Node.js, is an open source project that serves as a critical part of the JavaScript community and helps support one of the largest developer ecosystems. According to its website, “npm is relied upon by more than 11 million developers worldwide. The free npm registry has become the center of JavaScript code sharing, and with more than one million packages, is the largest software registry in the world.”
 Given the breadth of the npm universe and the Checkmarx Security Research Team’s always-on curiosity into performing investigations into open source projects and uncovering 0-days, we recently conducted an npm-focused vulnerability workshop. As a result of our efforts, we discovered an interesting remote code execution (RCE) deserialization issue in the npm Replicator package.
 Impact Summary
@@ -18,35 +18,49 @@ ArrayBuffer
 Typed arrays
 Details
 First, let’s get a general idea of how Replicator serializes and deserializes those unsupported JSON objects. When trying to serialize a Set object for example, the following output will be generated:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image11.png
 The object Set was changed to a valid JSON with the key “@t” pointing to the type of the object inside the double brackets “[[type]]”, and the parameters passed to the object are under the “data” property.
 When researching these types of packages, it’s interesting to focus on the deserialization component since it is more likely that a user input would be string passed to the deserialization code rather than an object passing to the serialization code.
 
 After checking how the deserialization is implemented in the code, the first 8 types seemed safe. However, with further examination, we came across an issue at the last object type – TypeArray.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image21.png
 The function on the bottom is the one responsible for the deserialization. With that, let’s serialize one of the TypeArrays – Int8Array:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image31024x521.png
 The property “ctorName” states the object name of the TypeArray and the “arr” is the object value. But the issue in the code is that there is no validation that the object name in “ctorName” is actually a TypeArray object. When serializing, on the other hand, there is a validation using the list “TYPED_ARRAY_CTORS” defined earlier.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image41.png
 Looking at the code shown before we can invoke “new” on every function under the GLOBAL object with our own parameters. Something like this:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image51.png
 From here, there are limitations that we need to bypass in order to achieve the code execution.
 1 – From the “fromSerializable” function check, the “ctorName” must be a name of a function.
 2 – The function must be a constructor.
 a. Hence, we can’t just call “Eval” because it’s not a constructor.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image611.png
 3 – Must be a direct descendent of the GLOBAL object.
 a. It’s impossible to call a function like “child_process.exec(‘evilcode’)” because we control only the value inside the         brackets
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Screenshot202206140754131.jpg
 4 – Must be a valid JSON.
 a. As mentioned before, Replicator wraps around JSON parse and stringify. Due to that, the input string given to the decode function gets “JSON.parse” before going into the problematic “fromSerializable” function. So, calling “setImmediate” / “setInterval” / “setTimeout” isn’t possible because it requires a callback function as an input and that isn’t JSON valid.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image91024x911.png
 The following payload will fail at JSON.parse before invoking a new setTimeout:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image101024x381.png
 There is a way to pass a string (which is a JSON valid input) that will be converted to JavaScript code. Using a new “Function” will create an anonymous function with our payload, but it will not get executed.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image111.png
 At this point, it looks like we cannot go further, but there are still some security concerns and vulnerabilities despite the limitations:
 
 Calling an arbitrary function created by the application using replicator, which heavily depends on the application and the specific situation, something like:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image121.png
 
 Local file inclusion using “require” could lead to other vulnerabilities, such as: XSS, RCE, sensitive information disclosure, and more. This, as well, depends on the attack scenario.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image131.png
 
 Etc…
 After fuzzing and some more research, we asked ourselves what happens if we serialize a Set within a Set. What would that look like? Is it done recursively?
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image141024x581.png
 When understanding that the serialization/deserialization is done recursively, the payload to an RCE was around the corner. As mentioned before, we can create a new “Function”, but nothing will run it, and we can call “setTimeout,” but have to give it a function to execute.
 Combining these two, here is the final payload to trigger code execution:
 replicator.decode('[{"@t":"[[TypedArray]]","data":{"ctorName":"setTimeout","arr":​{"@t":"[[TypedArray]]","data":{"ctorName":"Function","arr":" process.mainModule.require('child_process').exec('calc');"}}​}}]')
 
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20240824_195356_354844\Image151024x3671.png
 The inner object will create a function with the code input as a string, and the other object, “setTimeout”, receives the function as an argument and runs the code.
 
 Depends on the scope of the program, the shell exploit code could change. For example, in the picture above, the payload was:
@@ -75,3 +89,4 @@ Issue
 Pull request
 Fixing Commit
 Advisory
+replicator.decode('[{"@t":"[[TypedArray]]","data":{"ctorName":"setTimeout","arr":​{"@t":"[[TypedArray]]","data":{"ctorName":"Function","arr":" process.mainModule.require('child_process').exec('calc');"}}​}}]')
