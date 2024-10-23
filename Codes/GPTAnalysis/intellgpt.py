@@ -15,9 +15,15 @@ import re
 import os
 import json
 import time
+import nltk
 import base64
 import openai  # 0.28.1
 import tiktoken
+from nltk.corpus import stopwords
+# 首次使用时需要下载停用词集
+nltk.download('stopwords')
+# 获取英语停用词集xw
+stop_words = set(stopwords.words('english'))
 
 
 class IntelliLLM:
@@ -29,6 +35,7 @@ class IntelliLLM:
         self.json_dir = os.path.join(project_dir, "Dataset", "IntelliJson")
         self.content_dir = os.path.join(project_dir, "Dataset", "Content")
         self.images_dir = os.path.join(project_dir, "Dataset", "Image")
+        self.common_words_file = os.path.join(project_dir, "archive", "common_word.txt")
         self.all_entity_file = os.path.join(current_dir, "EntityRules", "all_entity")
         self.intelli_direct_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_direct")
         self.info_verify_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_entity_verify")
@@ -40,6 +47,7 @@ class IntelliLLM:
         self.functionality_list = self.read_file(self.functionality_file)
         self.exoutput = self.read_file(self.exoutput_file)
         self.common_words = set()
+        self.regex = r"(?:@[a-zA-Z0-9\-]+\/)?[a-zA-Z0-9][a-zA-Z0-9\._\-]+"
         self.dealt_pkgs = list()
         self.max_attempts = 5  # 最大尝试次数
         self.config_path = os.path.join(os.path.dirname(__file__), "..", "..", "Configs", "config.json")
@@ -56,9 +64,36 @@ class IntelliLLM:
             content = file.read()
         return content
 
+    def load_common_words(self):
+        with open(self.common_words_file, 'r', encoding='utf-8') as file:
+            for line in file:
+                self.common_words.add(line.strip().lower())
+
     def encode_image(self, image_path):
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
+
+
+    def extract_package_names(self, content):
+        # PyPI 和 npm 的正则表达式
+        try:
+            unique_words = list()
+            matches = re.findall(self.regex, content)
+            # 去除重复的匹配项
+            unique_matches = set(matches)
+            for word in unique_matches:
+                if word.endswith(".") or word.endswith(","):
+                    word = word[:-1]
+                    if word.lower() not in self.common_words:
+                        unique_words.append(word)
+                else:
+                    if word.lower() not in self.common_words:
+                        unique_words.append(word)
+            unique_words = set(unique_words)
+            return unique_words
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            return set()
 
     # 读取处理过的包名文件列表
     def load_dealt_pkgs(self):
@@ -223,7 +258,8 @@ class IntelliLLM:
         return messages
 
     # 提取复杂实体
-    def entity_extract_llm(self, content):
+    def entity_extract_llm(self, content, potential_entity):
+        print(potential_entity)
         # 统计 token 的数量
         token_length = self.num_tokens_from_messages(content)
         max_tokens = 110000 - int(1.0 * token_length)
@@ -232,7 +268,8 @@ class IntelliLLM:
         content_message = self.parse_text_with_images(content)
         prompt_message = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
-            {"role": "user", "content": "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n" + self.intelli_direct_prompt + "\n\n" + "\n\n[**example output**]:\n" + self.exoutput}
+            {"role": "user", "content": "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n" + self.intelli_direct_prompt + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n"}
+            # {"role": "user", "content": "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n" + self.intelli_direct_prompt + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n" + "\n\n[**example output**]:\n" + self.exoutput}
         ]
         combined_message = content_message + prompt_message
         # 将数据写入到JSON文件，带有格式化
@@ -259,7 +296,11 @@ class IntelliLLM:
 
     # 完成从提取实体到验证信息的整个流程，并保存结果
     def process_content(self, content, file_name):
-        complete_entity = self.entity_extract_llm(content)  # 调用 entity_extract_llm 提取复杂实体
+        self.load_common_words()
+        re_pkgnames = self.extract_package_names(content)
+        # 删除停用词
+        filtered_words = [word for word in re_pkgnames if word not in stop_words]
+        complete_entity = self.entity_extract_llm(content, filtered_words)  # 调用 entity_extract_llm 提取复杂实体
         self.save_json(complete_entity, file_name + "_extract_gpt4.json")
         llm_verify = self.info_verify_llm(content, complete_entity)  # 验证
         self.save_json(llm_verify, file_name + "_verify_gpt4.json")
