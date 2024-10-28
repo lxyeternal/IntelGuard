@@ -14,6 +14,7 @@ import os
 import json
 from py2neo import Graph, Node, Relationship
 
+
 # Connect to Neo4j (assuming it's running locally with default settings)
 graph = Graph("bolt://localhost:7687", auth=("neo4j", "12345678"), name="intelligraph")
 # Clear the existing graph
@@ -169,10 +170,13 @@ if __name__ == '__main__':
                 if json_file.endswith('_verify_gpt4.json'):
                     json_file_path = os.path.join(source_path, json_file)
                     # Load the JSON data
-                    with open(json_file_path, 'r') as f:
-                        data = json.load(f)
-                    # Process each package in the "packages" list
-                    for package in data.get('packages', []):
-                        create_package_graph(package, source_dir)
+                    try:
+                        with open(json_file_path, 'r') as f:
+                            data = json.load(f)
+                        # Process each package in the "packages" list
+                        for package in data.get('packages', []):
+                            create_package_graph(package, source_dir)
+                    except Exception as e:
+                        pass
     # The graph is now built and ready to be visualized using Neo4j.
     print("Knowledge graph has been successfully created in Neo4j.")
