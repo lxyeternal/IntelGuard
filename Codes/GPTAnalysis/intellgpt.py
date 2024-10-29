@@ -301,7 +301,7 @@ class IntelliLLM:
         filtered_words = [word for word in re_pkgnames if word not in stop_words]
         complete_entity = self.entity_extract_llm(content, filtered_words)  # 调用 entity_extract_llm 提取复杂实体
         self.save_json(complete_entity, file_name + "_extract_gpt4.json")
-        llm_verify = self.info_verify_llm(content, complete_entity)  # 验证
+        llm_verify = self.info_verify_llm(content, complete_entity, filtered_words)  # 验证
         self.save_json(llm_verify, file_name + "_verify_gpt4.json")
 
     # 启动执行
