@@ -268,7 +268,7 @@ class IntelliLLM:
         content_message = self.parse_text_with_images(content)
         prompt_message = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
-            {"role": "user", "content": "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n" + self.intelli_direct_prompt + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n" + "\n\n[**example output**]:\n" + self.exoutput}
+            {"role": "user", "content": "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n" + "\n\n[**example output**]:\n" + self.exoutput + "\n\n" + self.intelli_direct_prompt}
         ]
         combined_message = content_message + prompt_message
         # 将数据写入到JSON文件，带有格式化
@@ -278,7 +278,7 @@ class IntelliLLM:
         return complex_entity
 
     # 验证提取的信息的准确性
-    def info_verify_llm(self, content, complex_entity):
+    def info_verify_llm(self, content, complex_entity, potential_entity):
         # 统计 token 的数量
         token_length = self.num_tokens_from_messages(content)
         max_tokens = 110000 - int(1.0 * token_length)
@@ -286,8 +286,8 @@ class IntelliLLM:
             content = self.token_slice(content)
         content_message = self.parse_text_with_images(content)
         prompt_message = [
-            {"role": "system", "content": "You are a cybersecurity expert specializing in verifying the accuracy of extracted information about malicious code detection. Your task is to cross-check the extracted entities and their relationships against the original content, ensuring all information is accurate and supported by the text."},
-            {"role": "user", "content": "Extract entity from content by LLM:\n\n" + complex_entity + "\n\n" + "\n\n[**entity description**]:\n" + self.all_entity + "\n\n" + self.infoverify_prompt + "\n\n"}
+            {"role": "system", "content": "You are a cybersecurity expert specializing in verifying the accuracy of extracted information about malicious code detection. Your task is to cross-check the extracted entities against the original content, ensuring all information is accurate and supported by the text."},
+            {"role": "user", "content": "[**entity_items**]:\n\n" + complex_entity + "\n\n" + "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n" + self.infoverify_prompt + "\n\n"}
         ]
         combined_message = content_message + prompt_message
         entity_validated = self.azure_query(combined_message, max_tokens)
