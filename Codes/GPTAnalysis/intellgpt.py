@@ -268,8 +268,7 @@ class IntelliLLM:
         content_message = self.parse_text_with_images(content)
         prompt_message = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
-            {"role": "user", "content": "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n" + self.intelli_direct_prompt + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n"}
-            # {"role": "user", "content": "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n" + self.intelli_direct_prompt + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n" + "\n\n[**example output**]:\n" + self.exoutput}
+            {"role": "user", "content": "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n" + self.intelli_direct_prompt + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n" + "\n\n[**example output**]:\n" + self.exoutput}
         ]
         combined_message = content_message + prompt_message
         # 将数据写入到JSON文件，带有格式化
@@ -325,4 +324,4 @@ class IntelliLLM:
 if __name__ == '__main__':
     # 使用示例
     ltmgpt = IntelliLLM()
-    ltmgpt.start("medium_recommand")
+    ltmgpt.start("test")
