@@ -204,6 +204,8 @@ class IntelliLLM:
         return output
 
     def parse_text_with_images(self, content):
+        content = content.replace('\\', '/')
+        # print(content)
         messages = []
         # 正则匹配所有 image: 路径
         pattern = r'image:\s*([^\s]+)'
@@ -220,8 +222,8 @@ class IntelliLLM:
                     })
             else:
                 # 奇数索引是图片路径
-                image_rel_path = part.strip().replace('\\', '/')
-                path_parts = image_rel_path.split('/')
+                # image_rel_path = part.strip().replace('\\', '/')
+                path_parts = part.strip().split('/')
                 if len(path_parts) >= 2:
                     # 提取最后两个部分
                     new_rel_path = os.path.join(*path_parts[-2:])
@@ -229,6 +231,7 @@ class IntelliLLM:
                     full_image_path = os.path.join(self.images_dir, self.source_dir, new_rel_path)
                     # 规范化路径
                     full_image_path = os.path.normpath(full_image_path)
+                    # print(full_image_path)
                     if os.path.exists(full_image_path):
                         base64_image = self.encode_image(full_image_path)
                         if base64_image:
@@ -246,7 +249,7 @@ class IntelliLLM:
                 else:
                     combined_content.append({
                         "type": "text",
-                        "text": f"[无效的图片路径: {image_rel_path}]"
+                        "text": f"[无效的图片路径: {part}]"
                     })
 
         # 将组合后的文本和图片内容一起作为 "content" 发送
@@ -259,26 +262,27 @@ class IntelliLLM:
 
     # 提取复杂实体
     def entity_extract_llm(self, content, potential_entity):
-        print(potential_entity)
+        # print(potential_entity)
         # 统计 token 的数量
         token_length = self.num_tokens_from_messages(content)
         max_tokens = 110000 - int(1.0 * token_length)
         if token_length > 110000:
             content = self.token_slice(content)
         content_message = self.parse_text_with_images(content)
+        # print(content_message)
         prompt_message = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
-            {"role": "user", "content": "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n" + "\n\n[**example output**]:\n" + self.exoutput + "\n\n" + self.intelli_direct_prompt}
+            {"role": "user", "content": "[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n" + "\n\n[**example output**]:\n" + self.exoutput + "\n\n" + self.intelli_direct_prompt}
         ]
         combined_message = content_message + prompt_message
         # 将数据写入到JSON文件，带有格式化
-        with open("test.json", "w", encoding="utf-8") as f:
-            json.dump(combined_message, f, ensure_ascii=False, indent=4)
+        # with open("test.json", "w", encoding="utf-8") as f:
+        #     json.dump(combined_message, f, ensure_ascii=False, indent=4)
         complex_entity = self.azure_query(combined_message, max_tokens)
         return complex_entity
 
     # 验证提取的信息的准确性
-    def info_verify_llm(self, content, complex_entity, potential_entity):
+    def info_verify_llm(self, content, complex_entity):
         # 统计 token 的数量
         token_length = self.num_tokens_from_messages(content)
         max_tokens = 110000 - int(1.0 * token_length)
@@ -287,7 +291,7 @@ class IntelliLLM:
         content_message = self.parse_text_with_images(content)
         prompt_message = [
             {"role": "system", "content": "You are a cybersecurity expert specializing in verifying the accuracy of extracted information about malicious code detection. Your task is to cross-check the extracted entities against the original content, ensuring all information is accurate and supported by the text."},
-            {"role": "user", "content": "[**entity_items**]:\n\n" + complex_entity + "\n\n" + "\n\n[**entity description**]:\n" + self.all_entity + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n" + self.infoverify_prompt + "\n\n"}
+            {"role": "user", "content": "[**entity_items**]:\n\n" + complex_entity + "\n\n[**content**]:\n" + content + "\n\n" + self.infoverify_prompt}
         ]
         combined_message = content_message + prompt_message
         entity_validated = self.azure_query(combined_message, max_tokens)
@@ -301,7 +305,7 @@ class IntelliLLM:
         filtered_words = [word for word in re_pkgnames if word not in stop_words]
         complete_entity = self.entity_extract_llm(content, filtered_words)  # 调用 entity_extract_llm 提取复杂实体
         self.save_json(complete_entity, file_name + "_extract_gpt4.json")
-        llm_verify = self.info_verify_llm(content, complete_entity, filtered_words)  # 验证
+        llm_verify = self.info_verify_llm(content, complete_entity)  # 验证
         self.save_json(llm_verify, file_name + "_verify_gpt4.json")
 
     # 启动执行
@@ -324,4 +328,8 @@ class IntelliLLM:
 if __name__ == '__main__':
     # 使用示例
     ltmgpt = IntelliLLM()
-    ltmgpt.start("test")
+    # ltmgpt.start("test")
+    # ltmgpt.start("phylum")
+    # ltmgpt.start("sonatype_oss")
+    # ltmgpt.start("checkmarx")
+    ltmgpt.start("medium_recommand")
