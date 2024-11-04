@@ -63,7 +63,7 @@ class WebPageContent:
             txtfile.write(content)
             txtfile.flush()
 
-    def write_collected_pagelinks(self, timestamp, web, url):
+    def write_collected_pagelinks(self, timestamp, web, postdate, url):
         # 获取文件夹路径
         folder = os.path.dirname(self.collected_pagelinks)
         # 如果文件夹不存在，则创建它
@@ -71,7 +71,7 @@ class WebPageContent:
             os.makedirs(folder)
         # 现在可以安全地写入文件
         with open(self.collected_pagelinks, "a", encoding="utf-8") as txtfile:
-            txtfile.write(timestamp + '\t' + web + '\t' + url + '\n')
+            txtfile.write(timestamp + '\t' + web + '\t' + postdate + '\t' + url + '\n')
             txtfile.flush()
 
     # 从self.webpage_txt中读取数据，并将数据解析后存储到self.webpage_dict字典中
@@ -82,12 +82,12 @@ class WebPageContent:
                 url_split = url.split("\t")
                 timestamp = url_split[0].strip()
                 source = url_split[1].strip()
-                timedate = url_split[2].strip()
+                postdate = url_split[2].strip()
                 page_url = url_split[3].strip()
                 if source in self.webpage_dict:
-                    self.webpage_dict[source].append((timestamp, page_url))
+                    self.webpage_dict[source].append((timestamp, postdate, page_url))
                 else:
-                    self.webpage_dict[source] = [(timestamp, page_url)]
+                    self.webpage_dict[source] = [(timestamp, postdate, page_url)]
 
     def write_csv(self, data):
         with open("../Analysis/github_maldata.csv", "a") as csvfile:
@@ -335,7 +335,7 @@ class WebPageContent:
         driver.implicitly_wait(5)
         count = 0
         web_name = 'medium'
-        for timestamp, page_url in self.webpage_dict["medium"]:
+        for timestamp, postdate, page_url in self.webpage_dict["medium"]:
             print(page_url)
             try:
                 filename = timestamp + ".txt"
@@ -378,7 +378,7 @@ class WebPageContent:
         driver.implicitly_wait(5)
         count = 0
         web_name = 'medium_recommand'
-        for timestamp, page_url in self.webpage_dict["medium_recommand"]:
+        for timestamp, postdate, page_url in self.webpage_dict["medium_recommand"]:
             try:
                 if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
                     print("medium_recommand processed: ", timestamp)
@@ -408,7 +408,7 @@ class WebPageContent:
                 page_content = self.parse_elements(driver, content_div, web_name, timestamp)
                 print(page_content)
                 self.write_text(page_content, os.path.join(os.path.join(self.text_dir, "medium_recommand"), filename))
-                self.write_collected_pagelinks(timestamp, 'medium_recommand', page_url)
+                self.write_collected_pagelinks(timestamp, 'medium_recommand', postdate, page_url)
             except:
                 print(page_url, "------Error-------")
 
