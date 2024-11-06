@@ -336,6 +336,9 @@ class WebPageContent:
         count = 0
         web_name = 'medium'
         for timestamp, postdate, page_url in self.webpage_dict["medium"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("medium processed:", timestamp)
+                continue
             print(page_url)
             try:
                 filename = timestamp + ".txt"
@@ -369,12 +372,12 @@ class WebPageContent:
                 page_content = self.parse_elements(driver, content_div, web_name, timestamp)
                 print(page_content)
                 self.write_text(page_content, os.path.join(os.path.join(self.text_dir, "medium"), filename))
+                self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
                 print("------Error-------")
 
     def medium_recommand_content(self):
         driver = webdriver.Chrome(service=self.service, options=self.options)
-        # self.find_processed_files(os.path.join(self.text_dir, "medium_recommand"))  # 查找 'medium_recommand' 目录下已处理的文件
         driver.implicitly_wait(5)
         count = 0
         web_name = 'medium_recommand'
@@ -415,11 +418,14 @@ class WebPageContent:
     def qianxin_content(self):
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
-        count = 0
+
         web_name = 'qianxin'
-        for timestamp, page_url in self.webpage_dict["qianxin"]:
+        for timestamp, postdate, page_url in self.webpage_dict["qianxin"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("qianxin processed:", timestamp)
+                continue
+
             try:
-                count += 1
                 driver.get(page_url)
                 if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
                     print("qianxin processed: ", timestamp)
@@ -431,7 +437,7 @@ class WebPageContent:
                 webpage_content = self.parse_elements(driver, post_content, web_name, timestamp)
                 print(webpage_content)
                 self.write_text(webpage_content, os.path.join(self.text_dir, filename))
-                self.write_collected_pagelinks(timestamp, 'qianxin', page_url)
+                self.write_collected_pagelinks(timestamp, 'qianxin', postdate, page_url)
             except:
                 pass
 
@@ -440,7 +446,11 @@ class WebPageContent:
         driver.implicitly_wait(5)
         count = 0
         web_name = 'snyk'
-        for timestamp, page_url in self.webpage_dict["snyk"]:
+        for timestamp, postdate, page_url in self.webpage_dict["snyk"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("snyk processed:", timestamp)
+                continue
+
             print(page_url)
             count += 1
             driver.get(page_url)
@@ -452,7 +462,7 @@ class WebPageContent:
             webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
             print(webpage_content)
             self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "snyk"), filename))
-            self.write_collected_pagelinks(timestamp, web_name, page_url)
+            self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
 
     def github_content(self):
         driver = webdriver.Chrome(service=self.service, options=self.options)
@@ -486,7 +496,11 @@ class WebPageContent:
         web_name = 'bleepingcomputer'
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
-        for timestamp, page_url in self.webpage_dict["bleepingcomputer_pypi"]:
+        for timestamp, postdate, page_url in self.webpage_dict["bleepingcomputer_pypi"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("bleepingcomputer processed:", timestamp)
+                continue
+
             print(page_url)
             driver.get(page_url)
             time.sleep(10)
@@ -501,14 +515,18 @@ class WebPageContent:
                 print(webpage_content)
                 self.write_text(webpage_content,
                                 os.path.join(os.path.join(self.text_dir, "bleepingcomputer_pypi"), filename))
-                self.write_collected_pagelinks(timestamp, web_name, page_url)
+                self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
 
     def jfrog_content(self):
         web_name = 'jfrog'
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
         count = 0
-        for timestamp, page_url in self.webpage_dict["jfrog"]:
+        for timestamp, postdate, page_url in self.webpage_dict["jfrog"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("jfrog processed:", timestamp)
+                continue
+
             print(page_url)
             count += 1
             driver.get(page_url)
@@ -519,7 +537,7 @@ class WebPageContent:
             webpage_content = self.parse_elements(driver, article_section, web_name, timestamp)
             print(webpage_content)
             self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "jfrog"), filename))
-            self.write_collected_pagelinks(timestamp, web_name, page_url)
+            self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
 
     def sonatype_oss_content(self):
         web_name = 'sonatype_oss'  # 定义网站名称变量
@@ -527,7 +545,11 @@ class WebPageContent:
         driver = webdriver.Chrome(service=self.service, options=self.options)  # 初始化Chrome浏览器驱动
         driver.implicitly_wait(5)  # 设置隐式等待时间
         count = 0  # 初始化页面计数器
-        for timestamp, page_url in self.webpage_dict["sonatype_oss"]:  # 遍历页面URL和时间戳
+        for timestamp, postdate, page_url in self.webpage_dict["sonatype_oss"]:  # 遍历页面URL和时间戳
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("sonatype_oss processed:", timestamp)
+                continue
+
             count += 1  # 增加页面计数
             driver.get(page_url)  # 加载页面URL
             time.sleep(3)  # 等待页面加载
@@ -546,7 +568,7 @@ class WebPageContent:
             webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)  # 解析页面内容
             print(webpage_content)  # 打印页面内容
             self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "sonatype_oss"), filename))  # 写入内容到文件
-            self.write_collected_pagelinks(timestamp, 'sonatype_oss', page_url)
+            self.write_collected_pagelinks(timestamp, 'sonatype_oss', postdate, page_url)
 
     def checkmarx_content(self):
         # 启动chrome浏览器
@@ -554,9 +576,12 @@ class WebPageContent:
         driver.implicitly_wait(5)
         count = 0
         web_name = 'checkmarx'
-        # self.find_processed_files(os.path.join(self.text_dir, "checkmarx"))  # 查找 'checkmarx' 目录下已处理的文件
         # 遍历self.webpage_dict["checkmarx"]中的每个元素，元素为(timestamp, page_url)的元组
-        for timestamp, page_url in self.webpage_dict["checkmarx"]:
+        for timestamp, postdate, page_url in self.webpage_dict["checkmarx"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("qianxin processed:", timestamp)
+                continue
+
             count += 1
             driver.get(page_url)  # 使用driver打开page_url对应的网页
             time.sleep(3)  # 等待3秒，确保页面加载完成
@@ -583,7 +608,7 @@ class WebPageContent:
                 webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
                 print(webpage_content)
                 self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "checkmarx"), filename))
-                self.write_collected_pagelinks(timestamp, 'checkmarx', page_url)
+                self.write_collected_pagelinks(timestamp, 'checkmarx', postdate, page_url)
             except:
                 pass
                 print("Error")
@@ -593,7 +618,11 @@ class WebPageContent:
         driver.implicitly_wait(5)
         count = 0
         web_name = 'datadoghq'
-        for timestamp, page_url in self.webpage_dict["datadoghq"]:
+        for timestamp, postdate, page_url in self.webpage_dict["datadoghq"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("datadoghq processed:", timestamp)
+                continue
+
             count += 1
             driver.get(page_url)
             time.sleep(3)
@@ -606,21 +635,21 @@ class WebPageContent:
             webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
             # print(webpage_content)
             self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "datadoghq"), filename))
-            self.write_collected_pagelinks(timestamp, web_name, page_url)
+            self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
 
     def socket_content(self):
         web_name = 'socket'
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
         count = 0
-        for page_url in self.webpage_dict["socket"]:
-            timestamp = page_url[0]
-            page_url = page_url[1]
+        for timestamp, postdate, page_url in self.webpage_dict["socket"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("socket processed:", timestamp)
+                continue
+
             print('timestamp:', timestamp, 'page_url:', page_url)
             filename = timestamp + ".txt"
-            file_path = os.path.join('./gjj_texts/socket', filename)
-            if os.path.isfile(file_path):
-                continue
+
             count += 1
             driver.get(page_url)
             time.sleep(3)
@@ -631,7 +660,7 @@ class WebPageContent:
             print(webpage_content)
             # self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "socket"), "socket_" + str(count) + ".txt"))
             self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "socket"), filename))
-            self.write_collected_pagelinks(timestamp, web_name, page_url)
+            self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
 
     def twitter_content(self):
         usernames = ["@securestep9", "@garthoid", "@nicksdavis", "@bzvr_", "@PabloMxNL", "@R_Hubby", "@checkmarxoss",
@@ -661,7 +690,11 @@ class WebPageContent:
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
         count = 0
-        for timestamp, page_url in self.webpage_dict["rhisac"]:
+        for timestamp, postdate, page_url in self.webpage_dict["rhisac"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("rhisac processed:", timestamp)
+                continue
+
             print(page_url)
             count += 1
             driver.get(page_url)
@@ -675,17 +708,15 @@ class WebPageContent:
             webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
             print(webpage_content)
             self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "rhisac"), timestamp + ".txt"))
-            self.write_collected_pagelinks(timestamp, web_name, page_url)
+            self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
 
     # 从cybersecuritynews链接获取帖子内容，并将其处理并存储为文本文件
     def cybersecuritynews_content(self):
         web_name = 'cybersecuritynews'
-        # self.find_processed_files(os.path.join(self.text_dir, "cybersecuritynews"))  # 查找 'cybersecuritynews' 目录下已处理的文件
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
-        count = 0  # 计数已处理的页面数
         # 遍历每个时间戳和页面 URL
-        for timestamp, page_url in self.webpage_dict["cybersecuritynews"]:
+        for timestamp, postdate, page_url in self.webpage_dict["cybersecuritynews"]:
             # 检查文件是否已处理
             if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
                 print("cybersecuritynews processed: ", timestamp)
@@ -693,8 +724,6 @@ class WebPageContent:
             filename = timestamp + ".txt"
             print('cybersecuritynews', timestamp, page_url)
             try:
-                count += 1
-
                 # 获取页面内容
                 driver.get(page_url)
                 time.sleep(3)  # 等待页面加载
@@ -711,7 +740,7 @@ class WebPageContent:
                 # 将解析后的内容写入文本文件
                 self.write_text(webpage_content,
                                 os.path.join(os.path.join(self.text_dir, "cybersecuritynews"), filename))
-                self.write_collected_pagelinks(timestamp, web_name, page_url)
+                self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
                 print("Error: ", filename)
                 # 发生异常时，将空字符串写入文件
@@ -723,7 +752,7 @@ class WebPageContent:
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
         count = 0
-        for timestamp, page_url in self.webpage_dict["tuxcare"]:
+        for timestamp, postdate, page_url in self.webpage_dict["tuxcare"]:
             # 检查文件是否已处理
             if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
                 print("tuxcare processed: ", timestamp)
@@ -740,7 +769,7 @@ class WebPageContent:
                 webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
                 print(webpage_content)
                 self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "tuxcare"), filename))
-                self.write_collected_pagelinks(timestamp, web_name, page_url)
+                self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
                 print("Error: ", filename)
                 # self.write_text("", os.path.join(os.path.join(self.text_dir, "tuxcare"), filename))
@@ -751,7 +780,7 @@ class WebPageContent:
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
         count = 0
-        for timestamp, page_url in self.webpage_dict["reversinglabs"]:
+        for timestamp, postdate, page_url in self.webpage_dict["reversinglabs"]:
             # 检查文件是否已处理
             if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
                 print("reversinglabs processed: ", timestamp)
@@ -767,7 +796,7 @@ class WebPageContent:
             webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
             print(webpage_content)
             self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "reversinglabs"), filename))
-            self.write_collected_pagelinks(timestamp, web_name, page_url)
+            self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
 
     def fortinet_content(self):
         web_name = 'fortinet'
@@ -775,7 +804,7 @@ class WebPageContent:
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
         count = 0
-        for timestamp, page_url in self.webpage_dict["fortinet"]:
+        for timestamp, postdate, page_url in self.webpage_dict["fortinet"]:
             # 检查文件是否已处理
             if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
                 print("fortinet processed: ", timestamp)
@@ -792,15 +821,14 @@ class WebPageContent:
             webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
             print(webpage_content)
             self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "fortinet"), filename))
-            self.write_collected_pagelinks(timestamp, web_name, page_url)
+            self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
 
     def securityaffairs_content(self):
         web_name = 'securityaffairs'
-        # self.find_processed_files(os.path.join(self.text_dir, "securityaffairs"))
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
         count = 0
-        for timestamp, page_url in self.webpage_dict["securityaffairs"]:
+        for timestamp, postdate, page_url in self.webpage_dict["securityaffairs"]:
             # 检查文件是否已处理
             if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
                 print("securityaffairs processed: ", timestamp)
@@ -817,7 +845,7 @@ class WebPageContent:
             webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
             print(webpage_content)
             self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "securityaffairs"), filename))
-            self.write_collected_pagelinks(timestamp, web_name, page_url)
+            self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
 
     def phylum_content(self):
         web_name = 'phylum'
@@ -825,7 +853,7 @@ class WebPageContent:
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
         count = 0
-        for timestamp, page_url in self.webpage_dict["phylum"]:
+        for timestamp, postdate, page_url in self.webpage_dict["phylum"]:
             # 检查文件是否已处理
             if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
                 print("phylum processed: ", timestamp)
@@ -841,7 +869,7 @@ class WebPageContent:
             webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
             print(webpage_content)
             self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "phylum"), filename))
-            self.write_collected_pagelinks(timestamp, 'phylum', page_url)
+            self.write_collected_pagelinks(timestamp, 'phylum', postdate, page_url)
 
     def checkpoint_content(self):
         web_name = 'checkpoint'
@@ -849,7 +877,7 @@ class WebPageContent:
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
         count = 0
-        for timestamp, page_url in self.webpage_dict["checkpoint"]:
+        for timestamp, postdate, page_url in self.webpage_dict["checkpoint"]:
             # 检查文件是否已处理
             if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
                 print("checkpoint processed: ", timestamp)
@@ -865,7 +893,7 @@ class WebPageContent:
             webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
             print(webpage_content)
             self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "checkpoint"), filename))
-            self.write_collected_pagelinks(timestamp, web_name, page_url)
+            self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
 
     def reddit_content(self):
         self.client_id = ''
