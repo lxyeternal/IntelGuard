@@ -13,11 +13,15 @@
 import os
 import json
 from collections import defaultdict
-from os import PRIO_PROCESS
-
 from py2neo import Graph, Node, Relationship
 from Codes.Collection.pypi_bigquery import process_package_data
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+codes_dir = os.path.dirname(current_dir)
+project_dir = os.path.dirname(codes_dir)
+print(project_dir)
+print(current_dir)
+print(codes_dir)
 
 # Connect to Neo4j (assuming it's running locally with default settings)
 graph = Graph("bolt://localhost:7687", auth=("neo4j", "12345678"), name="neo4j")
@@ -187,7 +191,7 @@ def create_package_graph(package_data, source_name, postdate):
 
 def extract_timestamp(json_file_stamp):
     # Read the txt file content
-    with open("/Users/blue/Documents/Github/IntelliGraph/Codes/Collection/pagelinks/collected_pagelinks.txt", 'r') as file:
+    with open(os.path.join(codes_dir, "/Collection/pagelinks/collected_pagelinks.txt"), 'r') as file:
         lines = file.readlines()
     for line in lines:
         columns = line.strip().split("\t")
@@ -242,6 +246,12 @@ def update_graph_with_basic_info(package_manager_dict):
     """
     pypi_basic_info = process_package_data(package_manager_dict)
     print(pypi_basic_info)
+
+    # Save pypi_basic_info to JSON file
+    pypi_basic_info_path = os.path.join(project_dir, "pypi_basic_info.json")
+    with open(pypi_basic_info_path, 'w') as json_file:
+        json.dump(pypi_basic_info, json_file, indent=4)
+
     for package_name, package_info in pypi_basic_info.items():
         try:
             # 1. 获取或创建 Package 节点
@@ -381,7 +391,7 @@ if __name__ == '__main__':
     # Iterate over all data sources and their JSON files
     count = 0
     package_manager_dict = defaultdict(list)
-    base_dir = '/Users/blue/Documents/GitHub/IntelliGraph/Dataset/IntelliJson'
+    base_dir = os.path.join(project_dir, "Dataset/IntelliJson")
     for source_dir in os.listdir(base_dir):
         source_path = os.path.join(base_dir, source_dir)
         if os.path.isdir(source_path):
@@ -425,6 +435,13 @@ if __name__ == '__main__':
     # 统计每一个 key 有多少个包
     for key, packages in package_manager_dict.items():
         print(f"Package Manager: {key}, Number of Packages: {len(packages)}")
-    update_graph_with_basic_info(package_manager_dict)
+    # Save package_manager_dict to JSON file
+    output_json_path = os.path.join(project_dir, "package_manager_dict.json")
+    # with open(output_json_path, 'w') as json_file:
+    #     json.dump(package_manager_dict, json_file, indent=4)
+    # Load package_manager_dict from JSON file
+    with open(output_json_path, 'r') as json_file:
+        loaded_package_manager_dict = json.load(json_file)
+    update_graph_with_basic_info(loaded_package_manager_dict)
     # The graph is now built and ready to be visualized using Neo4j.
     print("Knowledge graph has been successfully created in Neo4j.")

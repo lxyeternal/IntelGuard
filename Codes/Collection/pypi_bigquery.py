@@ -10,16 +10,20 @@
 # Description：
 """
 
-
+import os
 from datetime import datetime
 from collections import defaultdict
 from google.cloud import bigquery
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+codes_dir = os.path.dirname(current_dir)
+project_dir = os.path.dirname(codes_dir)
 
 
 def query_bigquery(names):
     # 设置凭证文件路径（使用你的服务账户 JSON 凭证文件）
     # client = bigquery.Client()
-    client = bigquery.Client.from_service_account_json("/Users/blue/Documents/Github/IntelliGraph/Configs/pypi-dataset-378706-8eeb053a916e.json")
+    client = bigquery.Client.from_service_account_json(os.path.join(project_dir, "Configs/pypi-dataset-378706-8eeb053a916e.json"))
     # 构建查询字符串
     # 构建查询条件
     if len(names) == 1:
@@ -80,14 +84,14 @@ def process_package_data(package_manager_dict):
     combined_packages = set()
     for key in ['pypi', 'pip', 'python']:
         combined_packages.update(package_manager_dict[key])
+    print(len(combined_packages))
     # 将合并后的包列表进行分块，每块包含最多 50 个包
-    chunk_size = 200
+    chunk_size = 100
     package_chunks = [list(combined_packages)[i:i + chunk_size] for i in range(0, len(combined_packages), chunk_size)]
-    # 只测试第一个分块的前 50 个包
-    package_chunks = [package_chunks[0][:50]]
     # 查询每个分块，并整合结果
     final_results = {}
-    for chunk in package_chunks:
+    for chunk in package_chunks[:8]:
+        print(f'Processing chunk {chunk}')
         chunk_results = query_bigquery(chunk)
         for package_name, data in chunk_results.items():
             if package_name not in final_results:
@@ -108,7 +112,7 @@ def process_package_data(package_manager_dict):
                             version_data['python_version'])
                         final_results[package_name]['versions'][version]['packagetype'].update(
                             version_data['packagetype'])
-
+        print("success for chunk")
     return final_results
 
 
