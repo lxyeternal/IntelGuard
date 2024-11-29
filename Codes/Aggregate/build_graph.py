@@ -19,9 +19,6 @@ from Codes.Collection.pypi_bigquery import process_package_data
 current_dir = os.path.dirname(os.path.abspath(__file__))
 codes_dir = os.path.dirname(current_dir)
 project_dir = os.path.dirname(codes_dir)
-print(project_dir)
-print(current_dir)
-print(codes_dir)
 
 # Connect to Neo4j (assuming it's running locally with default settings)
 graph = Graph("bolt://localhost:7687", auth=("neo4j", "12345678"), name="neo4j")
@@ -36,8 +33,6 @@ def create_package_graph(package_data, source_name, postdate):
     # Check if package_names is a list or a string
     if isinstance(package_names, str):
         package_names = [package_names]  # Convert string to list for consistency
-
-    # Process each package name individually
     for package_name in package_names:
         if not package_name:
             print(f"Skipping entry with missing package_name from source: {source_name}")
@@ -191,7 +186,8 @@ def create_package_graph(package_data, source_name, postdate):
 
 def extract_timestamp(json_file_stamp):
     # Read the txt file content
-    with open(os.path.join(codes_dir, "/Collection/pagelinks/collected_pagelinks.txt"), 'r') as file:
+    ollected_pagelinks_path = os.path.join(codes_dir, "Collection", "pagelinks", "collected_pagelinks.txt")
+    with open(ollected_pagelinks_path, 'r') as file:
         lines = file.readlines()
     for line in lines:
         columns = line.strip().split("\t")
@@ -391,7 +387,7 @@ if __name__ == '__main__':
     # Iterate over all data sources and their JSON files
     count = 0
     package_manager_dict = defaultdict(list)
-    base_dir = os.path.join(project_dir, "Dataset/IntelliJson")
+    base_dir = os.path.join(project_dir, "Dataset", "IntelliJson")
     for source_dir in os.listdir(base_dir):
         source_path = os.path.join(base_dir, source_dir)
         if os.path.isdir(source_path):

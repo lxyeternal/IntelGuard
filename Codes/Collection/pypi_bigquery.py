@@ -23,7 +23,7 @@ project_dir = os.path.dirname(codes_dir)
 def query_bigquery(names):
     # 设置凭证文件路径（使用你的服务账户 JSON 凭证文件）
     # client = bigquery.Client()
-    client = bigquery.Client.from_service_account_json(os.path.join(project_dir, "Configs/pypi-dataset-378706-8eeb053a916e.json"))
+    client = bigquery.Client.from_service_account_json(os.path.join(project_dir, "Configs", "metatrust-01-a8043294c5af.json"))
     # 构建查询字符串
     # 构建查询条件
     if len(names) == 1:
@@ -90,7 +90,7 @@ def process_package_data(package_manager_dict):
     package_chunks = [list(combined_packages)[i:i + chunk_size] for i in range(0, len(combined_packages), chunk_size)]
     # 查询每个分块，并整合结果
     final_results = {}
-    for chunk in package_chunks[:8]:
+    for chunk in package_chunks:
         print(f'Processing chunk {chunk}')
         chunk_results = query_bigquery(chunk)
         for package_name, data in chunk_results.items():
@@ -125,4 +125,3 @@ def process_package_data(package_manager_dict):
 #     package_manager_dict['python'] = ['tkint3rs']
 #     pypi_basic_info = process_package_data(package_manager_dict)
 #     print(pypi_basic_info)
-
