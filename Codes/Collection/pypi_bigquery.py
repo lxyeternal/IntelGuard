@@ -11,6 +11,7 @@
 """
 
 import os
+import signal
 from datetime import datetime
 from collections import defaultdict
 from google.cloud import bigquery
@@ -19,6 +20,11 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 codes_dir = os.path.dirname(current_dir)
 project_dir = os.path.dirname(codes_dir)
 
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException
 
 def query_bigquery(names):
     # 设置凭证文件路径（使用你的服务账户 JSON 凭证文件）
@@ -78,50 +84,45 @@ def query_bigquery(names):
     return aggregated_results
 
 
-
 def process_package_data(package_manager_dict):
     # 合并 pypi, pip, python 对应的包列表
     combined_packages = set()
     for key in ['pypi', 'pip', 'python']:
         combined_packages.update(package_manager_dict[key])
     print(len(combined_packages))
-    # 将合并后的包列表进行分块，每块包含最多 50 个包
+    # 将合并后的包列表进行分块，每块包含最多 100 个包
     chunk_size = 100
     package_chunks = [list(combined_packages)[i:i + chunk_size] for i in range(0, len(combined_packages), chunk_size)]
     # 查询每个分块，并整合结果
     final_results = {}
     for chunk in package_chunks:
         print(f'Processing chunk {chunk}')
-        chunk_results = query_bigquery(chunk)
-        for package_name, data in chunk_results.items():
-            if package_name not in final_results:
-                final_results[package_name] = data
-            else:
-                # 合并版本信息
-                for version, version_data in data['versions'].items():
-                    if version not in final_results[package_name]['versions']:
-                        final_results[package_name]['versions'][version] = version_data
-                    else:
-                        # 合并每个版本的集合类型数据
-                        final_results[package_name]['versions'][version]['uploaded_via'].update(
-                            version_data['uploaded_via'])
-                        final_results[package_name]['versions'][version]['upload_time'].update(
-                            version_data['upload_time'])
-                        final_results[package_name]['versions'][version]['size'].update(version_data['size'])
-                        final_results[package_name]['versions'][version]['python_version'].update(
-                            version_data['python_version'])
-                        final_results[package_name]['versions'][version]['packagetype'].update(
-                            version_data['packagetype'])
-        print("success for chunk")
+        try:
+            # 设置超时机制
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(3 * 60)  # 3 分钟超时
+            chunk_results = query_bigquery(chunk)
+            signal.alarm(0)  # 应该断止超时设置
+            for package_name, data in chunk_results.items():
+                if package_name not in final_results:
+                    final_results[package_name] = data
+                else:
+                    # 合并版本信息
+                    for version, version_data in data['versions'].items():
+                        if version not in final_results[package_name]['versions']:
+                            final_results[package_name]['versions'][version] = version_data
+                        else:
+                            # 合并每个版本的集合类型数据
+                            final_results[package_name]['versions'][version]['uploaded_via'].update(
+                                version_data['uploaded_via'])
+                            final_results[package_name]['versions'][version]['upload_time'].update(
+                                version_data['upload_time'])
+                            final_results[package_name]['versions'][version]['size'].update(version_data['size'])
+                            final_results[package_name]['versions'][version]['python_version'].update(
+                                version_data['python_version'])
+                            final_results[package_name]['versions'][version]['packagetype'].update(
+                                version_data['packagetype'])
+            print("success for chunk")
+        except TimeoutException:
+            print(f"Timeout reached for chunk: {chunk}. Skipping to next chunk.")
     return final_results
-
-
-# if __name__ == '__main__':
-#     count = 0
-#     package_manager_dict = defaultdict(list)
-#     # 示例数据填充 package_manager_dict
-#     package_manager_dict['pypi'] = ['request', 'bussardweg4a']
-#     package_manager_dict['pip'] = ['bingchilling2', 'httops']
-#     package_manager_dict['python'] = ['tkint3rs']
-#     pypi_basic_info = process_package_data(package_manager_dict)
-#     print(pypi_basic_info)

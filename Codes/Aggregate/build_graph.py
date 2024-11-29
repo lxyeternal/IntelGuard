@@ -184,6 +184,18 @@ def create_package_graph(package_data, source_name, postdate):
             graph.merge(rel)
 
 
+
+def convert_sets_to_lists(data):
+    if isinstance(data, dict):
+        return {key: convert_sets_to_lists(value) for key, value in data.items()}
+    elif isinstance(data, set):
+        return list(data)
+    elif isinstance(data, list):
+        return [convert_sets_to_lists(item) for item in data]
+    else:
+        return data
+
+
 def extract_timestamp(json_file_stamp):
     # Read the txt file content
     ollected_pagelinks_path = os.path.join(codes_dir, "Collection", "pagelinks", "collected_pagelinks.txt")
@@ -244,9 +256,10 @@ def update_graph_with_basic_info(package_manager_dict):
     print(pypi_basic_info)
 
     # Save pypi_basic_info to JSON file
+    pypi_basic_info_converted = convert_sets_to_lists(pypi_basic_info)
     pypi_basic_info_path = os.path.join(project_dir, "pypi_basic_info.json")
     with open(pypi_basic_info_path, 'w') as json_file:
-        json.dump(pypi_basic_info, json_file, indent=4)
+        json.dump(pypi_basic_info_converted, json_file, indent=4)
 
     for package_name, package_info in pypi_basic_info.items():
         try:
@@ -433,8 +446,8 @@ if __name__ == '__main__':
         print(f"Package Manager: {key}, Number of Packages: {len(packages)}")
     # Save package_manager_dict to JSON file
     output_json_path = os.path.join(project_dir, "package_manager_dict.json")
-    # with open(output_json_path, 'w') as json_file:
-    #     json.dump(package_manager_dict, json_file, indent=4)
+    # with open(output_json_path, 'w') as data_json_file:
+    #     json.dump(package_manager_dict, data_json_file, indent=4)
     # Load package_manager_dict from JSON file
     with open(output_json_path, 'r') as json_file:
         loaded_package_manager_dict = json.load(json_file)
