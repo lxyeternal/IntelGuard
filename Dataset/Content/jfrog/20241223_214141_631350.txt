@@ -1,0 +1,83 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214141_631350\PyPILeakedTokeninBinary863x3001.png
+
+The JFrog Security Research team has recently discovered and reported a leaked access token with administrator access to Python’s, PyPI’s and Python Software Foundation’s GitHub repositories, which was leaked in a public Docker container hosted on Docker Hub.
+As a community service, the JFrog Security Research team continuously scans public repositories such as Docker Hub, NPM, and PyPI to identify malicious packages and leaked secrets. The team reports any findings to the relevant maintainers before attackers can take advantage of them. Although we encounter many secrets that are leaked in the same manner, this case was exceptional because it is difficult to overestimate the potential consequences if it had fallen into the wrong hands – one could supposedly inject malicious code into PyPI packages (imagine replacing all Python packages with malicious ones), and even to the Python language itself!
+The JFrog Security Research team identified the leaked secret and immediately reported it to PyPI’s security team, who revoked the token within a mere 17 minutes!
+This post will explain how we found a GitHub PAT that provided access to the entire Python infrastructure and prevented a supply chain disaster. Using this case, we will discuss the importance of (also) shifting right in secrets detection – searching for secrets in binaries and production artifacts, not just on source code.
+What we found
+Our secrets scanning engine detected a “classic” GitHub token in one of the public Docker Hub repositories. The risk with “classic” GitHub tokens is that, unlike the newer fine-grained tokens, they grant similar permissions across all repositories the user has access to.
+In our case, the user had admin access to the core repositories of Python’s infrastructure, including Python Software Foundation (PSF), PyPI, the Python language and CPython.
+
+
+python	91
+pypa	55
+psf	42
+pypi	21
+What could have happened?
+The implications of someone finding this leaked token could be extremely severe. The holder of such a token would have had administrator access to all of Python’s, PyPI’s and Python Software Foundation’s repositories, supposedly making it possible to carry out an extremely large scale supply chain attack.
+Various forms of supply chain attacks were possible in this scenario. One such possible attack would be hiding malicious code in CPython, which is a repository of some of the basic libraries which stand at the core of the Python programming language and are compiled from C code. Due to the popularity of Python, inserting malicious code that would eventually end up in Python’s distributables could mean spreading your backdoor to tens of millions of machines worldwide!
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214141_631350\1_PythonLanguageSupplyChainAttackVector_new.png
+Python Language Supply Chain Attack Vector
+Another possible scenario could be inserting malicious code into PyPI’s Warehouse code, which is used to manage the PyPI package manager. Imagine an attacker inserting code that grants them a backdoor to PyPI’s storage, allowing them to manipulate very popular PyPI packages, hiding malicious code inside them, or replacing them altogether. Although this is not the most sophisticated way to carry out an attack that would remain undetected for a long time, it’s certainly a scary scenario.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214141_631350\2_PyPISupplyChainAttackVector_new.png
+PyPI Supply Chain Attack Vector
+Why was the token found only in the binary?
+The authentication token was found inside a Docker container, in a compiled Python file – __pycache__/build.cpython-311.pyc:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214141_631350\Picture2.png
+
+However, the same function in the matching source code file didn’t contain the token.
+It seems that the original author –
+
+Briefly added the authorization token to their source code
+Ran the source code (Python script), which got compiled into a .pyc binary with the auth token
+Removed the authorization token from the source code, but didn’t clean the .pyc
+Pushed both the clean source code and the unclean .pyc binary into the docker image
+
+Briefly added the authorization token to their source code
+Ran the source code (Python script), which got compiled into a .pyc binary with the auth token
+Removed the authorization token from the source code, but didn’t clean the .pyc
+Pushed both the clean source code and the unclean .pyc binary into the docker image
+Here is a comparison of the decompiled build.cpython-311.pyc file vs. the source code that was actually on the Docker container –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214141_631350\Picture3.png
+Reconstructed source code from the binary “build.cpython-311.pyc”
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214141_631350\Picture4.png
+Actual source code of the matching file in the Docker container
+The decompiled code from the .pyc cache file was similar to the original, but included an authorization header with a valid GitHub token.
+Scanning for secrets in source code is not enough
+From what we’ve seen, it’s clear that the solution in this case would’ve been to audit both the source code and the binary data inside the published Docker image. While searching for leaked secrets in binary files is more difficult than text-based files, sometimes the critical data resides only in the binary data –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214141_631350\3_sourcecodeandthebinarydata_new.png
+
+PyPI’s quick response
+We wish to thank PyPI’s security team that handled this issue with the utmost urgency.
+Leaks are inevitable and as such we cannot expect any organization to be 100% leak proof, but rather to act quickly when a leak is discovered and assess if any damage occurred due to the leak.
+In this case, after discovering the token, we immediately informed the PyPI security team and the token’s owner about the incident. PyPI’s security team responded very quickly by revoking it and responding to us just 17 minutes after we reached out to them. Fortunately, PyPI conducted a thorough check and concluded that there was no suspicious activity involving the token.
+PyPI also posted more details about the leak and their incident response in their blog.
+What can we learn about secret detection?
+While this case was alarming, we can learn valuable lessons on working with access tokens.
+
+Scanning secrets in source code and even text-based files is simply not enough. Modern IDEs and development tools effectively detect secrets in source code and prevent their leakage. However, their scope is limited to code and doesn’t include binary artifacts created by build and packaging tools. Most secrets we encountered in open-source registries were located in the environment, configuration, and binary files.
+Replace old-style GitHub tokens with new ones, for better visibility. Initially, GitHub used a hex-encoded 40-character token string that was indistinguishable from a SHA1 hash string and wasn’t caught by most secret scanning tools -.
+
+'Authorization': 'Bearer 0d6a9bb5af126f73350a2afc058492765446aaad'
+
+In 2021, GitHub switched to a new token format but understandably didn’t require all users to regenerate their tokens. Among other features, the new format of the token contains the recognizable prefix ghp_ and even embeds a checksum, allowing secret detection tools to detect them more easily and with perfect accuracy.
+Your token should provide access only to the resources required by the application using it. Creating the “one ring to rule them all” is always a bad idea. Two years ago, GitHub introduced new, fine-grained tokens. Unlike the “classic” ones, they allow users to choose privileges and repositories available to the personal access token and limit its scope to the minimally required for the given task. We highly recommend using this feature, as we frequently encounter situations where a token providing ultimate access to the entire infrastructure gets leaked within a side project or temporary “hello-world” application.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214141_631350\Picture5.png
+
+JFrog Secrets Detection – the binary advantage
+JFrog’s secret detection engine was able to find this critical token, even though it was leaked in a compiled Python binary file (pyc). We were able to detect the leaked token due to two important reasons:
+
+JFrog Secrets Detection runs both shift left, such as within a developer’s IDE, and shift right, such as within a deployed Docker container.
+JFrog Secrets Detection looks for leaked secrets in text files and binary files – leaving you covered on all fronts
+Our detection is based on JFrog Xray’s scanning of configuration files, text files and binary files for plain text credentials, private keys, tokens, and similar secrets. Leveraging both a constantly-updated list of more than 150 specific types of credentials and a proprietary generic secrets matcher for the best coverage possible.
+
+Stay up-to-date with JFrog Security Research
+The security research team’s findings and research play an important role in improving the JFrog Software Supply Chain Platform’s application software security capabilities.
+Follow the latest discoveries and technical updates from the JFrog Security Research team on our research website, and on X @JFrogSecurity.
+
+Briefly added the authorization token to their source code
+Ran the source code (Python script), which got compiled into a .pyc binary with the auth token
+Removed the authorization token from the source code, but didn’t clean the .pyc
+Pushed both the clean source code and the unclean .pyc binary into the docker image
+'Authorization': 'Bearer 0d6a9bb5af126f73350a2afc058492765446aaad'

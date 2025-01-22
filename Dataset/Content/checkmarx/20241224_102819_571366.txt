@@ -1,0 +1,172 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_571366\Website1024x5123.jpg
+Introduction
+When I previously wrote the original Dubbo publication, we disclosed that issue as it was mitigated by the vendor. While the Dubbo “HTTP” protocol in that disclosure was trivially vulnerable to the most common Java deserialization attacks (as evidenced by the immediate cropping up of exploits for Dubbo as soon as a very broad description of the issue was published in a mailing list) – the so-called “HTTP” was an elective protocol, and honestly – there was no apparent reason to choose it over the default Dubbo protocol. This made it an unlikely misconfiguration, and most devs would probably just stick to the default Dubbo protocol; this made it very tempting to investigate Dubbo further.
+
+The “Dubbo” protocol is a proprietary binary protocol which required some reverse-engineering of its inner logic and how it is being consumed by the endpoint. It actually wraps around the binary of the serialized object, adding meta-data and additional objects to the stream. The underlying deserializer defaults to Hessian2, configured to exclude many of the “known dangerous” classes often used to exploit such attacks. However, there were some ways to manipulate this protocol, such as elect the deserializer, which would then lead to RCE.
+Vulnerability Overview
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_571366\Picture1.png
+The Dubbo protocol is a proprietary protocol developed for Apache Dubbo for transmission of objects between Dubbo services. Apache Dubbo providers and consumers using certain versions of Dubbo, when configured to accept the default “Dubbo” protocol, allows a remote attacker to send a malformed stream containing a malicious object to the exposed service which would result in Remote Code Execution.
+
+
+
+This RCE occurs with no authentication, and no knowledge on an attacker’s part is required to exploit this vulnerability – only an open port on a Provider server running Apache Dubbo. This issue applies to default configuration, where the built-in Dubbo protocol is used.
+Severity
+Checkmarx considers this vulnerability to have a CVS Score of 10.0 (Critical), as it is an unauthenticated remote code execution vulnerability which provides privileges at the Dubbo service’s permission level, allowing complete compromise of that service’s confidentiality, integrity, and accessibility.
+
+CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H
+What’s Going On – Understanding the Dubbo Protocol
+The server-side “Dubbo” protocol on a provider is used to expose a service, and methods within this service, to external consumers.
+
+The “Dubbo” protocol has two general modes served over the same port:
+
+Telnet-like mode, where a CLI is available to allow invoking a method exposed by the provider service
+An RMI mode, where the TCP packet is then treated as a byte stream, which is deserialized to be used with the service offered by the Dubbo provider
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_571366\Picture2.png
+
+Fig. 1 – Dubbo Telnet
+While default behavior is Telnet-like, the way the remoting protocol is invoked is by providing a header which is built in the following manner:
+
+Two magic bytes – 0xdabb
+A flag byte – this flag determines:
+
+If this stream is a request or a response
+If this transaction is one-way or two-way
+Deserialization mechanism identifier (Hessian2, Kryo, Java etc.)
+
+If this stream is a request or a response
+If this transaction is one-way or two-way
+Deserialization mechanism identifier (Hessian2, Kryo, Java etc.)
+Padding null-bytes, to allow for dynamic length
+Length of stream
+This method is reminiscent of port-knocking, but instead of sending a stream of bytes to open a port, two preamble bytes are used to switch between protocols (Telnet-like mode and RMI-like mode).
+
+The preamble header is then followed a stream sequence containing the following data:
+
+Dubbo Protocol version
+Service name (“Path”)
+Service version
+Method name
+Method argument types
+Method arguments
+Request attachments, which may contain additional data
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_571366\Picture31.png
+All of the above data is read as a UTF string with the exception of 6 – method arguments; this is because a method argument may contain any Java object which may be passed to the Dubbo Provider, while other data is provided as Strings, to be used with reflections inside the code.
+
+The open Dubbo port can be trivially fingerprinted as such by readily available tools, such as Nmap.
+Fig. 2 – Dubbo telnetd Service, As It Appears on Nmap
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_571366\Picture4.png
+The raw TCP request, including preamble and metadata, sends a request and receives a response over the same TCP stream, as demonstrated via Dubbo’s Quick Start sayHello demo:
+Fig. 3 – Dubbo Protocol Request in Its Default Serialized Form
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_571366\Picture5.png
+
+Fig. 4 – Dubbo Protocol Response in Dubbo Demo
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_571366\Picture6.png
+
+Fig. 5 – Dubbo Protocol Breakdown
+Attacking the Dubbo Protocol
+The most commonly known Java-based gadget chains used for exploiting deserialization attacks rely on several key classes – these classes appear to be blacklisted on the default Hessian2 serializer.
+
+The Dubbo protocol relies on the flags byte (3rd byte of the stream) to determine which serializerdeserializer to use when processing this stream. While the default is Hessian 2, and attacker may tamper with this flag to choose a different deserializer, exposing multiple additional options for serialization. These additional deserializers do not offer the same protection Hessian 2 does.
+
+An attacker can modify the flag to choose either of the following protocols:
+
+FST Serialization
+Kryo Serialization
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_571366\Picture7.png
+Both of these protocols are binary serialization protocols, and successfully deserialize the FastJSON gadget-chain.
+Fig. 6 – The Majestic, Feral Beauty of a Kryo-Serialized FastJSON Gadget ByteStream
+For the purpose of having the gadget chain deserialized, however, a compliant stream should be created containing the required preamble, headers, and metadata.
+
+Since the exploit does not actually require Dubbo to successfully dispatch the request (in versions <= 2.7.5), but rather simply successfully read, parse and deserialize it, the stream itself can contain random or arbitrary strings. These strings are only there to serve as padding and satisfy multiple “readUTF” operations, until readObject is called on the stream, at which point FST or Kryo are the chosen deserializer and the exploit is triggered.
+Recreating the Issue
+An attacker can reimplement the Dubbo protocol with its byte preamble, header flags and content length, as well as dummy strings and a malicious object to satisfy the endpoint’s implementation for reading it.
+
+The same gadget chain used in the previous exploit for 2.7.3 HTTP protocol, which allows remote OS command execution was found in the scope of vanilla Apache Dubbo, so long as dubbo-common is also in scope (more on this later).
+Proof-of-Concept
+Recreating a Victim Dubbo Instance for PoC
+Either use the code sample from my previous research blog or follow this guide:
+
+Follow the Official Apache Dubbo Quick-Start guide until a functioning provider and registry are successfully created (see here for a full sample)
+Ensure dubbo-common, or a package where this dependency is not optional, are in scope
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_571366\Picture8.jpg
+Add the following dependencies to enable Spring Framework, Dubbo and Dubbo Common (presented in Maven pom.xml form for ease of use):
+Triggering Vulnerability PoC
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_571366\Picture9.png
+See this link for functioning POC code. The gadget chain being exploited here, which is native to Dubbo 2.7.3’s ecosystem, is clearly broken down in Part 1. The rest of this POC takes this gadget, and reimplements the Dubbo protocol to wrap it with the appropriate preamble, flags, and headers to exploit a vulnerable deserializer on a receiving Dubbo endpoint.
+Fig. 7 – Deserialization Gadget Writes “whoops!” to Java Console, and Starts Calc.exe
+Vulnerability Evolution
+Between the disclosure of this issue and the CVE, this issue has evolved across several releases. For versions 2.7.5 and 2.7.6 – the vulnerable deserializers have been removed from the core packages into their own respective packages. This functionality is imported separately, in the form of the dubbo-serialization-kryo/fst packages. In 2.7.7, according to documentation, it is no longer possible to pass garbage values in the Dubbo stream – deserialization does not occur without a proper method and service name.
+Conclusions
+This exploit, following the previous PoC for exploiting the HTTP protocol in version 2.7.3, further illustrates the need for strict whitelisting combined with class resolution look-ahead within any remote invocation services that deal with serialized objects – not just for Dubbo, and not just for Java.
+
+While this issue is glaring for Dubbo 2.7.3 and under, because of the gadget chain relying on an outdated FastJSON discovered and disclosed in the previous research, this only scratches the surface of this attack – other gadget chains may still exist within Dubbo’s internals, and most Dubbo instances will rely on other dependencies beyond those bundled with this software, allowing for a more diverse dependency ecosystem and allowing similar forms of exploitation to persist until a robust whitelist solution is used within Dubbo’s internals.
+
+At present, it is safe to assume many (and probably most) instances of Dubbo <= 2.7.3 are vulnerable to remote code execution via deserialization of untrusted data, while any Dubbo version under 2.7.8 has some form of unsafe deserialization going on in the Dubbo Protocol pipeline, 2.7.9 has added a configuration flag to prevent “chosen deserializer” attacks such as this. Whether it is vulnerable is dependent on gadget availability – which is always a likely possibility.
+Recommendations
+
+Upgrade from Alibaba Dubbo to Apache Dubbo; Alibaba Dubbo does not appear to be officially maintained any longer
+Update Apache Dubbo to its latest version
+Ensure to never import unnecessary Dubbo packages, e.g. dubbo-serialization-kryo where Kryo is not actively used, to reduce attack surface against the RMI interface
+Disclosure Timeline
+2/5/20 – Disclosure of Dubbo RCE Deserialization Exploit
+
+2/19/20 – Reminder #1 to Apache Security Team
+
+4/6/20 – Reminder #2 to Apache Security Team
+
+7/27/20 – Reminder #3 to Apache Security Team
+
+1/22/21 – First Acknowledgement of Issue
+
+2/26/21 – Fix Released
+
+6/4/21 – Public Disclosure
+Apache Package Versions
+Deserialization RCE with FastJSON Gadget:
+
+Vulnerable package: org.apache.dubbo.dubbo <= 2.7.3
+
+Requirements:
+
+org.apache.dubbo.dubbo-common <= 2.7.9
+
+org.springframework.spring-web – 5.3.4
+
+Deserialization vulnerability without FastJSON Gadget, requires additional deserialization gadget in scope:
+
+Vulnerable package: org.apache.dubbo.dubbo <=2.7.6 – implementation dependent
+
+Requirements:
+
+org.apache.dubbo.dubbo-common <= 2.7.9
+
+dubbo-serialization-kryo AND/OR dubbo-serialization-fst – <=2.7.9
+Alibaba Package Versions
+Despite certain signs of life, this is no longer officially maintained – all Alibaba Dubbo resources now point to Apache Dubbo.
+
+Deserialization RCE with FastJSON Gadget:
+
+Vulnerable package: com.alibaba.dubbo <= 2.6.7
+
+Requirements:
+
+Com.alibaba.dubbo-serialization-kryo OR Com.alibaba.dubbo-serialization-fst <= 2.6.7
+
+org.springframework.spring-web – 5.3.4
+
+Deserialization vulnerability without FastJSON Gadget, requires additional deserialization gadget in scope:
+
+Vulnerable package: com.alibaba.dubbo <= 2.6.9
+
+Requirements:
+
+Com.alibaba.dubbo-serialization-kryo OR Com.alibaba.dubbo-serialization-fst <= 2.6.9
+
+org.springframework.spring-web – 5.3.4
+Final Words
+Disclosures like this are part of the Checkmarx Security Research Team’s efforts to drive changes in software security practices. Checkmarx is committed to analyzing open source packages to help development teams build and deploy more secure software.
+
+If this stream is a request or a response
+If this transaction is one-way or two-way
+Deserialization mechanism identifier (Hessian2, Kryo, Java etc.)

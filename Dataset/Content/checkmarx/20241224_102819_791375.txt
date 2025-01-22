@@ -1,0 +1,102 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_791375\Website1024x5123.jpg
+Overview
+The Go Programming Language (also known as Golang) is an open source programming language created by Google. Go is compiled and is statically typed as in C (with garbage collection). It has limited structural typing, memory safety features, and CSP-style concurrent features. In this article, I will cover Go Race Conditions from theory to practice including source code examples. I will discuss how to detect and solve race condition issues and the security impact they represent.
+The theory
+Race conditions are a common issue in software due to a computer program that expects a sequence of operations to execute in a specific order, but they run in another, making the software output unpredictable. These issues are common in concurrent computer programs where either multiple workers, processes, or threads shared a state.
+
+On one hand, these issues are quite easy to introduce during the software development stage since concurrency is not easy to accomplish. On the other hand, they are difficult to detect/debug since the computer program behavior won’t always be deterministic.
+
+For example, think about HTTP servers in general. They are a great example of concurrent computer programs since they are able to consistently handle simultaneous requests. For example, to track the number of visits/visitors to a web page, we can use a file on a local file system. When a new HTTP request is received, the process reads the current counter value from this file, increments it by 1, and writes the new value to the same file. Let’s explore this example in the next section.
+In Practice
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_791375\I3.jpg
+Let’s start by writing our HTTP server main() function, using Go http package
+
+
+
+Now, we’ll implement the updateVisitsCounter() function, which is responsible to read/write the number of visits from/to a file in the filesystem. Please notice that error handling is missing for brevity.
+
+
+
+The full source code can be found here. To run it, enter go run server.go and point your browser to https://localhost:8080. You should expect to see the visitor number increase every time the browser window is reloaded as shown below.
+
+
+
+Figure 1
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_791375\I5.jpg
+While running the server locally, with a single user accessing it, you should not experience the race condition. To make the race condition noticeable, let’s stress the server a little with a few concurrent HTTP requests. We can accomplish this by running concurrent-requests.go as shown in Figure 2.
+
+
+
+Figure 2
+
+On the left side of Figure 2, server.go is running and ready to receive requests. On the right side, the concurrent-requests.go will make 5 concurrent HTTP requests to it. Each output line starts with the request timestamp (Time.UnixNano()) and the request’s response.
+
+Clearly, the output on the right side is not the expected one: four distinct requests received the same message, “Hello, you’re visitor #1”.
+
+Notice that visitor #3, #4 and #5 are missing in Figure 2. Sorting the output by timestamp, we see that after visitor number #2 there were three other visitors who received the message, “Hello, you’re visitor #1”, as shown in Figure 3.
+
+
+
+Figure 3
+
+As explained in the previous section, our HTTP server implementation has:
+
+a shared state: the file in the filesystem where the counter is persisted (VISITS_COUNTER_FILE) and
+updateVisitsCounter() implementation expects read/write operations from/to the file in the filesystem to happen sequentially and in this strict order.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_791375\I6.jpg
+Figure 4 below illustrates the race condition with two concurrent workers: (worker1 and worker2)
+
+
+
+Figure 4
+
+Both workers read the value 0 (zero) from VISITS_COUNTER_FILE. Then worker1 updates the value to 1. While worker2 is still processing its first request, worker1 receives a new request doing a read immediately followed by a write operation, updating VISITS_COUNTER_FILE to 2. When worker2 finishes handling the request, it writes to VISITS_COUNTER_FILE the value 1: the read value 0 (zero) incremented by one unit. Finally, worker1 receives a new request, reading the VISITS_COUNTER_FILE, whose value is 1.
+Security impact
+Race conditions can be exploited to cause software malfunctioning, leading to problems such as Denial of Service and Privilege Escalation. Time of check to time of use (TOCTTOU) is a class of race conditions that may lead to privilege escalation.
+
+Below are some examples of race conditions:
+
+Window Open Race Condition Vulnerability, Internet Explorer, CVE-2011-1257
+Windows Shortcut-Link, CVE-2010-2568
+Pulse Audio, CVE-2009-1894
+Firefox, CVE-2007-5960
+How to detect
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_791375\I56.jpg
+As previously mentioned, it isn’t easy to find and solve race conditions, but care, diligence, and testing will certainly help. Despite of offering a clean way to write concurrent code, Go creators felt the need to add a race detector to help diagnose race conditions.
+
+Go race detector works on all major operating systems, but only on 64bits systems, and it can only detect data races (accesses to memory from different threads or operations that impose ordering on memory accesses). Remember that race condition detection happens at runtime with a cost of 5-10x in memory increase, and 2-20x in execution time for a typical program.
+
+To enable races detection, run your programs with the -race option, e.g., go run -race server.go. Go race detector won’t report any races on server.go because it isn’t a data race but, instead, a TOCTTOU race. Changing the implementation, replacing the VISITS_COUNTER_FILE file by a shared global variable visitsCounter to store number of visits (server-alternative.go), will allow us to see -race option output go run -race server-alternative.go as shown in Figure 5 below.
+
+
+
+Figure 5
+How to solve
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_791375\I9.jpg
+Generally speaking, using mutual exclusion locks (mutex), semaphores, and other access and execution control primitives will help you preventing races. Packages like sync provides basic synchronization primitives such as mutual exclusion locks.
+
+Adding a mutex to our HTTP server as in server-fixed.go implementation, fixes the race condition, leading to the expected result as shown in Figure 6.
+
+
+
+Figure 6
+
+Mutual exclusion locks role in computer programs is very simple. Before starting an operation on shared state, one worker should gain access to it acquiring mutex’s lock (Lock()). As soon as it happens, all other workers willing to manipulate the shared state will be blocked until the mutex’s lock is released (Unlock()). Once the mutex’s lock is released, the next worker will be able to manipulate the shared state.
+
+In our example, acquiring mutex’s lock will enable the worker to read and write from/to the VISITS_COUNTER_FILE in this exact order, without interference from other workers. After updating the VISITS_COUNTER_FILE, then other workers will be able to do the same.
+
+Of course, access and execution control primitives bring other challenges. For example, what if mutex’s lock never gets released? Workers will be perpetually denied access to the shared resource, potentially leading to a Denial of Service. This is a well-known problem in concurrent programming called starvation, which is out of the scope of this blog post.
+Conclusion
+Golang concurrency is awesome but there’s not much the compiler can do to prevent you from making mistakes leading to a Race Condition. Race conditions are something you’ll really want to avoid, and detection and debugging are both tough tasks.
+
+While writing concurrent programs double check whether state (e.g., a file or variable) is accessed by more than one worker/thread/process at the same time. If so, you’ll need some access control mechanism such as mutexes or semaphores.
+References
+
+Go Security Coding Practices
+Time of check to time of use
+Go Data Race Detector
+Go memory model
+Go synx package
+Race Condition Exploits
+Starvation

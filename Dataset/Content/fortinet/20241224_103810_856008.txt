@@ -1,0 +1,202 @@
+
+
+Categories
+
+
+
+Business & Technology 
+
+
+
+
+FortiGuard Labs Threat Research
+
+
+
+
+Industry Trends
+
+
+
+
+Life at Fortinet
+
+
+
+
+Partners
+
+
+
+
+Customer Stories
+
+
+
+
+PSIRT Blogs
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+CISO Collective
+Subscribe
+FortiGuard Labs Threat Research
+Tips and Tricks: Using the .NET Obfuscator Against Itself
+In my latest analysis report, “Fake Hungarian Government Email Drops Warzone RAT”,  I discussed a fake Hungarian government phishing email that drops the Warzone RAT. It does this using multiple intermittent .NET binaries that are increasingly obfuscated. While my report would be far too long if I attempted to describe all the reverse engineering techniques used during my analysis, but I still think they provide a great opportunity for learning. In this post, I will discuss one of these techniques: how I used the obfuscator itself to deobfuscate the strings in the binary. If you want to know more about the context, I recommend reading the analysis.
+Problem statement
+As explained in my previous report, the second stage of the malware was a .NET Dynamic-Link Library (DLL) that was unpacked to memory and executed by invoking one of its functions (sk41Ua2AFu5PANMKit.abiJPmfBfTL6iLfmaW.Y5tFvU8EY()). We were able to dump this DLL from memory using dnspy as a debugger. This DLL was originally called KeyNormalize.dll and it was obfuscated with an obfuscation tool called SmartAssembly. De4dot, a well-known deobfuscator, could resolve some of the obfuscation techniques used. However, it could not decode the strings in the binary. Since strings could be very useful in understanding what a program does—which is why threat actors try to hide them—it would be great if we could deobfuscate them. To do that, however, we face two challenges:
+
+Understanding how runtime decoding works.
+Implementing our own decoder.
+Understanding the runtime decoding
+When we start to look at the dumped KeyNormalize.dll at the function sk41Ua2AFu5PANMKit.abiJPmfBfTL6iLfmaW.Y5tFvU8EY(), which is the entry point of this DLL, we see the encoded strings in Figure 1.
+We can see that the program creates strings using a Strings.Get() function that accepts some kind of integer value. To understand exactly what is happening here, we need to look at the Strings class. Note that this Strings ​​​​​​​class is part of SmartAssembly. We can start by looking at the constructor (Figure 2).
+Here we see two things:
+
+The class implements some kind of caching.
+Data is loaded from the resource called ‘{d0d17239-57f1-4b72-b2aa-7b2e35d8851d}’ and after some transformation, it is saved in the Strings.bytes class attribute. Looking at this resource (Figure 3) is not too helpful because it is clearly encoded. And, it most probably contains the strings in an encoded format.
+Let’s continue the analysis with the Strings.Get() class (Figure 4).
+A simple function first transforms the stringID. Then, depending on whether caching is used, it either calls Strings.GetFromResource() or Strings.GetCashedOrResource(). . We can ignore caching and navigate to GetFromResource(), shown in Figure 5.
+First, we can see that it loads the data from the Strings.bytes attribute, which contains data from the resource. Then comes some kind of data manipulation, which we luckily don’t have to understand. At the end, base64 conversion and string encoding are performed, which results in the final string returned in the result variable. This is the end of string decoding. Let’s see what noteworthy information we recovered:
+
+The encoded strings are in the resource {d0d17239-57f1-4b72-b2aa-7b2e35d8851d}.
+There is caching, but we can ignore it.
+It is really just an encoding, there is no cryptography or any secrets involved. Thus, nothing can stop us from recovering the strings.
+The reason we don’t need to understand exactly how the encoding works is that we are going to turn the table on SmartAssembly and use its own Strings class against it to recover the strings. I have used this technique often, both in malware reverse engineering and penetration testing. Often, when an application manipulates data or makes some kind of complex transformation, we can use the code in the application to recover the data. This works especially well with encryptions and encoding, where we can use the program's own implementation of decryption/decoding functions to recover the data that was supposed to be hidden. Luckily with threat actors, we don’t need to worry about protecting intellectual property.
+Implementing the decoder
+As mentioned, we are going to use SmartAssembly’s code against itself. There are various ways to do this, such as using reflection from Powershell, importing the whole DLL and calling its functions, or simply copy-pasting the code.
+In this case, I needed to make a few changes in the code, so I opted for copy-pasting.
+Setting up Visual Studio and the wrapper code
+We start by creating a C# project in Visual Studio. I used Visual Studio 2022 Community Edition. Open it and create a new project. Choose a ‘C# Console App’ (I call it StringDecoder). In some cases, choosing the correct .NET version might be necessary, but in my case the current (.NET 6.0) was fine.
+The default Program.cs will print “Hello, World!”. We can leave it at that for now.
+Creating the Strings class
+Now let’s create another source file at File/New/File/General/C# Class where we can paste the Strings class. From dnspy, copy the whole Strings ​​​​​​​class and paste it into the newly created file in Visual Studio and save it as Strings.cs (Figure 6).
+There will be a few things we will have to fix in this class. But first, we set up the rest of the program and get it in a running state so we can use the debugger and fix everything that is not running, step-by-step.
+Creating a basic main program
+Let’s go back to Program.cs. Here, we only need a simple code that imports the Strings class, calls Strings.Get(), and prints the results on the console. Figure 7 shows this code.
+Note that we need to import SmartAssembly.StringsEncoding because in Figure 6 that is the namespace’s name. The Strings.Get(107349344) was just a random string decode call from KeyNormalize.dll that we used for testing. Once we run this program it will throw an exception, but it should do that in the Strings class, which shows that the Strings.Get() call was successful.
+Adding the resource with the encoded strings
+The first exception should happen because it cannot load the data from the resource where the encoded strings should be (Figure 8).
+This is not surprising because that resource does not exist in this program. We need to add it.
+First, the data must be dumped from dnspy. We can navigate to the resources, right-click on {d0d17239-57f1-4b72-b2aa-7b2e35d8851d}, and choose Save raw… (Figure 9). Save it in the StringDecoder project folder, where the Program.cs is, using the name ‘encoded_strings.resource’.
+After that, the file should be visible in Solution Explorer in Visual Studio. From there, we can select the file and, in properties, change the ‘Build Action’ to ‘Embedded resource’, as shown in Figure 10.
+Now when this project is built, this resource file will be embedded in the final binary, similar to KeyNormalize.dll.
+Fixing the Strings class
+The next step is to update the Strings class so it loads the encoded strings from the newly created encoded_strings.resource. We can do that with the code in Figure 11. Line 106 shows the original code commented out, and line 107 creates a ResourceStream from the StringDecoder.encoded_strings.resource. Note the StringDecoder prefix, which is the namespace of this program.
+Now, let’s try to run the program again. Drumrolls… it works! In Figure 12 we can see that the StringID 107349344 that we are decoding refers to the string ‘SearchResult’.
+This is how we can use the obfuscator’s own code to deobfuscate the strings. I will stop at this point, but for the original analysis we collected all calls to the Strings.Get() function and decoded all of them in Program.cs. Note that some of the strings won’t be meaningful because the code in KeyNormalize.dll performs additional conversions on some of them. But one could reimplement those as well in this program if further analysis is needed.
+Conclusion
+In this analysis, we discussed how you can use code from the malware against the malware. We used the string decoding code from SmartAssembly to implement a program, which can decode the encoded strings in the resource file. Using code from the target binary can often be very useful to avoid the time-intensive work of reimplementing various custom algorithms.
+Fortinet Protections
+The Fortinet Antivirus engine already covers all discussed binaries using the following signatures:
+MSIL/Kryptik.AGIJ!tr – Uj bejelentkezEsi adatai·pdf.exe
+
+W32/PossibleThreat – KeyNormalize.dll
+
+MSIL/Agent.UDJ!tr – Metall.dll
+
+W32/Agent.TJS!tr – Warzone payload
+
+W32/AntiAV.NIZ!tr – Privilege Escalation payload WM_DSP
+The FortiGuard Web Filtering service rated the C2 server as ‘Malicious’ and blocks it accordingly.
+FortiMail and FortiSandbox can detect and quarantine the malicious attachments in this campaign, and Fortinet’s CDR (Content Disarm and Reconstruction) service can disable them.
+FortiEDR detects the malicious executable attachment and its WarZone RAT payload as malicious based on their behavior.
+In addition to these protections, Fortinet can help train users to detect and understand phishing threats:
+The FortiPhish Phishing Simulation Service uses real-world simulations to help organizations test user awareness and vigilance to phishing threats and to train and reinforce proper practices when users encounter targeted phishing attacks.
+Our FREE NSE training program—NSE 1 – Information Security Awareness—includes a module on Internet threats designed to help end users learn how to identify and protect themselves from phishing attacks.
+IOCs
+
+
+Uj bejelentkezEsi adatai·pdf.exe	21d09c77de01cc95209727752e866221ad3b66d5233ab52cfe5249a3867ef8d8
+KeyNormalize.dll	8b533ffaed24e0351e489b14aaac6960b731db189ce7ed0c0c02d4a546af8e63
+Metall.dll	66319bf905acac541df26fecc90843a9a60fdbc1a8a03e33f024088f586cb941
+<Warzone sample>	27743b5b7966384cc8ef9cfef5c7a11c8b176123b84c50192926c08ab7e6d7d7
+
+
+
+171[.]22[.]30[.]72:5151	C2 Server
+ATT&CK Framework TTPs
+A detailed Warzone RAT TTP collection can be found at https://attack.mitre.org/software/S0670/.
+Learn more about Fortinet’s FortiGuard Labs threat research and intelligence organization and the FortiGuard Security Subscriptions and Services portfolio.
+Learn more about Fortinet’s free cybersecurity training, an initiative of Fortinet’s Training Advancement Agenda (TAA), or the Fortinet Network Security Expert program, Security Academy program, and Veterans program.
+phishing scam, 
+    
+      email phishing, 
+    
+      cybersecurity research, 
+    
+      FortiGuards Labs, 
+    
+      reverse engineering
+Related Posts
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+
+
+
+
+
+
+
+
+News Releases
+News Articles
+
+Threat Research
+FortiGuard Labs
+Threat Map
+Ransomware Prevention
+
+Fortinet Community
+Partner Portal
+Investor Relations
+Product Certifications
+
+About Us
+Exec Mgmt
+Careers
+Training
+Events
+Industry Awards
+Social Responsibility
+CyberGlossary
+Sitemap
+Blog Sitemap
+
+(866) 868-3678
+Copyright © 2025 Fortinet, Inc. All Rights Reserved
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+Filename
+sha256 hash
+Uj bejelentkezEsi adatai·pdf.exe
+21d09c77de01cc95209727752e866221ad3b66d5233ab52cfe5249a3867ef8d8
+KeyNormalize.dll
+8b533ffaed24e0351e489b14aaac6960b731db189ce7ed0c0c02d4a546af8e63
+Metall.dll
+66319bf905acac541df26fecc90843a9a60fdbc1a8a03e33f024088f586cb941
+<Warzone sample>
+27743b5b7966384cc8ef9cfef5c7a11c8b176123b84c50192926c08ab7e6d7d7
+Network address
+Type
+171[.]22[.]30[.]72:5151
+C2 Server

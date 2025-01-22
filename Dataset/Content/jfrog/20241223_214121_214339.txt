@@ -1,0 +1,159 @@
+
+
+On September 23rd, Twitter user Simone Margaritelli (@evilsocket) announced that he has discovered and privately disclosed a CVSS 9.9 GNU/Linux unauthenticated RCE, which affects almost all Linux distributions, and that the public disclosure will happen on September 30th,
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_214339\1.png
+
+Due to a suspected leak in the disclosure process, @evilsocket decided to advance the disclosure, and on September 26th, the vulnerabilities were disclosed in @evilsocket’s blog, along with a full proof of concept. The vulnerabilities were given the identifiers CVE-2024-47076, CVE-2024-47175, CVE-2024-47176, CVE-2024-47177.
+Which vulnerabilities were disclosed?
+All of the disclosed vulnerabilities are related to printing services, and predominantly related to CUPS (Common UNIX Printing System).
+
+CVE-2024-47176 – cups-browsed <= 2.0.1 binds on UDP INADDR_ANY:631 trusting any packet from any source to trigger a Get-Printer-Attributes IPP request to an attacker controlled URL. Estimated CVSS – 8.6
+CVE-2024-47076 – libcupsfilters <= 2.1b1 cfGetPrinterAttributes5 does not validate or sanitize the IPP attributes returned from an IPP server, providing attacker controlled data to the rest of the CUPS system. Estimated CVSS – 8.6
+CVE-2024-47175 – libppd <= 2.1b1 ppdCreatePPDFromIPP2 does not validate or sanitize the IPP attributes when writing them to a temporary PPD file, allowing the injection of attacker controlled data in the resulting PPD. Estimated CVSS – 8.6
+CVE-2024-47177 – cups-filters <= 2.0.1 foomatic-rip allows arbitrary command execution via the FoomaticRIPCommandLine PPD parameter. Estimated CVSS – 9.9
+
+Chaining all of these vulnerabilities together allows an attacker to perform unauthenticated remote code execution against vulnerable systems, by creating a new printer (due to CVE-2024-47176) with a malicious IPP URL, resulting in arbitrary command execution (due to CVE-2024-47177) when a print job is sent to the newly added printer on the computer where the printer was added.
+The last part is crucial – the attacker cannot start a print job on the victim server on their own, therefore on machines that never get print jobs, the vulnerability will never be triggered.
+Who is vulnerable to these vulnerabilities?
+Any UNIX-based system that comes packaged with the CUPS service:
+
+Arch Linux
+
+No security advisory at the time of writing
+
+No security advisory at the time of writing
+Debian
+
+CVE-2024-47176 
+CVE-2024-47076 
+CVE-2024-47175 
+CVE-2024-47177
+
+CVE-2024-47176
+CVE-2024-47076
+CVE-2024-47175
+CVE-2024-47177
+Red Hat / Fedora
+
+Note that by default, the cups-browsed service is disabled on all versions of RHEL.
+
+Note that by default, the cups-browsed service is disabled on all versions of RHEL.
+
+CVE-2024-47176 
+CVE-2024-47076 
+CVE-2024-47175
+CVE-2024-47177
+
+CVE-2024-47176
+CVE-2024-47076
+CVE-2024-47175
+CVE-2024-47177
+openSUSE
+
+CVE-2024-47176
+CVE-2024-47076
+CVE-2024-47175
+CVE-2024-47177
+
+CVE-2024-47176
+CVE-2024-47076
+CVE-2024-47175
+CVE-2024-47177
+Slackware
+Ubuntu
+
+CVE-2024-47176
+CVE-2024-47076
+CVE-2024-47175
+CVE-2024-47177
+
+CVE-2024-47176
+CVE-2024-47076
+CVE-2024-47175
+CVE-2024-47177
+And more…
+However, note that not all distributions (ex. Red Hat) enable the CUPS service by default.
+
+Are these issues truly critical?
+While Red Hat’s initial CVSS assessment for CVE-2024-47177 claimed a critical severity (9.9), after the issue was fully published Red Hat chose to lower the CVSS score to 6.1 (but still with an “Important” impact).
+We believe this decision was fueled by the following factors –
+Factors that raise the severity
+No per-target research is needed to exploit this vulnerability. An attacker can simply scan IP ranges, looking for an open UDP port 631, and use the published fully weaponized exploit to plant a malicious printing directive (PPD) on the victim machine. This is enough to plant the malicious printer, but not to trigger code execution.
+Factors that lower the severity
+After planting the malicious printer, the code execution payload will only get triggered when a user schedules a print job to the newly added printer on the victim machine (the attacker cannot start a print job using only these vulnerabilities). This is a highly mitigating factor, since servers that had the CUPS service open by mistake, are unlikely to get hit with code execution, since no print jobs will ever be queued on them.
+In addition, while researching these vulnerabilities we noticed that contrary to the researcher’s write-up, most major Linux distributions do not listen with port 631 on all interfaces by default.
+
+Debian 12, RedHat 8, Ubuntu 16.04 Desktop, Ubuntu 22.04 Desktop and Ubuntu 24.04 all come with CUPS installed by default but a fresh install only listens on loopback addresses (127.0.0.1 and ::1):
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_214339\ubuntu.png
+
+Moreover, CUPS is not installed by default on Ubuntu Server, as it has a more minimal list of installed packages than Ubuntu Desktop.
+Due to these factors, JFrog’s security research team decided to rate the vulnerability with a Medium severity.
+How can I completely fix these vulnerabilities?
+Several Linux distributions have already published fixed versions of CUPS, most notably Ubuntu, Debian, and Red Hat.
+Can I mitigate these vulnerabilities without upgrading?
+Yes, to mitigate these vulnerabilities without upgrading, perform at least one of the following actions:
+
+Disable and remove the cups-browsed service (if not needed)
+
+
+sudo systemctl stop cups-browsed
+sudo systemctl disable cups-browsed
+Block all traffic to UDP port 631 & and all DNS-SD traffic
+
+What causes these vulnerabilities?
+TL;DR: The cause of these vulnerabilities is a design flaw in the IPP protocol that allows printing documents on Linux and allows unauthenticated attackers to run arbitrary commands using a regression of a patch from more than a decade ago.
+Issue #1 – Lack of authentication
+cups-browsed is a service responsible for finding and connecting to network printers and runs as root.
+There is no authentication built into its mechanism, and due to its code being largely unaudited, a lot of memory bugs are present in its packet parsing logic.
+This service is listening on UDP port 631 on all interfaces (0.0.0.0), thus if your machine is publicly accessible from the internet, it can be exploited.
+Issue #2 – Unfiltered parameter injection
+Sending a packet pretending to be a printer, using the IPP protocol (Internet Printing Protocol), would trigger the service to query the printer’s attributes (the service would connect back to the attacker’s supplied IP address).
+The attacker-supplied attributes are then saved to a PPD file (PostScript Printer Description) using unsafe format strings.
+The file describes the printer’s features and functionalities to the CUPS service, guiding CUPS on how to interact with and utilize the printer correctly.
+One such instruction in the PPD file is the cupsFilter2 cupsFilter2 directive. This directive specifies an executable file, located in the /usr/lib/cups/filter directory, which will be run when a print job is sent to the printer. The purpose of this executable is to perform document conversion if the printer doesn’t natively support the format of the submitted file for example.
+Issue #3 – Arbitrary code execution
+The foomatic-rip filter, a crucial but potentially problematic component of the CUPS system, has a history of security vulnerabilities, including the ability to execute arbitrary commands through the FoomaticRIPCommandLine directive in PPD files.
+Despite fixes implemented in the separate foomatic-filters package, this security patch was not fully integrated into CUPS, leaving the core system vulnerable to similar exploits for years, as evidenced by recent CVEs like CVE-2024-35235.
+The persistence of this security issue, despite being acknowledged by CUPS developers, stems from the complexity of fixing it without breaking backward compatibility with most existing printer drivers and configurations.
+Using this FoomaticRIPCommandLine directive in the PPD configuration file essentially allows an attacker to run any arbitrary shell command on the target system when the victim prints something (and sends a printing job to the printer).
+A full PoC was published as part of the security advisories.
+
+No security advisory at the time of writing
+
+CVE-2024-47176
+CVE-2024-47076
+CVE-2024-47175
+CVE-2024-47177
+
+Note that by default, the cups-browsed service is disabled on all versions of RHEL.
+
+CVE-2024-47176
+CVE-2024-47076
+CVE-2024-47175
+CVE-2024-47177
+
+CVE-2024-47176
+CVE-2024-47076
+CVE-2024-47175
+CVE-2024-47177
+
+CVE-2024-47176
+CVE-2024-47076
+CVE-2024-47175
+CVE-2024-47177
+
+sudo systemctl stop cups-browsed
+sudo systemctl disable cups-browsed
+cups-browsed
+IPP
+PPD
+PPD
+cupsFilter2
+/usr/lib/cups/filter
+foomatic-rip
+FoomaticRIPCommandLine
+PPD
+foomatic-filters
+CVE-2024-35235
+FoomaticRIPCommandLine
+PPD

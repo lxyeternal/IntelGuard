@@ -1,0 +1,219 @@
+
+With threat actors performing man-in-the-middle (MITM) attacks, having an SSL/TLS certificate is no longer a valid reason to trust an incoming connection. Consequently, developers are increasingly adopting SSL/TLS pinning, also known as certificate or public key pinning, as an additional measure to prove the authenticity and integrity of a connection.
+In a Node.js application, SSL/TLS pinning adds an extra layer of security by preventing attackers from intercepting and tampering with the communication between the client and the server.
+This article explains certificate pinning, highlighting its benefits and use cases in Node.js applications.
+When and why you should use SSL/TLS pinning
+SSL/TLS pinning is a security mechanism that helps protect against MITM and other certificate-related attacks. It does so by ensuring that a client, such as a Node.js application, only connects to a server with a pre-verified digital certificate. This technique stores and uses specific certificates or public keys in host applications to compare to the server’s public key or certificate. We can hardcode the certificates or public keys into our applications through environment variables or store them externally in a key vault service for more flexibility.
+Certificate pinning reduces the risks of MITM attacks by considering all requests that don’t have a matching pinned certificate as rogue and terminating them, even if the request uses HTTPS. It also helps to prevent other certificate-related vulnerabilities, such as certificate spoofing or tampering and compromised certificate authorities (CAs).
+According to the Stack Overflow Developer Survey, 47.12% of developers use Node.js, making it a standard web technology for server side applications. Modules built into Node.js, such as HTTPS, add an extra layer of protection to an application by validating pinned certificates. A Node.js application using certificate pinning compares the certificate presented during the TLS handshake with the predefined certificate or public keys. It terminates the request at the transport layer if there’s a mismatch.
+One use case for certificate pinning is with financial applications on mobile devices. An MITM attack on such a device can be catastrophic to the owner, as the device might transmit sensitive personal information, such as credit card or contact information. While newer mobile OS versions like Android Pie have security features that only allow applications to establish secure connections, threat actors could launch phishing attacks by generating self-signed certificates to access the device. Certificate pinning ensures the application doesn’t grant a rouge connection even if the device trusts the self-signed certificate.
+Preparing for SSL/TLS pinning implementations
+When a client sends a network request to a server, the transport layer initiates a secure handshake using the SSL/TLS protocol. The server presents its digital certificate, which contains the public key used for encryption and authentication. During the handshake, the application retrieves the server’s public key from the presented certificate.
+The application compares the retrieved public key with a preconfigured or hardcoded copy of the public key. If the public key matches the locally stored copy, the connection is considered secure, and the communication can proceed. However, if the keys don’t match, the application can terminate the link or take appropriate action based on its security policy, such as raising an alert or refusing to send sensitive data.
+CAs play a vital role in the certificate pinning process by providing the SSL/TLS certificates to establish a secure connection. The CA signs the certificate that the browser validates for web-based applications or an OS chain of trust. Certificate pinning is a further step to confirm the certificate is trusted.
+TLS is a built in module in Node.js that can extract a certificate object containing a public key field from a host. The code below demonstrates how to use the TLS module to make a request to a host and retrieve the certificate in an object:
+1const tls = require("tls");
+2const host = "example.com";
+3const port = 443;
+4
+5const socket = tls.connect(port, host, () => { 
+6const certificate = socket.getPeerCertificate();
+7 const publicKey = certificate.pubkey;
+8
+9 console.log("Public Key:", publicKey);
+10 console.log("Certificate:", certificate);
+11});
+12
+13socket.on("error", (error) => {
+14 console.error("Connection error:", error);
+15});
+In this code, the getPeerCertificate method is responsible for extracting the certificate. We can also use the getPeerX509Certificate method to retrieve the peer certificate in an x509Certificate object format.
+Implementing SSL/TLS pinning in Node.js
+To use SSL/TLS pinning in a Node.js application, we must specify the key or certificate in the request configurations. In HTTPS, the ca, cert, and key properties in the https.request options aid in SSL/TLS pinning. When pinning a certificate, the `ca` property should specify an array containing the trusted privacy-enhanced mail (PEM)-encoded certificates or CA certificates. The key property should specify an array containing private keys associated with a trusted server certificate.
+Snyk Code is a developer-first static application security testing (SAST) tool that identifies security vulnerabilities in a codebase in real time during development. It’s available through command line interface (CLI) commands, software development kits (SDKs) for continuous integration and continuous deployment (CI/CD) pipelines, web interfaces, extensions for integrated development environments (IDEs), and code editors. In a Node.js project, Snyk Code can detect and alert us when the support for SSL/TLS certificates is missing.
+To identify missing SSL/TLS support, use the code test command below to scan the project’s codebase from your terminal. The snyk ignore --file-path=<file_path> command allows us to ignore files or directories we don’t want to include in the Snyk scan, such as the node_modules directory containing our Node.js packages:
+snyk code test
+Although SSL/TLS pinning offers security benefits, it could also be disastrous when poorly implemented without error handling. Our pinning implementations should have a fail-safe plan to handle edge cases, such as when the pinned certificate is revoked or expired. Error handling prevents the entire application from crashing when unable to confirm a certificate or public key. Running audits can help us log such cases.
+To start, create a directory named snyk-tls and use:
+npm init -y
+The code below demonstrates a pinned public key fingerprint in a Node.js application that matches the certificate public key fingerprint for a GET request created with the native Node.js https module. If the public key fingerprint doesn’t match, the code aborts the request. Create an index.js file and add the following code to try it out:
+1const https = require("https");
+2
+3const PINNED_CERT_FINGERPRINTS = [
+4    "44:0C:58:51:4C:73:7C:67:DA:A2:72:29:81:68:CD:FC:51:B5:79:65:66:F0:55:FA:55:C4:45:30:BB:DD:09:82",
+5];
+6
+7const options = {
+8    hostname: "google.com",
+9    port: 443,
+10    path: "/",
+11    method: "GET",
+12    headers: {
+13        "User-Agent": "Node.js/https"
+14    }
+15};
+16
+17const req = https.request(options, (res) => {
+18    res.on("data", d => {
+19        console.log("Request succeeded and received a response after certificate pinning validation")
+20    });
+21});
+22
+23req.on("error", console.error);
+24
+25req.on("socket", (socket) => {
+26    socket.on("secureConnect", () => {
+27        // Uses the sha256 fingerprint hash of the certificate instead of the certificate itself or
+28        // the public key info. The one downside to this is that if/when the certificate
+29        // changes the fingerprint will too and the PINNED_CERT_FINGERPRINTS will need to be updated.
+30        // Reference: https://owasp.org/www-community/controls/Certificate_and_Public_Key_Pinning
+31        const fingerprint256 = socket.getPeerCertificate().fingerprint256;
+32
+33        if (!PINNED_CERT_FINGERPRINTS.includes(fingerprint256)) {
+34            req.emit("error", new Error("The certificate fingerprint received does not match any pinned certificate fingerprints"));
+35            return req.destroy();
+36        } else {
+37            console.log("All OK. Server matched one of our pinned certificate fingerprints");
+38        }
+39    });
+40});
+41
+42req.end();
+In the code above, it checks the PINNED_CERT_FINGERPRINTS array to determine if the public certificate fingerprint is one of the allowed fingerprints. If the fingerprint isn’t included, the destroy method terminates the request.
+For production, we should store the public key or certificate using environment variables or in a separate key vault service to prevent the public key from being exposed when we push the code to a code repository.
+Testing and maintaining SSL/TLS pinning
+A great way to test the effectiveness of a pinning implementation is by simulating an MITM attack. Tools like Mitmproxy or Wireshack allow us to create a test environment to monitor, intercept, and proxy network requests for a test host.
+To test the effectiveness of our SSL/TLS pinning, we must disable the pinned certificates and launch an MITM attack through a proxy to record the baseline behavior of the application’s performance without pinning. We then repeat the test with pinning enabled to see if the application can detect the proxy and terminate the connection.
+Comparing the certificate key hash is another way to test SSL/TLS pinning. A certificate hash is unique to the certificate, as a cryptographic hash function maps data of arbitrary size to fixed-size values representing the certificate. This makes it a suitable option for validating a certificate. Using the Node.js crypto module, we can generate a hash from the host’s certificate and compare it to our expected public key hash.
+A third way to test our SSL/TLS pinning is using network scanning tools such as Nmap to perform an SSL port scan. Nmap provides the ssl-enum-chipers command to scan an SSL port on a specified target.
+Maintaining and updating pinned certificates or public keys is essential for maintaining the trust, security, and integrity of communication channels. By staying up to date, we can mitigate the risks associated with certificate compromise, expiration, and revocation while ensuring secure and authenticated connections.
+Open the snyk-tls folder in the terminal and run the command below.
+echo -n | openssl s_client -connect google.com:443 -servername google.com | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > cert.pem
+This command generates a cert.pem file containing the public certificate for google.com.
+Next, create a main.js file in the project folder. Paste the code below.
+1// import the required modules
+2const tls = require('node:tls');
+3const https = require('node:https');
+4const { exec } = require('child_process');
+5
+6// setting up the variables
+7const certPath = 'cert.pem';
+8const command = `openssl x509 -noout -in ${certPath} -fingerprint -sha256`;
+9
+10// generate SHA256 fingerprint of the certificate
+11const generate_SHA256_fingerprint = () => {
+12 return new Promise((resolve, reject) => {
+13   exec(command, (error, stdout, stderr) => {
+14     if (error) {
+15       reject(new Error('Error executing OpenSSL command: ' + error));
+16       return;
+17     }
+18
+19     if (stderr) {
+20       reject(new Error('OpenSSL command returned an error: ' + stderr));
+21       return;
+22     }
+23
+24     resolve(stdout.split('=')[1].trim());
+25   });
+26 });
+27};
+28
+29// verify the certificate
+30const verifyCertificate = async () => {
+31 try {
+32   const cert256 = await generate_SHA256_fingerprint();
+33   console.log('Pinned Certificate Fingerprint:', cert256);
+34
+35   const options = {
+36     hostname: 'google.com',
+37     port: 443,
+38     path: '/',
+39     method: 'GET',
+40     checkServerIdentity: function (host, cert) {
+41       // Make sure the certificate is issued to the host we are connected to
+42       const err = tls.checkServerIdentity(host, cert);
+43       if (err) {
+44         return err;
+45       }
+46
+47       // Pin the exact certificate
+48       if (cert.fingerprint256 !== cert256) {
+49         const msg = 'Certificate verification error: ' +
+50           `The certificate of '${cert.subject.CN}' ` +
+51           'does not match our pinned fingerprint';
+52         return new Error(msg);
+53       }
+54     },
+55   };
+56
+57   options.agent = new https.Agent(options);
+58   const req = https.request(options, (res) => {
+59     console.log('All OK. Server matched our pinned cert');
+60   });
+61
+62   req.on('error', (e) => {
+63     console.error(e.message);
+64   });
+65
+66   req.end();
+67 } catch (error) {
+68   console.error('Error generating SHA256 fingerprint:', error);
+69 }
+70};
+71
+72verifyCertificate();
+The code above imports the required modules and defines two variables — certPath and command. certPath defines the path to the certificate file. command holds the value for the shell command to generate the certificate’s SHA-256 fingerprint.
+The generate_SHA256_fingerprint() function uses the exec function to execute the openssl command that generates the certificate’s SHA-256 fingerprint. This function returns a promise that resolves with the fingerprint.
+The verifyCertificate() function defines an options object to configure the HTTPS request. This object specifies the hostname, port, path, and method. It also defines a checkServerIdentity() function to verify the server certificate. That function ensures the certificate belongs to the host we’re connecting to and checks if the fingerprint matches the pinned fingerprint.
+To test this script, execute the command node main.js in your terminal. You should receive the following output.
+1All OK. Server matched our pinned cert
+To update a pinned certificate or key, we open the API file and run the openssl command that generates the cert.pem file. When using an external vault service to store the pinned certificates or public keys, we can edit the values in the vault service without modifying our application code. Scenarios that require updating our pinned certificates include:
+
+Certificates or public keys expiring
+Data leaks
+Revocation from the issuer
+Compliance policies from users to rotate the certificate after a specified duration
+Conclusion
+This article taught us how to implement SSL/TLS pinning in Node.js applications. SSL/TLS pinning adds an extra layer of security by verifying the server’s public key or certificate with a locally stored copy. It helps protect our applications against MITM attacks and other certificate-related vulnerabilities.
+Node.js has built in modules like HTTPS that support certificate pinning. We can apply SSL/TLS pinning by comparing the public key during the TLS handshake and terminating the connection if there’s a mismatch. Proper error handling is also essential to avoid getting locked out in edge cases where a certificate or public key expires or an issuer revokes it. Testing SSL/TLS pinning in our applications by simulating attacks, comparing key hashes, and updating certificates or keys is a best practice to ensure its effectiveness. Another best practice is to store public keys securely.
+By leveraging SSL/TLS pinning, we can enhance the overall security of our Node.js applications, ensuring a reliable and safe user experience.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+
+getPeerCertificate
+ca
+cert
+key
+https.request
+snyk ignore --file-path=<file_path>
+node_modules
+snyk-tls
+GET
+https
+index.js
+PINNED_CERT_FINGERPRINTS
+ssl-enum-chipers
+snyk-tls
+cert.pem
+main.js
+certPath
+command
+certPath
+command
+generate_SHA256_fingerprint()
+exec
+verifyCertificate()
+hostname
+port
+path
+method
+checkServerIdentity()
+node main.js
+openssl
+cert.pem
+Certificates or public keys expiring
+Data leaks
+Revocation from the issuer
+Compliance policies from users to rotate the certificate after a specified duration

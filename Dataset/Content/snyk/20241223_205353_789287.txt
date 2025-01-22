@@ -1,0 +1,111 @@
+
+Overview
+I conducted research based upon existing Python vulnerabilities and identified a common software pattern between them. By utilizing the power of our in-house static analysis engine, which also drives Snyk Code, our static application security testing (SAST) product, I was able to create custom rules and search across a large dataset of open source code, to identify other projects using the same pattern. This led to the discovery of a stored command injection vulnerability in Celery. SAST tools such as Snyk Code allow developers to identify bugs in their software purely by analyzing static source code and identifying patterns of inefficient or dangerous code.
+Motivation
+I was motivated to conduct this research project based on personal experience and vulnerability research in open source Python projects (CVE-2017-11610 and CVE-2021-32807). My hypothesis was that object traversal (the ability to acquire a reference to an arbitrary object attribute from another object) is a common feature in Python. I wanted to investigate and prove this hypothesis to identify the prevalence of this pattern in the wider Python ecosystem, and particularly identify instances of arbitrary (or nearly-arbitrary) object traversal that could lead to security vulnerabilities.
+Context
+In Python, almost every element of the language is an object, with its own explicit and inherited attributes and methods (including class instances and modules). Because of this, Python applications may offer a method of traversing an object namespace in order to obtain a reference to an object's attributes, or sub-attributes. To achieve this, a recursive attribute lookup may be performed.
+The following simplified example code demonstrates how object namespaces can be traversed (in Python 3), by importing an innocuous module (random), it is possible to acquire a reference to a dangerous function (os.system) by using getattr to acquire a reference to the imported os (aliased as _os) module:
+1>>> import random 
+2>>> random 
+3<module 'random' from '/usr/local/Cellar/python@3.9/3.9.7/Frameworks/Python.framework/Versions/3.9/lib/python3.9/random.py'> 
+4>>> attr = getattr(random, '_os') 
+5>>> attr 
+6<module 'os' from '/usr/local/Cellar/python@3.9/3.9.7/Frameworks/Python.framework/Versions/3.9/lib/python3.9/os.py'> 
+7>>> attr.system <built-in function system>
+If a Python application were to expose object traversal functionality to the user in a way that they can manipulate the requested object namespace path or attribute, it could lead to arbitrary (or nearly-arbitrary) object traversal, leading to several potential issues:
+
+The most likely impact of exposed object traversal functionality is broken access controls or information disclosure, if a user can acquire a reference to a private method or attribute such as obj._private_method() or obj._secret.
+Remote code execution (RCE) is also possible, if an arbitrary method such as os.system() is acquired and called with user supplied arguments. This is not as likely as the user needs to acquire a reference to the method, and be able to pass arguments to it.
+To summarize, an attacker who can control or manipulate object traversal within a Python application could potentially access a given module or class instance's attributes and sub-attributes, utilizing their functionality in an unrestricted or unexpected way.
+The vulnerable pattern
+The pattern identified as relevant to the above CVEs is that of a recursive attribute lookup, usually based upon a Python dotted path. The path is split and iterated over in a loop, with the current element of the path used to acquire a reference on the context using getattr(). The reference from the previous getattr() call is then used as the context for the next and the process repeats until there are no elements of the path left. The following script demonstrates this:
+1import random
+2
+3cls = random
+4path = '_os.system'
+5for name in path.split('.'):
+6  cls = getattr(cls, name)
+7print(cls) # prints '<function system at 0x1074900d0>
+The dot-separated path is split into two strings (_os and system). For the first iteration of the loop, the cls variable is a reference to the random module, so the getattr() looks up the _os attribute of the random module, which is the os module. The context of the getattr() then becomes the os module, and in the next iteration, the system attribute of the os module is retrieved, aka os.system().
+Case study (Celery - CVE-2021-23727)
+Using the Snyk Code engine, I developed rules to identify the same pattern in other open-source Python code. One of the rule/pattern matches was inside Celery, an open-source asynchronous task queue which is based on distributed message passing. The rule matched the exception_to_python function within the celery.backends.base.Backend class:
+The recursive getattr pattern can be seen inside the function, on line 354. Through further review of the function and how it was used within Celery it became clear that the entire exc dict object was originating from JSON data stored in a Celery backend. As such, it could potentially be controlled or manipulated by a user with access to the backend server, and hence all fields of the dict should be considered potentially tainted.
+Further analysis of the code identified that an arbitrary module reference is accessed, based on a property of the exc dict object (line 352). The recursive attribute pattern is then used to lookup an arbitrary attribute of the module. The acquired attribute reference is then called with a single string argument, also taken from the exc dict object (line 364).
+Considering that the entire exc dict object could potentially be tainted, and no validation is in place to prevent arbitrary modules and attributes being accessed, this code was identified as likely vulnerable to stored command injection.
+I proved this hypothesis using the Python console, by importing the relevant classes and crafting a malicious dict to simulate an attacker creating a malicious JSON blob within the database of a Celery backend:
+1Python 3.8.9 (default, Aug  3 2021, 19:21:54)
+2[Clang 13.0.0 (clang-1300.0.29.3)] on darwin
+3Type "help", "copyright", "credits" or "license" for more information.
+4>>> exc = {
+5... 'exc_module':'os',
+6... 'exc_type':'system',
+7... 'exc_message':'id'
+8... }
+9>>> from celery.backends.base import Backend
+10>>> from celery import Celery
+11>>> b = Backend(Celery())
+12>>> b.exception_to_python(exc)
+13uid=501(calumh) gid=20(staff) groups=20(staff),12(everyone),61(localaccounts),79(_appserverusr),80(admin),81(_appserveradm),98(_lpadmin),701(com.apple.sharepoint.group.1),33(_appstore),100(_lpoperator),204(_developer),250(_analyticsusers),395(com.apple.access_ftp),398(com.apple.access_screensharing),399(com.apple.access_ssh),400(com.apple.access_remote_ae)
+First, I create a Python dict, to be passed to the vulnerable function. This dict contains properties that control the module to be accessed (exc_module), what attribute of the module to acquire a reference to (exc_type), and finally what argument to pass into the acquired method (exc_message).
+1>>> exc = {
+2... 'exc_module':'os',
+3... 'exc_type':'system',
+4... 'exc_message':'id'
+5... }
+The next few lines import the vulnerable code from Celery into the Python console, and initialize the Backend class with a Celery object.
+1>>> from celery.backends.base import Backend
+2>>> from celery import Celery
+3>>> b = Backend(Celery())
+Finally the vulnerability is triggered when the dict is passed into vulnerable method exception_to_python.
+1>>> b.exception_to_python(exc)
+2uid=501(calumh) gid=20(staff)...
+The last line in the code snippet above is the output from the id command, proving that the crafted dict was deserialized and successfully triggered arbitrary command injection within the Backend class.
+For a system utilizing Celery, an attacker exploiting this vulnerability could lead to command injection within the producer, potentially allowing for total system takeover. If the Celery backend is remote, this vulnerability could also allow attackers who have gained access to the Celery backend to move laterally within an organization's network and gain a foothold on additional network infrastructure.
+Remediation
+This issue was responsibly disclosed to Celery and was fixed in version 5.2.2 of the software by adding validation of the targeted module and checking the types of resolved attributes before calling arbitrary functions with potentially tainted input. In general, when deserializing objects, care should always be taken around any potentially tainted data, even if it originates from a remote data source or database. If possible, the types of objects should be checked and validated before deserialization, or at least before calling a method or property of the deserialized object.
+Finding this command injection vulnerability in Celery and performing the required tainted data analysis was simplified with Snyk Code. Our revolutionary SAST tool is a developer-friendly, fast, and accurate alternative to traditional security tools. IDE plugins integrate real time testing into existing workflows, empowering developers to find and fix vulnerabilities in as little as 5 minutes. Start a free trial today and see how Snyk Code makes secure development simple.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+References
+Celery (CVE-2021-23727): https://security.snyk.io/vuln/SNYK-PYTHON-CELERY-2314953
+random
+os.system
+getattr
+os
+_os
+The most likely impact of exposed object traversal functionality is broken access controls or information disclosure, if a user can acquire a reference to a private method or attribute such as obj._private_method() or obj._secret.
+obj._private_method() or obj._secret
+Remote code execution (RCE) is also possible, if an arbitrary method such as os.system() is acquired and called with user supplied arguments. This is not as likely as the user needs to acquire a reference to the method, and be able to pass arguments to it.
+os.system()
+getattr()
+getattr()
+_os
+system
+cls
+random
+getattr()
+_os
+random
+os
+getattr()
+os
+system
+os
+os.system()
+exception_to_python
+celery.backends.base.Backend
+getattr
+exc
+exc
+exc
+exc
+exc_module
+exc_type
+exc_message
+Backend
+Celery
+exception_to_python
+id
+Backend

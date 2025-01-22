@@ -1,0 +1,96 @@
+
+In the previous post in this series, we looked at Kubernetes authentication, which allows a cluster to determine who's making a request. In this post, we'll focus on another key aspect of Kubernetes security: authorization, which allows a cluster to know if the requester is allowed to take a specific action.
+Authorization is the second step (after authentication) in the process that requests to the main API server go through before they’re applied to the cluster. In the next blog post in this series, we’ll discuss the final aspect of this process: admission control.
+
+
+Other components of the cluster also have authorization processes, which we'll cover toward the end of this post.
+Kubernetes authorization principles
+As with authentication, Kubernetes has some unique design principles that impact how authorization works in the cluster.
+A Kubernetes cluster can define multiple authorization modules. When the cluster responds to an authorization request, it checks each authorization module in the order of the flags provided to the kube-apiserver on startup.
+Each authorization module can either explicitly approve or deny the request, or provide a response of "no opinion." In the event of a “no opinion” response, the request is passed to the next authorization module. If all configured authorization modules return "no opinion," the request is denied.
+An important thing to keep in mind about this system is that the cluster itself does not keep a central record of all authorization rules—instead, the rules are set by each authorization module. Also, in many cases, there's no way for the cluster to query authorization systems for all of a user’s permissions. As a result, auditing permissions for all users in a cluster requires review of the rules specific to each configured authorization module.
+In addition, Kubernetes has a special group that bypasses all authorization checks. If a user is a member of the system:masters group, then no authorization checks are carried out, and the request is not sent to any external authorization modules. For this reason, users should never be placed in this group, apart from break-glass user accounts used to reconfigure the cluster in the event of failure of the authorization systems.
+Kubernetes authorization modules
+There are a number of authorization modules built into Kubernetes. Some of these modules have very specific limited purposes, while others can be used for more general authorization needs.
+AlwaysAllow and AlwaysDeny
+This pair of authorization modules should not be used in any production cluster, as they both effectively either allow or deny any request that reaches them.
+While these modes are rarely used in Kubernetes distributions, it is important to be aware of them as at least one distribution (microk8s) uses AlwaysAllow by default.
+Node Authorizer
+This is another specialist authorization mode that serves a specific purpose. It is designed to restrict the rights of kubelet users, in order to reduce the risk of an attacker escalating their privileges after compromising a single node in a cluster.
+Kubelets need to be able to access secrets so they can provide them to the containers running on their node. But without additional restrictions, this could allow kubelets to access any secret in the cluster, making it easier for an attacker to escalate privileges if they are able to access that node's credentials.
+As a result, Kubernetes utilizes a special authorization module (along with an admission controller called NodeRestriction to limit the objects that Kubelet credentials can access or modify.
+The Node Authorizer is usually placed first in the list of configured authorizers, and if the request is made by anything other than a node, it will return "no opinion" and pass the request to the next configured authorization module.
+ABAC
+Attribute-based access control in Kubernetes relies on a JSON file that describes authorization rules based on specific attributes of the request (for example, the resource requested or the user making the request).
+In practice, this module is rarely used in Kubernetes, as a result of how it's implemented. ABAC uses a static file that lives on control plane nodes and requires manual updates by cluster administrators. In cases where a cluster has multiple control plane nodes, the file must be synchronized manually between the nodes.
+Additionally, the kube-apiserver component must be restarted every time a modification is made, in order for the change to take effect.
+Lastly, this module can only be used where the cluster operator has access to the control plane nodes to modify the file, so it is not available in managed Kubernetes distributions like EKS, GKE, or AKS.
+RBAC
+Role-based access control is the main authorization module used in most Kubernetes clusters. It is typically enabled by default and assigns rights to subjects at either the namespace or cluster level.
+The Kubernetes RBAC documentation goes into a lot of detail on the different ways that RBAC can be used, so we'll focus here on some of its interesting edge cases and features.
+The first area that can cause some confusion when using RBAC is the relationship between namespace scoped role and rolebinding objects and cluster-wide clusterrole and clusterrolebinding objects.
+There are essentially four ways these objects can be combined:
+
+
+The first combination is used to provide rights to a principal in a single namespace, and the third provides rights at the cluster level.
+The second one is an invalid combination, as only a ClusterRole can be bound through a ClusterRoleBinding.
+The last combination, however, is an interesting case. Here, a Rolebinding is applied to a ClusterRole, and the rights are provided in a single namespace (i.e., the namespace that contains the Rolebinding).
+Another area where RBAC can cause confusion is "virtual verbs." For most resources, there's a standard list of verbs (get, list, watch, delete, update, patch, create, deletecollection), but it's possible to have additional verbs, like impersonate`, which is used to allow one user to act as another.
+Kubernetes doesn't restrict what verbs or resources can exist—the RBAC system simply evaluates verbs as strings, so it's possible to define new ones (for example, teaching Kubernetes to educate dolphins), leading to quite a flexible system.
+This does have some consequences when auditing Kubernetes permissions, as there's no definitive list (within the cluster) of the verbs and objects that may be valid in an RBAC object. As such, tools that assess the rights provided by RBAC need to have knowledge of these verbs embedded in them. For example, the kubectl auth can-i tool maintains a list of verbs it knows about here.
+Non-resource endpoints are another area of RBAC that can cause confusion These endpoints are specified in roles and clusterroles and appear as URL paths instead of Kubernetes resources.
+On the main API server, non-resource endpoints are used to control access to metric information and other data, as well as access for unauthenticated users. For example, the system:public-info-viewer clusterrole has the following rules, which show what endpoints can be accessed without authentication in a Kubeadm cluster
+rules:
+- nonResourceURLs:
+  - /healthz
+  - /livez
+  - /readyz
+  - /version
+  - /version/
+  verbs:
+  - get
+Webhook
+Webhook authorization in Kubernetes works in a similar way to webhook authentication in that the Kubernetes API server sends information about the authorization request to an external provider, which then returns an allow/deny response based on its own logic.
+Configuring webhook authorizers requires access to the startup flags for the kube-apiserver component, so it's not possible for users of managed Kubernetes providers to add webhook authorization directly. Some managed distributions (for example, AKS) provide webhook-based authorization systems that tie in with their IAM systems. For additional information on how Amazon EKS uses webhook authorization, see this blog post.
+Authorization for other Kubernetes components
+Most users will only communicate directly with the Kubernetes API server. However, it is possible to make requests to other APIs in Kubernetes, and in some cases, those APIs have an authorization system
+Kubelet
+Authorization for the kubelet API is generally controlled based on RBAC rights for the overall cluster. The kubelet uses webhook authorization to check the caller's rights by calling the SubjectAccessReview endpoint on the Kubernetes API server.
+Each user’s rights to the kubelet API are determined by access to Node resource objects. For example, access to the stats sub-resource of node objects allows access to the /stats/ path on the kubelet API. The full list of rights is included in this Kubernetes documentation page.
+From a security standpoint the most important right to control access to is the proxy subresource of node objects—this covers key rights, such as the ability to execute commands in running containers, and is a catchall for any rights not specifically assigned elsewhere.
+While specific access to node resources is not that common in Kubernetes clusters, it's worth remembering that any user with wildcard access to the cluster can access node resources. This means any user who has been granted cluster-admin can directly contact the kubelet API, which bypasses audit logging and is not affected by admission control.
+Scheduler and Controller Manager
+Similarly to the kubelet, the scheduler and controller manager component rely on RBAC authorization from the main Kubernetes API server to control access to specific endpoints.
+However, instead of looking at the rights to Node objects as the kubelet does, the scheduler and controller manager make use of non-resource endpoints (discussed earlier in the RBAC section) to check whether a user has the necessary rights to see a specific endpoint.
+Conclusion
+Kubernetes’ authorization system, like many of its components, is quite flexible and provides many options for users. This flexibility, however, comes with a certain level of complexity, as we've discussed in this article.
+It's important to understand what authorization system(s) are enabled on your cluster and how they grant rights to users, to avoid granting excessive permissions.
+In the next article in this series, we'll discuss the topic of admission control and its role in securing Kubernetes clusters.
+system:masters
+role
+rolebinding
+clusterrole
+clusterrolebinding
+get
+list
+watch
+delete
+update
+patch
+create
+deletecollection), but it's possible to have additional verbs, like
+kubectl auth can-i
+roles
+clusterroles
+system:public-info-viewer
+clusterrole
+SubjectAccessReview
+Node
+stats
+node
+/stats/
+proxy
+node
+node
+cluster-admin
+Node

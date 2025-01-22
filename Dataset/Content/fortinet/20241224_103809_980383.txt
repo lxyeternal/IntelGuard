@@ -1,0 +1,336 @@
+
+
+Categories
+
+
+
+Business & Technology 
+
+
+
+
+FortiGuard Labs Threat Research
+
+
+
+
+Industry Trends
+
+
+
+
+Life at Fortinet
+
+
+
+
+Partners
+
+
+
+
+Customer Stories
+
+
+
+
+PSIRT Blogs
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+CISO Collective
+Subscribe
+FortiGuard Labs Threat Research
+Malware Disguised as Document from Ukraine's Energoatom Delivers Havoc Demon Backdoor
+Affected platforms: Microsoft Windows
+
+Impacted parties: Targeted Windows users
+
+Impact: Compromised machines are under the control of the threat actor
+
+Severity level: Medium
+As part of our ongoing research on malware being used in the Russian-Ukrainian conflict, FortiGuard Labs has encountered a malicious spoofed document pretending to be from the Ukrainian company, Energoatom, a state-owned enterprise that operates Ukraine’s nuclear power plants.
+Since the war with Russia began, Ukraine’s energy sector has been under constant cyberattack. For example, in April 2022, an attack deploying INDUSTROYER2 and CADDYWIPER wiper malware targeted energy companies. On 16 August 2022, the Energoatom corporate website was the target of a DDoS attack. And in October 2022, yet another wiper attack, this one using the wiper dubbed NikoWiper, targeted the energy sector.
+Aside from highlighting the technical details of this latest multi-staged attack, which includes several evasion techniques, this article also discusses some strange artifacts that make us think this could be a work-in-progress or part of a red-team exercise.
+Document Analysis
+The macro-enabled document is named “zatverdzhenniy_spisok_osib_na_otrim”, which roughly translates to “approved list of persons to receive” in Ukrainian. It arrives inside an ISO image archive bearing the same filename. It was first submitted to VirusTotal in mid-March of this year.
+When opened, it displays an image instructing the user to enable Word’s macro code execution to reveal information supposedly protected by M.E. Doc (My Electronic Document). This popular Ukrainian document management system is used to exchange important and sensitive documents with organizations (including regulatory authorities) in electronic form.
+Blurred content with the logo for Energoatom is displayed behind the instruction, making it appear to be protecting important information (Figure 1). In reality, it’s just an ordinary image placed on the top layer of the document. Dragging it to the side reveals the supposedly protected information underneath.
+Once the macro is enabled, the image disappears, creating the impression that the critical information has somehow been revealed. The document contains an announcement about a list of people supposedly approved to receive protective equipment (Figure 2).
+VBA Code Analysis
+To complicate analysis and attempt to evade detection, the macro’s VBA code employs a few interesting techniques.
+The Word application crashes when trying to view or debug the VBA code in the document. Similarly, when the document composition is analyzed using oletools (a package of python tools used to analyze Microsoft OLE2 files), the tool produces several errors, including stream files that have been defined but are not present within the archive. The tool also reports an error about an incorrect signature when attempting to decompress a specific stream inside the file. We have not confirmed if either of these anomalies directly led to the crash above. Nevertheless, oletools eventually extracted the complete malicious VBA macro code intended to be executed by the document.
+In a likely attempt to make the location of the macro code less obvious, the VBA Project binary file that contains the actual VBA code is redirected to the file “EbDYTPZ.vEypm” instead of the default “vbaProject.bin”.  This association is detailed in “word\_rels\ document.xml.rels” of the Office Open XML archive with the following line:
+“<Relationship Id="rId1"
+Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject"
+Target="EbDYTPZ.vEypm"/>”
+As usual, the VBA code is set to execute when the document is opened via AutoOpen and Document_Open events.
+As mentioned, the macro begins by deleting the overlay image, which is internally a Shape object with the Name attribute “happy”. To find this image, it iterates through all the Shape objects in the document and deletes the one with the same name.
+To hide the strings it uses during its execution, it primarily uses a simple encoding by subtracting 35 from each character of the original string and encoding the result with Base64. In addition, it uses other operations, such as string reverse and character splitting, prior to decoding.
+As an anti-debugging technique, execution of the primary infection routine uses the Application.OnTime function commonly used to schedule the execution of a specific VBA procedure instead of directly calling it. In this case, it schedules the immediate execution of the function “ostrategicy”. When debugging, this line of code produces the error, “Can’t execute code in break mode”, and then stops executing.
+As seen in Figure 3, seemingly random nonsensical comments are also added to the VBA code.
+This malware then checks if a hardcoded path, “C:\Users\user\AppData\Local\Microsoft\Office\OfficeTelemetry.dll”, exists in the system. As discussed later, this is the same file path where the payload would be written. This strange implementation detail makes us think this may be a work in progress and could be a test sample created for a threat campaign that will soon be launched.
+The file at the abovementioned path is executed if it exists. Otherwise, the code extracts the payload that is cleverly stored as a node named “TwXfx” in a custom XML part of the document.
+Custom XML parts is a feature that was introduced with Office Open XML format. It is used for storing arbitrary data that the document could programmatically access.
+To get to the payload data, it starts by enumerating all the custom XML part objects in the document and then checking if they have a node named “TwXfx”. That node contains the encoded payload.
+Below is a screenshot of the encoded payload stored in “customXml\item1.xml” of the document archive (Figure 4).
+Although the payload in this document is stored in a single node, the VBA code also supports an encoded payload split across several nodes, further complicating its extraction. In fact, before assuming that the data is stored in a single node, it first checks to determine whether it is stored in several nodes. It does this by trying to find the node name, in this case, “TwXfx”, with an appended index, i.e., “TwXfx_0”. If the node exists, it moves on to find the next one by incrementing the index (i.e., TwXfx_1). It repeats this until it fails to find a node, which means it has reached the end of the payload.
+Once a node is found, the content of the node is read, and its XML tags are removed. Furthermore, if a string “__b_” is found at the beginning of the data, it is also removed. Similar to decoding strings, the binary payload is extracted by decoding the data using Base64 and adding 35. Only this time, the resulting bytes are further decoded with xor 82. The decoded payload is a 64-bit executable (.exe).
+The storage of a payload binary as a custom XML part of the document is a technique very similar to what’s presented in this blog from the website mgeeky.tech. Even on the code level, there are striking similarities between the code used by the malicious document and what’s presented in that blog. The website author offers a private tool that provides similar capabilities. Still, the creator of this malicious document could have easily replicated the technique from the publicly available PoC linked in the blog. Figure 5 shows one of the several code similarities observed in the function for locating the payload node in the document.
+Once the payload is decoded, it is written to the hardcoded path “C:\Users\user\AppData\Local\Microsoft\Office\OfficeTelemetry.dll” and executed using ShellExecute with the following command line:
+C:\Windows\System32\conhost.exe --headless
+"C:\Users\user\AppData\Local\Microsoft\Office\OfficeTelemetry.dll" "”
+This eventually leads to the execution of a Havoc Demon agent, as discussed in the next section.
+Payload Analysis
+Stage 1: OfficeTelemetry.dll
+Based on the filename of the payload binary, it tries to masquerade as a legitimate component of Microsoft Office. It is even signed with an invalid portal.office.com certificate (Figure 6).
+While this file has a DLL extension and contains multiple exports (Figure 7), it is a standalone EXE file.
+Upon execution, it locates a packed and compressed payload in the .vdata section (Figure 8) of the memory allocated for the current process.
+The payload storage is structured as follows:
+1.     Offset 0x0: Magic (8 bytes)
+2.     Offset 0x8: Encrypted flag (0 = not encrypted, 3 = RC4 encryption)
+3.     Offset 0x9: Compression flag (0 = not compressed, 3 = LZNT1 compression)
+4.     Offset 0xa: RC4 key (64 bytes)
+5.     0ffset 0x4a: Compressed size (4 bytes)
+6.     Offset 0x4e: Uncompressed size (4 bytes)
+7.     Offset 0x52: Loader configuration string length (2 bytes)
+8.     Offset 0x154: Start of encrypted and compressed loader configuration and payload
+After decrypting and decompressing the payload, we see a pipe-delimited configuration followed by the actual shellcode to be executed (Figure 9).
+The loader configuration format is as follows:
+
+Field 1: Injection type: Current process (1) or in the new process (2)
+Field 2: Flag to wait for injection thread to terminate before terminating loader (injection type 1 only)
+Field 3: Process to inject into (injection type 2 only)
+Field 4:  Process to inject into (injection type 2 only)
+Field 5: Flag to write empty file to %TEMP% upon successful injection
+Field 6: Wait timeout used for Windows events within the code
+Field 7: Unknown flag used (injection type 1 only)
+Field 8: Flag to enable sleep obfuscation after creating an injected thread (injection type 1 only)
+Field 9: Flag to enable sleep obfuscation via a separate thread
+Field 10: Flag to enable sleep obfuscation
+Field 11: Flag to patch APIs
+After parsing the configuration, this loader prepends a stub containing 79 bytes of junk instructions before the actual payload shellcode. The bytes at 25 hardcoded offsets within this stub are replaced with random bytes to hinder shellcode detection.
+It first ensures that a file within the %TEMP% does not exist before attempting to launch the payload. The name of this file is derived from a value computed from hour / 3 + year + month + day of the current time. Hence, the payload will only be executed up to 8 times per day.
+To launch the shellcode, the loader calls ZwCreateThreadEx to create a new suspended injection thread hidden from debuggers using the THREAD_CREATE_FLAGS_CREATE_SUSPENDED (0x01) and THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER (0x4) thread creation flags. By removing the THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER flag before the ZwCreateThreadEx call and using memory breakpoints, the shellcode can be debugged in the usual manner when the thread resumes execution.
+While not enabled in this sample, the loader also supports sleep obfuscation to hinder detection by memory scanners. It does this by redirecting calls to the Windows Sleep API to its own function that performs the following:
+1.     Suspends all threads in the current process
+2.     Reverts the patched Sleep API code bytes
+3.     Reverts patches to security APIs (only if patching was configured)
+4.     Encodes sensitive memory regions in the current process with a randomized XOR key
+5.     Calls Sleep with the specified timeout
+6.     Decodes sensitive memory regions in the current process with the same XOR key
+7.     Patches security-related APIs to disable them
+8.     Patches Sleep to redirect to this function again
+9.     Resumes all threads in the current process
+The patched APIs are:
+
+WldpQueryDynamicCodeTrust in wldp.dll
+AmsiScanBuffer in amsi.dll
+EtwEventWrite in ntdll.dll
+Interestingly, well-known Cobalt Strike configuration field names (Figure 10) are also found in plaintext within the sample, possibly to confuse static analysis tools.
+Stage 2: KaynLdr
+The second stage consists of a shellcode with a Havoc C2 agent DLL appended to it. Havoc C2 framework is an open-source post-exploitation toolkit developed by C5pider and comprises the following components:
+
+Demon agent: Deployed on infected machines and communicates with configured Teamserver
+Teamserver: Command & Control (C2) server that manages communications with agents
+Client: Used by threat actor(s) to connect to a Teamserver for managing and issuing commands to connected agents. As the client is not deployed as part of the infection, it will not be discussed further in this article.
+The shellcode looks for 0x4d 0x5a and 0x50 0x45 bytes that denote the “MZ" and “PE” headers of a Windows PE executable file to locate the payload in memory. It then calls the loader (referred to internally as KaynLdr in the source code)
+KaynLdr resolves the LdrLoadDll, ZwAllocateVirtualMemory, and NtProtectVirtualMemory Native APIs via API hashing before using them to allocate memory, load the Demon agent payload, and execute it directly from memory.
+The relevant API hashes are:
+
+LdrLoadDll: 0x9e456a43
+NtAllocateVirtualMemory: 0xf783b8ec
+NtProtectVirtualMemory: 0x50e92888
+Stage 3: Havoc Demon agent
+The DLL loaded by KaynLdr is the Havoc Demon agent, which is analogous to Beacon for the popular Cobalt Strike framework. The configuration is embedded within the Demon sample.
+Demon communicates with the C2 server specified in the configuration via HTTP or HTTPS POST requests. A randomized 256-bit key and 128-bit IV are generated and shared with the C2 server on the initial check-in request (Figure 11) for encrypting subsequent data communicated between the agent and C2 server with AES-256-CTR.
+The relevant fields in the check-in request are as follows:
+1.     Size of data package
+2.     Magic value: 0xDE 0xAD 0xBE 0xEF (hardcoded into Havoc)
+3.     Agent ID
+4.     Command ID: 0x63 (DEMON_INITIALIZE)
+5.     32-byte AES key
+6.     16-byte AES IV
+7.     AES-encrypted data
+While Demon can be configured to rotate among multiple C2 domains, only one C2 domain, "ukrtatnafta[.]org", is specified for this sample. This domain is very similar to ukrtatnafta[.]com, owned by Ukrtatnafta, a Ukrainian oil refining company.
+To blend in with legitimate HTTP/HTTPS traffic, Demon randomly picks one of several URIs set in the configuration and applies a specified list of HTTP headers in the requests to the C2. The Teamserver C2 configuration extracted from this sample can be seen below.
+
+Host: ukrtatnafta[.]org:443
+HTTPS: True
+Proxy enabled: No
+Method: POST
+Headers:
+Content-Type: application/javascript
+Pragma: public
+ETag: W/736fh0-3e
+Last-Modified: Mon, 05 Dec 2016 14:54:50 GMT
+Server: nginx/1.14.2
+Connection: keep-alive
+Expires: Mon, 06 Mar 2023 13:23:47 GMT
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36
+
+Content-Type: application/javascript
+Pragma: public
+ETag: W/736fh0-3e
+Last-Modified: Mon, 05 Dec 2016 14:54:50 GMT
+Server: nginx/1.14.2
+Connection: keep-alive
+Expires: Mon, 06 Mar 2023 13:23:47 GMT
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36
+URIs:
+/wp-content/themes/pressa/js/avias.js
+/wp-content/themes/pressa/js/mobile_menu.js
+/wp-content/plugins/contact-form-7/includes/js/scripts.js
+/wp-content/themes/pressa/js/bootstrap.js
+/wp-content/themes/pressa/js/hovermenu.js
+/wp-content/themes/pressa/js/retina-1.1.0.js
+/wp-content/plugins/js_composer/assets/lib/bower/isotope/dist/isotope.pkgd.min.js
+/wp-content/themes/pressa/js/custom-script.js
+/wp-includes/js/wp-emoji-release.min.js
+/maps-api-v3/api/js/52/1/intl/uk_ALL/util.js
+/wp-includes/js/wp-embed.min.js
+
+/wp-content/themes/pressa/js/avias.js
+/wp-content/themes/pressa/js/mobile_menu.js
+/wp-content/plugins/contact-form-7/includes/js/scripts.js
+/wp-content/themes/pressa/js/bootstrap.js
+/wp-content/themes/pressa/js/hovermenu.js
+/wp-content/themes/pressa/js/retina-1.1.0.js
+/wp-content/plugins/js_composer/assets/lib/bower/isotope/dist/isotope.pkgd.min.js
+/wp-content/themes/pressa/js/custom-script.js
+/wp-includes/js/wp-emoji-release.min.js
+/maps-api-v3/api/js/52/1/intl/uk_ALL/util.js
+/wp-includes/js/wp-embed.min.js
+The major features of Demon include:
+
+Enumerate host and network info (users, groups, domains, shares, etc.)
+Execute commands via Command Prompt
+Execute PowerShell commands
+Inject and execute DLLs, shellcode, .NET assemblies, Cobalt Strike BOF files
+Manipulate processes (list, create, search, kill, etc.)
+Manipulate files and directories (list, download, upload, view, delete, etc.)
+Manipulate access tokens (steal, impersonate, etc.)
+Take screenshots
+As this Demon sample was unmodified from the version in Github, we will not analyze it in detail here. Interested readers may refer to the documentation and source code on GitHub.
+Conclusion
+This malware campaign showcases some interesting techniques threat actors use to evade detection and hinder analysis. Using a combination of such techniques, threat actors may gain sufficient time to complete their post-exploitation commands upon successful infection before they are detected.
+Although the document contains some indicators of a potential red-team exercise, e.g., the hardcoded path for persisting the payload on disk and use of a relatively novel payload encoding technique, it is also entirely possible that this could be a campaign under development as many red-team tools have been weaponized recently for malicious purposes. As this document delivers a backdoor that will silently provide control over the infected user’s system to a remote operator with unknown intentions, it is safer to err on the side of caution and ensure protections are in place.
+The increasing use of open-source offensive security frameworks is a double-edged sword.  On the one hand, both red and blue teams can benefit from the availability of the source code to better understand how these techniques work, address detection gaps, and improve the cyber resilience of their organizations. On the other hand, it enables threat actors to abuse these frameworks to conduct attacks without developing or purchasing custom malware.
+Fortinet Protections
+FortiGuard AntiVirus detects the malicious files identified in this report as
+
+VBA/Havoc.FGLT!tr
+W64/Havoc.FGLTA!tr.bdr
+W64/Havoc.FGLTB!tr.bdr
+The FortiGuard AntiVirus service is supported by FortiGate, FortiMail, FortiClient, and FortiEDR. The Fortinet AntiVirus engine is a part of each of those solutions. As a result, customers who have these products with up-to-date protections are protected.
+This type of threats is usually delivered as email attachments. FortiMail can detect and quarantine the malicious attachments for such campaigns.
+Fortinet’s CDR (Content Disarm and Reconstruction) service can neutralize the embedded macros inside the Word document.
+The FortiGuard Web Filtering Service detects the C2 URLs cited in this report as Malicious and blocks them.
+FortiGuard Labs provides Backdoor.Havoc.Agent IPS signature to block Havoc C2 network communications.
+Due to the ease of disruption, damage to daily operations, potential impact to an organization's reputation, and the unwanted destruction or release of PII, etc., it is important to keep all AV and IPS signatures up to date.
+We also suggest that organizations have their end users undergo our free NSE training: NSE 1 – Information Security Awareness. It includes a module on internet threats designed to help end users learn how to identify and protect themselves from various types of phishing attacks.
+If you believe these or any other cybersecurity threat has impacted your organization, please contact our Global FortiGuard Incident Response Team.
+IOCs
+File Hashes
+b773fa65bb375e6fe6d387f301f6bf33219189ea1d4a06762e965a9eba7de4e8
+17637fac7f989549acd248ca9e5293d2b9a1a2e4bb0f7e4edf5571df35129f0c
+9f797d705facebd1687b7765cbf65231e71821eb3c38dcc171a3fc88b9f52328
+b6cb8a7cdce0bfd3a7402d22fb0014dedb259d6c91c1538ac74097b8ca22ca5c
+
+C2 URLs
+hxxps://ukrtatnafta[.]org
+hxxps://ukrtatnafta[.]org/wp-content/themes/pressa/js/avias.js
+hxxps://ukrtatnafta[.]org/wp-content/themes/pressa/js/mobile_menu.js
+hxxps://ukrtatnafta[.]org/wp-content/plugins/contact-form-7/includes/js/scripts.js
+hxxps://ukrtatnafta[.]org/wp-content/themes/pressa/js/bootstrap.js
+hxxps://ukrtatnafta[.]org/wp-content/themes/pressa/js/hovermenu.js
+hxxps://ukrtatnafta[.]org/wp-content/themes/pressa/js/retina-1.1.0.js
+hxxps://ukrtatnafta[.]org/wp-content/plugins/js_composer/assets/lib/bower/isotope/dist/isotope.pkgd.min.js
+hxxps://ukrtatnafta[.]org/wp-content/themes/pressa/js/custom-script.js
+hxxps://ukrtatnafta[.]org/wp-includes/js/wp-emoji-release.min.js
+hxxps://ukrtatnafta[.]org/maps-api-v3/api/js/52/1/intl/uk_ALL/util.js
+hxxps://ukrtatnafta[.]org/wp-includes/js/wp-embed.min.js
+FortiGuards Labs, 
+    
+      ukraine, 
+    
+      malware analysis
+Related Posts
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+
+
+
+
+
+
+
+
+News Releases
+News Articles
+
+Threat Research
+FortiGuard Labs
+Threat Map
+Ransomware Prevention
+
+Fortinet Community
+Partner Portal
+Investor Relations
+Product Certifications
+
+About Us
+Exec Mgmt
+Careers
+Training
+Events
+Industry Awards
+Social Responsibility
+CyberGlossary
+Sitemap
+Blog Sitemap
+
+(866) 868-3678
+Copyright © 2025 Fortinet, Inc. All Rights Reserved
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+
+Content-Type: application/javascript
+Pragma: public
+ETag: W/736fh0-3e
+Last-Modified: Mon, 05 Dec 2016 14:54:50 GMT
+Server: nginx/1.14.2
+Connection: keep-alive
+Expires: Mon, 06 Mar 2023 13:23:47 GMT
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36
+
+/wp-content/themes/pressa/js/avias.js
+/wp-content/themes/pressa/js/mobile_menu.js
+/wp-content/plugins/contact-form-7/includes/js/scripts.js
+/wp-content/themes/pressa/js/bootstrap.js
+/wp-content/themes/pressa/js/hovermenu.js
+/wp-content/themes/pressa/js/retina-1.1.0.js
+/wp-content/plugins/js_composer/assets/lib/bower/isotope/dist/isotope.pkgd.min.js
+/wp-content/themes/pressa/js/custom-script.js
+/wp-includes/js/wp-emoji-release.min.js
+/maps-api-v3/api/js/52/1/intl/uk_ALL/util.js
+/wp-includes/js/wp-embed.min.js

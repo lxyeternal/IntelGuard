@@ -1,0 +1,112 @@
+
+On the 11th of December, 2019 a security vulnerability which extends to all major JavaScript package managers (npm, yarn and pnpm) was publicly disclosed. This vulnerability, discovered by security researcher Daniel Ruf, allows malicious actors to apply varied tactics of arbitrary file overwrites.
+In this article:
+
+How do Node.js command line packages work?
+How does this security vulnerability affect the npm package manager client?
+How does this npm security vulnerability take place in practice?
+Why is this npm security vulnerability so severe?
+Am I affected and what should I do?
+How do Node.js command line packages work?
+npm packages often specify a bin key in the package manifest file — package.json. This bin key is used by the package manager client — for example, npm, or other alternatives — to declare executables that are available in your command prompt on the global $PATH environment variable.
+You have probably seen this capability before, if you installed command line packages globally — such as the Angular CLI via @angular/cli, typescript, or the Snyk CLI via snyk — which are then available anywhere in your path, regardless of a specific npm project directory. To understand how the bin key is used, we use unpkg to see how the Angular CLI project works, by browsing to package.json on the unpkg site.
+As you can see above, in this version of the package, the package.json manifest file declares an executable file, named ng, which points to a file that is shipped with the package and available at ./bin/ng.
+This ./bin/ng JavaScript file is made executable for the user by appending a Unix Shebang statement at the top of the file. This statement tells the shell which interpreter to use in order to evaluate the file — for Node.js-based applications the Node.js binary is installed on the user’s operating system.
+In the case of the Angular CLI, the executable file contents are seen in the following picture:
+How does this security vulnerability affect the npm package manager client?
+To understand the implications of this vulnerability we need to delve a little deeper into npm, and specifically the mechanics behind how npm manages the availability of installed executables for the user.
+The npm client manages declared executable “bins” from globally installed packages in a specific directory which it uses to maintain symlinks between these installed packages executables to links in said directory.
+To inspect which directory is being used to hold these executables, we use the npm client as follows:
+$ npm bin --global
+/Users/lirantal/.nvm/versions/node/v10.16.3/bin
+When inspecting your $PATH environment variable available in your shell, you find an entry matching the directory for your operating system. This is how it is possible to access globally installed packages with declaration of bins from every directory in the OS.
+Now that we have this information, one can’t help but wonder if it is possible for one package to declare a bin executable file which another package provides. That’s exactly what Daniel was interested in understanding, and how he came to find out about arbitrary file overwrite vulnerabilities in major package managers: npm, yarn and pnpm.
+How does this npm security vulnerability take place in practice?
+At Snyk, we reproduce this arbitrary file write vulnerability and demonstrate how this exploitation takes place, courtesy of Daniel’s proof-of-concepts provided to the Snyk security team.
+The first package defines a global set of executables as follows:
+{
+  "name": "binary-replacer",
+  "version": "1.0.0",
+  "main": "index.js",
+  "author": "Daniel Ruf <mac1@daniel-ruf.de>",
+  "license": "MIT",
+  "bin": {
+    "curl-test": "./bin/index.js",
+  }
+}
+With the executable curl-test being a simple text printing to the console:
+#!/usr/bin/env node
+console.log('hi')
+If we install this globally via npm install -g binary-replace then executing curl-test command from the shell, it should print hi to the screen.
+Now, imagine we have another package, binary-replacer-2 which defines an executable as well, having the exact same bin key as the former package: curl-test
+{
+  "name": "binary-replacer-2",
+  "version": "1.0.0",
+  "main": "index.js",
+  "author": "Daniel Ruf <mac1@daniel-ruf.de>",
+  "license": "MIT",
+  "bin": {
+    "curl-test": "./bin/index.js",
+  }
+}
+Once the user installs this package globally, npm overwrites the former symlink with the executable provided with this one, which is innocent, in the case of this demo:
+#!/usr/bin/env node
+console.log('hi 2')
+But what if a malicious package targeted some of the more widely known global packages used? There are so many possibilities —from Zeit’s now package, to Sindre Sorhous’s fkill CLI.
+Moreover, Daniel had laid out many permutations of this vulnerability taking place across npm, yarn, and pnpm. For example, what if instead of the key being curl-test, we replaced that with a relative link location?
+"bin": {
+    "../../aaa": "/bin/date"
+  }
+Or perhaps even set the key to an absolute path for a well known command line tool that is often used by the user and a shell prompt such as:
+"bin": {
+  "/usr/bin/date": "./fake-date"
+}
+It is admirable that pnpm lead by sole developer Zoltan Kochan, in most cases, does the sensible thing and is only vulnerable in cases where a relative path is provided. That is still an issue though, so, an upgrade path to fixed versions of npm is also available.
+Why is this npm security vulnerability so severe?
+This vulnerability is made even more acute due to the fact that arbitrary file overwrite happens even for packages installed with npm’s command line flag —ignore-scripts, which one could expect will circumvent malicious binaries from performing this same course of action.
+Furthermore, even though we discussed the use case of globally installed packages and their executables, it is just as relevant for transitive dependencies in your project. When dependencies are installed using a regular npm install it is possible for a package to arbitrarily overwrite files inside the project directory and outside of it, which sometimes, results in injecting malware, altering lockfiles attack vector, or otherwise poisoning the filesystem.
+Am I affected and what should I do?
+You are in danger of getting affected in two cases:
+
+You are installing a package which is malicious, either by being socially engineered to do so, or by an attacker typosquatting popular packages which you’d end up installing.
+A non-malicious package gets compromised in a way which modifies the package.json’s bin keys to overwrite, as well as include, a malicious file to be executed. Granted, this is very unlikely but, nevertheless, it has happened twice before: [1], [2]
+The impact of this vulnerability had triggered Node.js security releases too because the npm package manager client is bundled with Node.js itself and an update to npm’s fixed 6.13.4 version was required.
+Daniel first disclosed the security vulnerability findings to the Snyk security research team to help coordinate the responsible public disclosure across all projects and maintainers of said package managers, and provided further information detailing the types of attacks in his blog.
+If you’re using any of the following versions of npm, yarn, and pnpm, you are vulnerable and it is crucial that you take immediate steps to upgrade:
+
+npm < v6.13.4 via CVE-2019-16776 and CVE-2019-16777
+pnpm < v4.5.0 via CVE-2019-10773
+yarn < v1.21.1 via CVE-2019-10773
+While it isn’t a common case to include npm, yarn or pnpm as a project dependency, if your project is being monitored by Snyk and we find vulnerable versions of either of them you are notified by the Snyk routine alerts. On top of that if you connected your GitHub repository (or Bitbucket) we automatically create a Pull Request for you to upgrade these package managers to their fixed versions.
+We also recommend that you practice secure developer practices when handling package managers like npm To make your life easier, we compiled security conventions and best practices for you to follow up on 10 npm security best practices.
+Think you found a vulnerability in an open source package? We at Snyk value the security community and believe that a responsible disclosure of security vulnerabilities in open source packages helps us ensure the security and privacy of the users. If you think you found a vulnerability in an Open Source package, you can submit to Snyk Open Source Package Vulnerability Disclosure program and we will take care of the rest! https://snyk.io/vulnerability-disclosure/
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+How do Node.js command line packages work?
+How does this security vulnerability affect the npm package manager client?
+How does this npm security vulnerability take place in practice?
+Why is this npm security vulnerability so severe?
+Am I affected and what should I do?
+bin
+package.json
+$PATH
+package.json
+ng
+./bin/ng
+./bin/ng
+$PATH
+npm install -g binary-replace
+curl-test
+hi
+binary-replacer-2
+bin
+curl-test
+now
+curl-test
+npm install
+You are installing a package which is malicious, either by being socially engineered to do so, or by an attacker typosquatting popular packages which you’d end up installing.
+A non-malicious package gets compromised in a way which modifies the package.json’s bin keys to overwrite, as well as include, a malicious file to be executed. Granted, this is very unlikely but, nevertheless, it has happened twice before: [1], [2]
+npm < v6.13.4 via CVE-2019-16776 and CVE-2019-16777
+pnpm < v4.5.0 via CVE-2019-10773
+yarn < v1.21.1 via CVE-2019-10773

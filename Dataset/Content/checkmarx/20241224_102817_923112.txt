@@ -1,0 +1,91 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_923112\Shutterstock_445200349.jpg
+GraphQL is an API standard said to be a more efficient and flexible alternative to REST and SOAP. One of the main purposes of a GraphQL server is to process incoming data.
+One of the most challenging tasks for developers who work with GraphQL servers is Denial-of-Service (DoS) protection. Directive overloading (submitting multiple directives) is one of the DoS vectors to be concerned about.
+Directives are used to dynamically change queries’ structure and shape using variables. If the context of using the directive is not clear – don’t worry; that’s not important in the current vulnerability. To learn more information about directives and directive overloading check our blog post: https://checkmarx.com/blog/alias-and-directive-overloading-in-graphql/
+Vulnerable software
+graphql-java is the most popular GraphQL server written in Java. It was found to be vulnerable to DoS attacks through the directive overload.
+Moreover, the spring-graphql by Spring and dgs-framework by Netflix libraries use it as a core component. Therefore, they’re also vulnerable if the core component is outdated. To understand the scale of the problem, it’s worth mentioning that graphql-java is the number 1 library in Maven’s top GraphQL servers and is used by 355 libraries.
+The vulnerability was fixed in two stages. The first fix introduced a security control, whereas the second one targeted the root cause. The first fix is presented in the versions of graphql-java 19.0 and later, 18.3, and 17.4.
+The second fix has been applied in the version 20.1 with the pull-request.
+Exploitation and Impact
+The vulnerability can be exploited by sending a crafted GraphQL request. The request contains a huge number of non-existing directives.
+The example demonstrated below is based on the spring-graphql GraphQL server that uses the unpatched graphql-java version.
+Request example:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_923112\image202209291233312.png
+@aa is a non-existent directive. The processing time of this request is only about 100 ms; whereas, adding a large number of directives drastically increases the execution time. The screenshot below shows the request with 1000 directives which is executed in 189 ms, 3000 in 447 ms, 5000 in 963 ms, 7000 in 1,7 second, 10000 in 3 seconds, and 15000 in 5.4 seconds:
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_923112\image202209291242452.png
+The time of execution increases based on the number of directives. By launching 50 concurrent malicious requests with 30.000 directives, the server becomes unavailable:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_923112\image202209291309251024x3111.png
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_923112\image202209291310341024x1701.png
+As a result of this attack, the server became unavailable. All the CPU resources were exhausted.
+An attacker can exhaust all the server’s CPU resources by sending 50 concurrent requests using only one attacking machine.
+Root cause
+Two Denial-of-Service protections have been added before the discovery of the vulnerability in the following pull requests:
+
+Help prevent DOS attacks on graphql servers #2549
+Support Max validation errors being produced #2553
+These protection mechanisms are triggered when an attacker submits a big query; they limit the number of parsed tokens and validation errors.
+And the limit works. After submitting more than 15000 tokens, the following error occurs:
+
+{
+  "errors": [
+    {
+      "message": "Invalid Syntax : More than 15000 parse tokens have been presented.
+      To prevent Denial Of Service attacks, parsing has been cancelled. offending token '@' at line 2 column 22511"
+    }
+  ],
+  ...
+}
+However, as seen in the example above, the execution time increases even when more than 15000 tokens are provided. It means that the DoS occurs before the code reaches the token limits.
+The problem resides in query recognition by the ANTLR4 lexer. The graphql-java developer bbakerman mentions:
+Testing showed that the max token code was indeed being hit, but the ANTLR lexing and parsing code was taking proportionally longer to get to the max token state as the input size increased
+This is cause by the greedy nature of the ANTLR Lexer – it will look ahead and store tokens in memory under certain grammar conditions..
+Graphql-java uses ANTLR4 for decomposing GraphQL queries to lexical tokens. The code line that raises the DoS vulnerability is located in the file graphql/parser/Parser.java:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_923112\image202210050950152.png
+The call chain goes to the file graphql/parser/antlr/GraphqlParser.java.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_923112\image202210110926252.png
+This file is generated automatically by ANTLR and is based on the grammar file Graphql.g4. The file with the .g4 extension contains the grammar for the ANTLR parser. The file imports other g4 files, and they all describe how ANTLR should parse GraphQL queries.
+Further investigation of ANTRL files revealed the vulnerable pattern. The pattern causing the DoS vulnerability in GraphQL grammar is a classic “don’t.” The following rule is located in the GraphqlSDL.g4 file:
+...
+schemaExtension :
+    EXTEND SCHEMA directives? '{' operationTypeDefinition+ '}' |
+    EXTEND SCHEMA directives+
+;
+And the directives rule isdescribed in the file GraphqlCommon.g4:
+directives : directive+;
+directive :'@' name arguments?;
+The rule called directives is repetitive and, additionally, applies repetition to the directive sub-rule. Nested repetition leads to DoS risk. This issue can be compared with an “evil” regex.
+It’s worth mentioning that the schemaExtension rule is not even used to recognize the query. It happens because the directives rule uses the adaptivePredict method in the ANTLR-generated code.
+adaptivePredict algorithm is context-free by default – but, in case of ambiguity, it falls back to a context-sensitive analysis to proceed with the recognition. This seems especially relevant when a rule has a repetition operator since ANTLR can only decide which state to transit to after looking ahead until the end of the repetition. This lookup wouldn’t be a problem for a single repetition since ANTLR only performs this analysis once per loop. However, the code contains nested repetition, which causes ambiguity inside both repetitions.
+Fix #1
+The diff for fixed code: https://github.com/graphql-java/graphql-java/pull/2892/files#diff-f9fc01d56c3bffa9c70fee9c9b3ad888d6890b84d774c20a99b2526b31500ab8
+The idea behind the fix is the same as the DoS protection just mentioned—stop parsing query if it contains more than 15,000 (a default configurable value) directives. This time, the check is performed before passing the query to ANTLR processing.
+The main changes in the graphql/parser/Parser.java file:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_923112\image202210101306391024x2151.png
+
+SafeTokenSource class is introduced to verify that the number of tokens in the query doesn’t exceed a threshold. It prevents a malicious query from being stuck by throwing an exception when a threshold is reached.
+Additional research of the fixed version showed that the fix protects graphql-java server only against a single-threaded attack. An attacker cannot send a single query with a large amount of “evil” directives; however, sending multiple requests simultaneously (> 50-100 threads) containing a large, but allowed number, if directives still leads to DoS, since the root cause of the vulnerability was still there.
+Fix #2
+The second fix targets the root cause. These changes fix the nested repetition of directives in the rule schemaExtension.
+This is the changed code in the file src/main/antlr/GraphqlSDL.g4:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_923112\image202301251333562.png
+For fixing the nested repetition, it’s enough to delete the + (plus) sign for the directives. Also, it requires changing the parsing of the schema in the file src/main/java/graphql/parser/GraphqlAntlrToLanguage.java.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_923112\image202301251334221024x3691.png
+After applying the fix, a significant difference in execution time between the first and the second fixes can be observed:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_923112\image202212261004322.png
+The utilized payload @aa is two characters long. As shown in the screenshot above, 7000 directives, two chars long each, do not hit the 15000 chars limit and consume way more resources when the second fix is not applied. The execution time becomes similar after 8000 directives because the first fix blocks more than 15000 characters and doesn’t parse them. The second fix eradicates the root cause and prevents a DoS regardless of the payload size.
+The changes above were applied in the pull-request: https://github.com/graphql-java/graphql-java/pull/3071
+References
+
+https://github.com/graphql-java/graphql-java/pull/2892
+https://github.com/graphql-java/graphql-java/issues/2888
+https://github.com/graphql-java/graphql-java/pull/3071
+https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-37734
+@aa
+graphql/parser/Parser.java
+graphql/parser/antlr/GraphqlParser.java
+graphql/parser/Parser.java
+src/main/antlr/GraphqlSDL.g4
+src/main/java/graphql/parser/GraphqlAntlrToLanguage.java

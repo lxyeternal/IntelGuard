@@ -1,0 +1,242 @@
+
+Earlier this week, AWS released a new feature, EKS Pod Identity, that aims to simplify granting AWS access to pods running in an EKS cluster. In this post, we'll deep-dive into how this feature works, some elements that make it unique, and why you might consider using it.
+Granting AWS permissions to a Kubernetes pod
+Cloud-native applications that run in an EKS cluster often need to access AWS resources, such as S3 buckets or DynamoDB tables. Initially, the only way to achieve this was to hardcode IAM credentials in the cluster, or to use the worker node's IAM role—both being highly dangerous and discouraged options. In 2019, AWS released "IAM Roles for Service Accounts" (IRSA), which allows users to leverage existing Kubernetes workload identities to securely retrieve temporary AWS credentials.
+Earlier this week as part of the series of launches at re:Invent 2023, AWS released EKS Pod Identity. This new feature is complementary to IRSA, and provides a new alternative way to securely grant AWS permissions to pods.
+EKS Pod Identity at a glance
+At a high level, EKS Pod Identity allows you to use the AWS API to define permissions that specific Kubernetes service accounts should have in AWS:
+aws eks create-pod-identity-association \
+  --cluster-name your-cluster \
+  --namespace default \
+  --service-account pod-service-account \
+  --role-arn arn:aws:iam::012345678901:role/YourPodRole
+Here, YourPodRole has the following trust policy:
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "Service": "pods.eks.amazonaws.com"
+    },
+    "Action": ["sts:AssumeRole","sts:TagSession"]
+  }]
+}
+Once you’ve run the commands to configure Pod Identity, any pod that runs under the pod-service-account service account magically has access to AWS resources, through temporary Security Token Service (STS) credentials:
+$ kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-with-aws-access
+spec:
+  serviceAccountName: pod-service-account
+  containers:
+  - name: main
+    image: public.ecr.aws/aws-cli/aws-cli
+    command: ["sleep", "infinity"]
+EOF
+
+$ kubectl exec pod/pod-with-aws-access -- aws sts get-caller-identity
+{
+    "UserId": "XXXX",
+    "Account": "012345678901",
+    "Arn": "arn:aws:sts::012345678901:assumed-role/YourPodRole/eks-cluster-pod-xxx"
+}
+For a given EKS cluster, you can easily see which pods have access to AWS resources using eks:ListPodIdentityAssociations:
+aws eks list-pod-identity-associations --cluster-name your-cluster
+{
+  "associations": [{
+    {
+            "clusterName": "your-cluster",
+            "namespace": "default",
+            "serviceAccount": "pod-service-account",
+            "associationArn": "arn:aws:eks:us-east-1:012345678901:podidentityassociation/your-cluster/a-0123",
+            "associationId": "a-0123"
+        },
+
+  }]
+}
+Then, you can use eks:DescribePodIdentityAssociation to retrieve the ARN of the role it maps to:
+aws eks describe-pod-identity-association \
+  --cluster-name your-cluster \
+  --association-id a-0123
+{
+    "association": {
+        "clusterName": "your-cluster",
+        "namespace": "default",
+        "serviceAccount": "pod-service-account",
+        "roleArn": "arn:aws:iam::012345678901:role/YourRole"
+    }
+}
+How EKS Pod Identity works under the hood
+Setting up Pod Identity starts by installing an add-on:
+aws eks create-addon \
+  --cluster-name cluster-name \
+  --addon-name eks-pod-identity-agent \
+  --addon-version v1.0.0-eksbuild.1
+This sets up a new DaemonSet in the kube-system namespace:
+$ kubectl get daemonset -n kube-system
+NAME                     DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+eks-pod-identity-agent   2         2         2       2            2           <none>          23h
+Here's a simplified version of that DemonSet's definition:
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: eks-pod-identity-agent
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      containers:
+      - image: 602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/eks-pod-identity-agent:0.1.10
+        name: eks-pod-identity-agent
+        command:
+        - /go-runner
+        - /eks-pod-identity-agent
+        - server
+        args:
+        - --port
+        - "80"
+        - --cluster-name
+        - cluster-name
+        - --probe-port
+        - "2703"
+        securityContext:
+          capabilities:
+            add:
+            - CAP_NET_BIND_SERVICE
+        ports:
+        - containerPort: 80
+          hostPort: 80
+          name: proxy
+          protocol: TCP
+        - containerPort: 2703
+          hostPort: 2703
+          name: probes-port
+          protocol: TCP
+      hostNetwork: true
+      initContainers:
+      - name: eks-pod-identity-agent-init
+        image: 602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/eks-pod-identity-agent:0.0.25
+        command:
+        - /go-runner
+        - /eks-pod-identity-agent
+        - initialize
+        securityContext:
+          privileged: true
+A few things stand out in this feature’s design:
+
+The Docker image 602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/eks-pod-identity-agent:0.0.25 belongs to an AWS-owned ECR repository.
+The /eks-pod-identity-agent file is a Go binary, executed through go-runner, a wrapper needed to execute Go binaries in distroless images.
+The agent runs with hostNetwork: true and has the CAP_NET_BIND_SERVICE capability.
+At the time this post was initially released in late 2023, the agent binary /eks-pod-identity-agent was not documented or published on GitHub, but we could easily retrieve it from the Docker image with a tool like crane. The following black box analysis was performed without the help of the source code (released mid-2024), but we confirmed it was correct after analyzing it in August 2024.
+# Authenticate to ECR
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 602401143452.dkr.ecr.us-east-1.amazonaws.com
+
+# Dump the Docker image locally
+crane export  602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/eks-pod-identity-agent:0.0.25 > pod-identity-agent.tar.gz
+tar -xf pod-identity-agent.tar.gz
+
+# Access the binary
+$ file eks-pod-identity-agent
+eks-pod-identity-agent: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, Go BuildID=gh.., with debug_info, not stripped
+By analyzing the binary with standard reverse-engineering tooling such as Ghidra or redress, we can see that this binary exposes a simple API that accepts the Kubernetes service account token in the Authorization header and calls a new AWS API action eks-auth:AssumeRoleForPodIdentity.
+
+
+The agent exposes this API on 169.254.170.23 (an arbitrary link-local address) on port 80:
+Therefore, the following commands are equivalent:
+$ TOKEN=$(cat /var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token)
+$ curl 169.254.170.23/v1/credentials -H "Authorization: $TOKEN"
+{
+  "AccessKeyId":"ASIA…",
+  "SecretAccessKey":"...",
+  "Token":"...",
+  "AccountId":"012345678901",
+  "Expiration":"2023-11-28T18:46:49Z"
+}
+
+# v.s. running this on the worker node, which has host networking access, and therefore access to the worker node's credentials whose role allows for `eks-auth:AssumeRoleForPodIdentity` 
+$ aws eks-auth assume-role-for-pod-identity --cluster-name your-cluster --token "$TOKEN"
+{
+  "assumedRoleUser": {
+    "arn": "arn:aws:sts::012345678901:assumed-role/YourPodRole/eks-cluster-pod-with-a-eca0",
+    "assumeRoleId": "AROAXX:eks-cluster-pod-with-a-eca0"
+  },
+  "credentials": {
+    "sessionToken": "...",
+    "secretAccessKey": "..",
+    "accessKeyId": "ASIA...",
+    "expiration": "2023-11-28T19:47:35+01:00"
+  }
+}
+How the AWS SDKs automatically pick up Pod Identity
+As mentioned earlier, any of the supported AWS SDKs will automatically detect that you have enabled Pod Identity and start using it. How does this process work?
+First, the existing in-cluster mutating admission controller amazon-eks-pod-identity-webhook was updated to automatically inject the AWS_CONTAINER_CREDENTIALS_FULL_URI and AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE environment variables into pods. These are supported by AWS SDKs independently of Pod Identity and have been used in ECS for a long time. This mechanism is called "Container credential provider."
+If we look at the effective definition of a pod in our cluster, we see that the admission controller did inject these variables (in addition to other ones):
+$ kubectl get pod/pod-with-aws-access -o yaml | grep -A 10 env:
+env:
+    - name: AWS_STS_REGIONAL_ENDPOINTS
+      value: regional
+    - name: AWS_DEFAULT_REGION
+      value: us-east-1
+    - name: AWS_REGION
+      value: us-east-1
+    - name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+      value: http://169.254.170.23/v1/credentials
+    - name: AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
+      value: /var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token
+Consequently, the AWS SDKs are able to understand how to retrieve credentials. Running the same sample code as before in debug mode demonstrates this behavior:
+kubectl exec pod/pod-with-aws-access -- \
+python -c "import boto3, logging; boto3.set_stream_logger('botocore.credentials', logging.DEBUG); print(boto3.client('sts').get_caller_identity()['Arn'])"
+2023-11-28 12:58:56,232 botocore.credentials [DEBUG] Looking for credentials via: env
+2023-11-28 12:58:56,232 botocore.credentials [DEBUG] Looking for credentials via: assume-role
+2023-11-28 12:58:56,233 botocore.credentials [DEBUG] Looking for credentials via: assume-role-with-web-identity
+2023-11-28 12:58:56,233 botocore.credentials [DEBUG] Looking for credentials via: sso
+2023-11-28 12:58:56,233 botocore.credentials [DEBUG] Looking for credentials via: shared-credentials-file
+2023-11-28 12:58:56,233 botocore.credentials [DEBUG] Looking for credentials via: custom-process
+2023-11-28 12:58:56,233 botocore.credentials [DEBUG] Looking for credentials via: config-file
+2023-11-28 12:58:56,233 botocore.credentials [DEBUG] Looking for credentials via: ec2-credentials-file
+2023-11-28 12:58:56,233 botocore.credentials [DEBUG] Looking for credentials via: boto-config
+2023-11-28 12:58:56,233 botocore.credentials [DEBUG] Looking for credentials via: container-role
+2023-11-28 12:58:56,234 urllib3.connectionpool [DEBUG] Starting new HTTP connection (1): 169.254.170.23:80
+2023-11-28 12:58:56,399 urllib3.connectionpool [DEBUG] http://169.254.170.23:80 "GET /v1/credentials HTTP/1.1" 200 1381
+Main differences between IRSA and EKS Pod Identity
+At this point, you're probably wondering if there are any advantages of using Pod Identity over IRSA.
+One advantage of Pod Identity is that it's much easier to understand which pod has access to a specific role in AWS—it's as simple as calling ListPodIdentityAssociations. In contrast, IRSA requires you to:
+
+Find all IAM roles that have a trust relationship on the cluster's OIDC provider
+Analyze the Condition in the role trust policy on the JWT's sub field
+Figure out which of your pods match this condition and are thus able to assume the role
+Another advantage is the ability to configure everything through the AWS API, without the need for any in-cluster interactions—with IRSA, you need to explicitly label service accounts with eks.amazonaws.com/role-arn.
+Using the MKAT to understand Pod Identity relationships in your cluster
+A few months ago, during KubeCon EU 2023, we released the Managed Kubernetes Auditing Toolkit (MKAT). We're happy to announce that it now supports EKS Pod Identity, so you can discover complex relationships between your pods and your AWS IAM Roles using either IRSA or Pod Identity.
+MKAT is a single binary that you can easily install from the releases page or through Homebrew:
+brew tap datadog/mkat https://github.com/datadog/managed-kubernetes-auditing-toolkit
+brew install datadog/mkat/managed-kubernetes-auditing-toolkit
+
+mkat version
+Conclusion
+EKS Pod Identity provides a new way to grant access to AWS resources to a pod running in a cluster. While IRSA isn't going away anytime soon, it appears that Pod Identity provides an easier and more auditable way to achieve the same outcome.
+Pod Identity resources are available in CloudFormation and in the Terraform AWS provider through the eks_pod_identity_association resource, starting from v5.29.0
+
+(released December 1, 2023).
+Updates made to this entry
+YourPodRole
+pod-service-account
+eks:ListPodIdentityAssociations
+eks:DescribePodIdentityAssociation
+kube-system
+602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/eks-pod-identity-agent:0.0.25
+/eks-pod-identity-agent
+go-runner
+hostNetwork: true
+CAP_NET_BIND_SERVICE
+/eks-pod-identity-agent
+Authorization
+eks-auth:AssumeRoleForPodIdentity
+169.254.170.23
+AWS_CONTAINER_CREDENTIALS_FULL_URI
+AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE
+ListPodIdentityAssociations
+Condition
+sub
+eks.amazonaws.com/role-arn

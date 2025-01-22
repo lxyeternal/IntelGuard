@@ -1,0 +1,295 @@
+
+
+Categories
+
+
+
+Business & Technology 
+
+
+
+
+FortiGuard Labs Threat Research
+
+
+
+
+Industry Trends
+
+
+
+
+Life at Fortinet
+
+
+
+
+Partners
+
+
+
+
+Customer Stories
+
+
+
+
+PSIRT Blogs
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+CISO Collective
+Subscribe
+FortiGuard Labs Threat Research
+RapperBot DDoS Botnet Expands into Cryptojacking
+Affected Platforms: Linux
+
+Impacted Users: Any organization
+
+Impact: Remote attackers gain control of the vulnerable systems
+
+Severity Level: Critical
+FortiGuard Labs has encountered new samples of the RapperBot campaign active since January 2023. RapperBot is a malware family primarily targeting IoT devices. It has been observed in the wild since June 2022. FortiGuard Labs reported on its previous campaigns in August 2022 and December 2022. Those campaigns focused on brute-forcing devices with weak or default SSH or Telnet credentials to expand the botnet’s footprint for launching Distributed Denial of Service (DDoS) attacks.
+In this campaign, these threat actors have started venturing into cryptojacking, specifically for Intel x64 machines. Initially, they deployed and executed a separate Monero cryptominer alongside the usual RapperBot binary. But in late January 2023, they combined both functionalities into a single bot.
+This article will discuss the changes observed in this new campaign and provide a technical analysis of the RapperBot variant upgraded with miner capabilities.
+Same But Different
+We began observing the first samples of this RapperBot miner campaign in January 2023. They share some characteristics that allowed us to link this campaign to the earlier ones.
+The most unique and enduring trait of RapperBot samples is the YouTube URL https://www.youtube.com/watch?v=4fm_ZZn5qaw, which has been seen in most samples from this family. However, the string is never actually used in this campaign, unlike older samples where it prints the URL to the console at the start of execution.
+Another indicator of a RapperBot campaign is adding an SSH public key to ~/.ssh/authorized_keys to maintain backdoor access to infected machines, even after the devices have been rebooted. This latest campaign uses the same key observed in the first campaign in June 2022 and is listed in the IOC section below.
+Beyond these similarities, however, we also observed some key differences, including several significant updates to the malware functionality, particularly in its C2 communication protocol.
+One cluster of ARM samples, such as 7c9e6d63bc1f26e9c8a8703439e12de12da9892f2d6cd9bda5f45ec00c98a29f (Cluster A) that were delivered via hxxp://109[.]206[.]243[.]207/ssh/arm7, were very minimal in functionality. They only included three DoS attack types and no SSH brute forcing or self-propagation abilities. However, these samples included new code to collect and send information about the infected system upon registering with the C2 server.
+Another cluster of ARM samples delivered from the same URL, such as 912e151641f20f9d689c6ea26cf6f11d5ee0b6fdc4d4a1179fac413391748c65 (Cluster B), resembles the above samples but with the inclusion of the SSH brute-forcer last seen in the June 2022 campaign. Unlike that campaign, credentials are embedded in each sample and not downloaded from the C2 server. These samples propagate themselves by downloading and executing hxxp://109[.]206[.]243[.]207/d upon the successful brute force breach of a system.
+As in past campaigns, all samples from this campaign still encode sensitive strings with XOR encoding. But this time, the developers have opted to add an extra layer of XOR encoding, with the first layer using multi-byte XOR keys with different values and lengths for each encoded string. The second layer uses the same style of single-byte XOR encoding as in previous campaigns, with the key calculated by XORing all bytes of the first layer key (Figure 1). This additional layer of XOR encoding prevents XOR brute forcing and the easy detection of malware-related strings.
+The original draft was worded ambiguously, we meant to say that this campaign embedded the credentials in each sample. In the previous campaign, the credentials were downloaded from the C2 server.
+
+The structure of client requests to the Command-and-Control (C2) server has also been significantly updated. The unique 32-byte Bot ID sent with every request in previous campaigns has been removed. Instead, the request size is now variable, with random bytes generated to fill the unused parts of the request. Lastly, the request data is no longer located at fixed offsets within each request. We describe the communication protocol and request structure in more detail below.
+Revamped C2 Communication Protocol
+Upon execution, RapperBot connects to a hardcoded C2 server and sends a registration request (type 1) containing information about the victim system (Figure 2):
+1.     Hardcoded value: 0x3 0xd3 0x4a 0xb6
+2.     Source: This is the first command line argument passed to the malware and usually indicates the infection vector (e.g., scan.ssh.x86_64)
+3.     Local IP address
+4.     UID (User identifier)
+5.     Current working directory
+6.     Number of processors
+7.     Total memory size
+8.     Open File Limit
+9.     Hostname
+10.  Processor model
+After that, it sends a keep-alive request (type 3) to inform the C2 server that it is ready to receive commands. The malware then performs this request at random intervals of 60 to 600 seconds.
+To evade detection, the binary network protocol used to send these requests has been completely revised. Like its string encoding, it uses a two-layer approach to encode the information sent to the C2 server. The header data must first be decoded to reveal the location of the encoded information and the key needed to decode it.
+The size of each request is randomized, so shorter requests do not stand out in network traffic. The malware starts by generating a random number between 4 and 128, which we will refer to as RAND_VALUE, and a random XOR key for the content from 4 to 32 bytes long (referred to as KEY_SIZE).
+The request size is then calculated as follows:
+REQUEST_SIZE = RAND_VALUE + KEY_SIZE + CONTENT_SIZE + 6
+The malware then generates a buffer of the same size and fills it with random bytes. The first byte of this buffer will be used as a XOR key (HEADER_KEY) for encoding the header data. The second byte will be overwritten with the RAND_VALUE XORed with the HEADER_KEY.
+The request data is stored at HEADER_OFFSET, RAND_VALUE / 2.
+The format of the structure starting at HEADER_OFFSET is as follows:
+
+Offset 0x2: ENC_REQ_TYPE (Request type xor HEADER_KEY)
+Offset 0x3: ENC_KEY_SIZE (KEY_SIZE xor HEADER_KEY)
+Offset 0x4: Start of KEY
+Offset KEY_SIZE + 0x4: ENC_CODE_SIZE ((little endian word containing CONTENT_SIZE rol 8 xor HEADER_KEY)
+Offset KEY_SIZE + 0x6: Start of encoded content (ENC_CONTENT)
+
+All non-highlighted bytes in Figure 3 are unused padding bytes generated randomly by the malware. The Python code used to decode the content in each request with the HEADER_KEY and KEY is shown below:
+While we did not receive commands from the C2 server, our analysis shows that the bot supports the following commands with their corresponding IDs.
+
+4: Perform DDoS attacks (UDP, TCP, and HTTP GET)
+5: Stop DDoS attacks
+6: Terminate itself (and any child processes)
+Expanding into Cryptojacking
+The change in the C2 communication protocol is not the only major update in this campaign. Until now, RapperBot has been primarily geared toward using its victims for DDoS operations. For this campaign, however, it has started to venture into abusing the resources of infected Intel x64 machines to mine for cryptocurrency, commonly known as Cryptojacking.
+We observed that hxxp://109[.]206[.]243[.]207/ssh/x86_64 started serving Bash shell scripts instead of the usual RapperBot binary for the x64 architecture as early as January 12. These Bash scripts (example hash: 7f6e0fa785820075a61819ca6b272a239733b770eb8a92a4056cf5d26d89795f) downloaded and executed separate XMRig crypto miners (example hash: 0ad68d5804804c25a6f6f3d87cc3a3886583f69b7115ba01ab7c6dd96a186404) and RapperBot binaries, as seen in Figure 4.
+XMRig is an open-source Monero miner commonly abused by threat actors for cryptojacking. Monero (XMR) is a popular cryptocurrency for illicit mining by threat actors because of its privacy-enhancing features. It is also designed to be more resistant to application-specific integrated circuit (ASIC) miners, which makes it possible to mine profitably with just consumer-grade hardware.
+In late Jan 2023, FortiGuard Labs collected a significantly larger x64 sample f06d698967cee77e5a7bf9835b0a93394097e7590c156ed0d8c6304345701cfa, which used the same C2 server IP and communication protocol. On further analysis, we verified that the bot developers had merged the RapperBot C source code with the C++ code of XMRig Monero miner to create a combined bot client with mining capabilities.
+Mining Under the Radar
+Apart from executing the miner as a child process upon execution, these samples are functionally identical to those targeting ARM devices and do not have SSH brute-forcing or self-replication capabilities. Merging the bot and miner code might be an attempt to hide the mining pools and Monero wallet addresses (listed in the IOCs section) using the same double-layer XOR encoding so they are not exposed in the clear, as in the Bash script (Figure 4).
+The miner code also contains several modifications to facilitate cryptojacking.
+The ability to read external configuration files has been removed, so it always uses the configuration built into the binary itself. The bot decodes the mining pools and Monero wallet addresses and updates the hardcoded configuration before starting the embedded miner.
+The miner is also configured to use multiple mining pools for both redundancy and additional privacy. Two of them are mining proxies hosted on the RapperBot C2 IP itself. This allows the threat actor to omit both the wallet addresses and actual mining pools from the miner configuration. Additionally, they can change this information on the proxy server without rebuilding and deploying new bots. Aside from this, it is also configured to directly use a public mining pool, likely as a backup if the C2 IP goes offline.
+To prevent the termination of the miner process by the machine owner, the default signal handlers for SIGTERM, SIGUSR1, SIGINT, and SIGHUP signals have been removed.
+The usage information printed when executing the --help command line argument has also been removed, likely to evade detection by security products and competing miners from other cryptojacking groups. Likewise, the developers also replaced “XMRig" with “asbuasdbu" in the version information to prevent easy identification.
+To maximize mining efficiency, it kills off other miners by enumerating other running processes and attempts to scan the associated binaries on disk for the following blacklisted keywords. These processes are then terminated, and the corresponding files are deleted. For example, “--algo” in the list below is part of the usage information printed by standard XMRig miners.
+
+xmrig
+.rsync
+miner
+dota.
+moner
+UPX!
+--algo
+network01
+faster than light
+dota2
+.rsync
+cat /proc/cpuinfo
+/etc/cron.hourly/gcc.sh
+/etc/daemon.cfg
+denyip=
+If the binaries are not readable, it will look for blacklisted keywords within the file paths, terminate the processes, and delete the associated files.
+
+/shm/
+/dev/netslink/
+/tmp/
+xmrig
+.X19-unix
+netwalker
+(deleted)
+.rsync
+/a/
+/b/
+/c/
+miner
+dota
+network01
+xrx
+/.x
+Lastly, it will terminate processes containing the blacklisted keywords in the process path or its command line arguments. Processes with path or command-line arguments containing “/zvx/” are whitelisted and never terminated.
+
+wget
+curl
+netstat
+kill
+3333
+zmap
+tsm
+passwd
+netwalk
+zzh
+xrx
+pnscan
+xri
+Based on the keywords used, the bot developers are more interested in terminating other miners than other IoT bots. This reaffirms their focus on cryptojacking vs DDoS attacks, at least on x64 machines.
+As a side note, we have not discovered an infection vector that directly delivers x64 RapperBot, as none of the RapperBot samples with an integrated miner appear to have self-propagation capabilities. This suggests the possible availability of an external loader operated by the threat actor that abuses the credentials collected by other RapperBot samples with brute forcing capabilities and infects only x64 machines with the combined bot/miner.
+Alternatively, the addition of the threat actor’s public SSH key in infected machines might provide another point of entry for these x64 samples.
+Conclusion
+Financially motivated botnet operators are always on the lookout to extract the maximum value from machines infected by their botnets. The threat actors behind the RapperBot botnet are no exception, as evident in their addition of cryptojacking capabilities to target x64 machines.
+RapperBot continues to be a dangerous threat due to its continual updates to evade detection, as highlighted above. As its primary infection vector of compromising SSH services using weak or default passwords remains the same, mitigating it by enabling public key authentication or setting strong passwords for all devices connected to the internet is still effective in mitigating this threat.
+FortiGuard Labs will continue to monitor and report on RapperBot’s development.
+Fortinet Protections
+Fortinet customers are already protected from this malware through FortiGuard’s Web Filtering, AntiVirus, FortiMail, FortiClient, and FortiEDR services, as follows:
+The following (AV) signature detects the malware samples mentioned in this blog:
+
+ELF/Mirai.VI!tr
+ELF/RapperBot.FGLT!tr
+Linux/RapperBot.FGLT!tr.dldr
+Linux/RapperBot.FGLTA!tr.dldr
+Adware/Miner
+Riskware/CoinMiner
+The FortiGuard AntiVirus service is supported by FortiGate, FortiMail, FortiClient, and FortiEDR. Fortinet EPP customers running current AntiVirus updates are also protected.
+The FortiGuard Web Filtering Service blocks the C2 servers and download URLs.
+The FortiGuard IP Reputation and Anti-Botnet Security Service proactively blocks these attacks by aggregating malicious source IP data from the Fortinet distributed network of threat sensors, CERTs, MITRE, cooperative competitors, and other global sources that collaborate to provide up-to-date threat intelligence about hostile sources.
+If you believe this or any other cybersecurity threat has impacted your organization, please contact our Global FortiGuard Incident Response Team.
+IOCs
+Files
+
+RapperBot
+7c9e6d63bc1f26e9c8a8703439e12de12da9892f2d6cd9bda5f45ec00c98a29f
+912e151641f20f9d689c6ea26cf6f11d5ee0b6fdc4d4a1179fac413391748c65
+f06d698967cee77e5a7bf9835b0a93394097e7590c156ed0d8c6304345701cfa
+6c034ff9b5447da62822e3231e5e2d5db225756b3e216f6fc469469cb1d81813
+dfaffe78b8ccb03626c2f55596f977da917e8e9a00ee7576ce9eca688d88447d
+95aa6882f5ea5a892ef832ef15dea77261394a7fec6db9d91267d40f1cf2bfa5
+
+XMRig miner
+0ad68d5804804c25a6f6f3d87cc3a3886583f69b7115ba01ab7c6dd96a186404
+
+Bash scripts
+bd87ac780e574ae8415907f88a3b48af578bb269308b56826e2f33438559e4b7
+3296598c79748322dfff8eb786705d048725c04b23dd3a293f52a1acafe9e7ae
+7f6e0fa785820075a61819ca6b272a239733b770eb8a92a4056cf5d26d89795f
+
+Download URLs
+hxxp://109[.]206[.]243[.]207/d
+hxxp://109[.]206[.]243[.]207/ssh/arm4
+hxxp://109[.]206[.]243[.]207/ssh/arm5
+hxxp://109[.]206[.]243[.]207/ssh/arm6
+hxxp://109[.]206[.]243[.]207/ssh/arm7
+hxxp://109[.]206[.]243[.]207/ssh/bot
+hxxp://109[.]206[.]243[.]207/ssh/scan_arm4
+hxxp://109[.]206[.]243[.]207/ssh/scan_arm5
+hxxp://109[.]206[.]243[.]207/ssh/scan_arm6
+hxxp://109[.]206[.]243[.]207/ssh/scan_arm7
+hxxp://109[.]206[.]243[.]207/ssh/x86_64
+hxxp://109[.]206[.]243[.]207/ssh/xmrig
+hxxp://171[.]22[.]136[.]15/arm4
+hxxp://171[.]22[.]136[.]15/arm5
+hxxp://171[.]22[.]136[.]15/arm6
+hxxp://171[.]22[.]136[.]15/arm7
+
+C2s
+109[.]206[.]243[.]207
+171[.]22[.]136[.]15
+
+Mining Pools
+109[.]206[.]243[.]207:31271
+109[.]206[.]243[.]207:25621
+pool[.]hashvault[.]pro:80
+
+Monero Wallets
+43Zs6jyniktVUNfiN8NY16TrvFKWbx3qogoRvstuquZdVA8EXvhqhz1W4hUzpjQXHAf3pDQ8UXxegFh8G26uCycKPz41ceW
+
+47RupsxSjeHb4sHMwJ681vbjpFHAwXg6kMn1znbioqy96Qj9j2VuHrD2mXsEReELEdjRsDVKBK3Ru3diW3AgZ41Z7mzDwb4
+
+SSH Key
+AAAAB3NzaC1yc2EAAAADAQABAAACAQC/yU0iqklqw6etPlUon4mZzxslFWq8G8sRyluQMD3i8tpQWT2cX/mwGgSRCz7HMLyxt87olYIPemTIRBiyqk8SLD3ijQpfZwQ9vsHc47hdTBfj89FeHJGGm1KpWg8lrXeMW+5jIXTFmEFhbJ18wc25Dcds4QCM0DvZGr/Pg4+kqJ0gLyqYmB2fdNzBcU05QhhWW6tSuYcXcyAz8Cp73JmN6TcPuVqHeFYDg05KweYqTqThFFHbdxdqqrWy6fNt8q/cgI30NBa5W2LyZ4b1v6324IEJuxImARIxTc96Igaf30LUza8kbZyc3bewY6IsFUN1PjQJcJi0ubVLyWyyJ554Tv8BBfPdY4jqCr4PzaJ2Rc1JFJYUSVVT4yX2p7L6iRpW212eZmqLMSoR5a2a/tO2s1giIlb+0EHtFWc2QH7yz/ZBjnun7opIoslLVvYJ9cxMoLeLr5Ig+zny+IEA3x090xtcL62X0jea6btVnYo7UN2BARziisZze6oVuOTCBijuyvOM6ROZ6s/wl4CQAOSLDeFIP5L1paP9V1XLaYLDBAodNaUPFfTxggH3tZrnnU8Dge5/1JNa08F3WNUPM1S1x8L2HMatwc82x35jXyBSp3AMbdxMPhvyYI8v2J1PqJH8OqGTVjdWe40mD2osRgLo1EOfP/SFBTD5VEo95K2ZLQ== system key generated by server 20220709
+RapperBot, 
+    
+      cryptojacking
+Related Posts
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+
+
+
+
+
+
+
+
+News Releases
+News Articles
+
+Threat Research
+FortiGuard Labs
+Threat Map
+Ransomware Prevention
+
+Fortinet Community
+Partner Portal
+Investor Relations
+Product Certifications
+
+About Us
+Exec Mgmt
+Careers
+Training
+Events
+Industry Awards
+Social Responsibility
+CyberGlossary
+Sitemap
+Blog Sitemap
+
+(866) 868-3678
+Copyright © 2025 Fortinet, Inc. All Rights Reserved
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs

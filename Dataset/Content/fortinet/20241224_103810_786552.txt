@@ -1,0 +1,213 @@
+
+
+Categories
+
+
+
+Business & Technology 
+
+
+
+
+FortiGuard Labs Threat Research
+
+
+
+
+Industry Trends
+
+
+
+
+Life at Fortinet
+
+
+
+
+Partners
+
+
+
+
+Customer Stories
+
+
+
+
+PSIRT Blogs
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+CISO Collective
+Subscribe
+FortiGuard Labs Threat Research
+Tips and Tricks: Debugging .NET Malware in a Multi-Stage Malware Deployment
+This post will discuss the solution to the specific technical challenges we faced when analyzing the malware described in the blog “Fake Hungarian Government Email Drops Warzone RAT.” The final payload in that campaign, Warzone RAT, was deployed through a chain of increasingly obfuscated .NET binaries. Each stage loaded the next from somewhere in the binary, decoded it, loaded it into memory, and invoked a function to pass the control-flow to the next stage. Such a multi-stage loader can make dynamic analysis difficult because every time the malware sample is restarted, navigating through the different stages can be challenging. To circumvent this problem, we created standalone executables from the various stages to enable more efficient debugging. This is what we are going to discuss in this post.
+Problem statement
+Figure 1 shows the deployment chain of the Warzone RAT in this particular attack. The phishing email contained a zip file. That zip file contained the binary 1) shown in Figure 1.
+Once 1) is executed, it loads 2), KeysNormalize.dll a .NET Dynamic-Link Library (DLL) that was unpacked to memory. It is run by invoking one of its functions (sk41Ua2AFu5PANMKit.abiJPmfBfTL6iLfmaW.Y5tFvU8EY()). This post discusses how 3) can be recovered using debugging. One approach is to dump KeysNormalize.dll from memory using dnspy as a debugger. It had been obfuscated with the obfuscation tool called SmartAssembly.
+To find out what the third stage is (Metal.dll) and then dump it into a file, we need to be able to debug KeysNormalize.dll. But before we can do that, we face the following challenges:
+
+How do we run the KeysNormalize.dll independently of the executable that originally unpacks and runs it in memory?
+How do we create an environment for KeysNormalize.dll where it can drop the next stage, as in the original malware?
+Solving Problem 1: Running KeysNormalize.dll Independently
+Since this is not a .exe file, we cannot just double-click it to run. Also, the original .exe file calls a specific function from KeysNormalize.dll, so we also have to ensure that when we run this DLL, we invoke the same function.
+There are multiple ways to do this. What worked for me, in this case, was to create a wrapper program in C# where I imported the KeysNormalize.dll as a normal DLL and simply called the sk41Ua2AFu5PANMKit.abiJPmfBfTL6iLfmaW.Y5tFvU8EY() function. This is very easy if you are a .NET/C# developer, which I am not, but it could be challenging if you don’t do this regularly.
+Setting up Visual Studio
+To begin, let’s start Visual Studio and create a new C# Console App(.NET Framework) project and choose the .NET 4.7.2 version. We can call this project dll_wrapper By default, it loads an empty class. But we can change that to the code shown in Figure 2.
+This code will wait indefinitely for a key press and then not do anything. The reason to add this to the code is that we can’t add a breakpoint in advance in the debugger. This way, we can break execution while the program waits for a keypress and then add breakpoints wherever needed.
+Import KeysNormalize.dll
+The next step is to include the KeysNormalize.dll in the project. First, we copy the DLL into the project folder (Figure 3).
+We also need to add a reference to the KeysNormalize.dll.  This can be done under Project -> Add Project Reference -> Browse -> Choose the KeysNormalize.dll. KeysNormalize should now appear in the Solution Explorer under References, as shown in Figure 4.
+We should now be able to start using the KeysNormalize.dll in the project. We need to invoke the following function (we know this from the analysis of the original binary, not discussed here):
+sk41Ua2AFu5PANMKit.abiJPmfBfTL6iLfmaW.Y5tFvU8EY("4F515364", "746771", "BattleshipLiteLibrary");
+To do this, we first need to import sk41Ua2AFu5PANMKit, which is the namespace in KeysNormalize in Program.cs. Next, we add the function call above to the code after the keypress loop, as shown in Figure 5.
+Warning: if you run this program, you are executing the malicious payload, so only run it on an isolated, safe system.
+We can now build an x86 release binary. If we run the program, whether in Visual Studio or separately, it will then crash and throw an exception, as shown in Figure 6.
+From the error message, we see that BattleshipLiteLibrary.Properties.Resources.resources was not found. This resource exists in the first stage binary, "Uj bejelentkezEsi adatai·pdf.exe" or "iANO" (Figure 7).
+This is interesting because it means that although KeysNormalize is a separate DLL, it cannot function alone.
+Solving Problem 2: Creating the BattleshipLiteLibrary.Properties.Resources.resources
+To overcome the resource problem, we need to satisfy the needs of KeysNormalize.dll and create a resource called BattleshipLiteLibrary.Properties.Resources.resources. This is not as simple as it seems. The resource name is built as follows:
+<namespace>.<folders>.<filename>
+We need to craft a resource that will be called BattleshipLiteLibrary.Properties.Resources.resources. So the namespace must be BattleshipLiteLibrary. It also needs to be in the Properties folder, and it must be called Resources.resources.
+To get the resource content, we go to dnspy, right-click the resource, and choose Raw Save BattleshipLiteLibrary.Properties.Resources.resouces (Figure 8). We need to save it under the Properties folder in the dll_wrapper ​​​​​​​ project with the name Resources.resources.
+To add this file to the project, right-click the Properties in the Solution Explorer and choose Add/Existing Item (Figure 9). Select the Resources.resources file and click OK.
+The last step is to change the project’s namespace to BattleshipLiteLibrary so the resource name will be correct when KeysNormalize looks for it. This can be done in two steps:
+1.     Double-click the Properties in the Solution Explorer and change the Default namespace to BattleshipLiteLibrary, as shown in Figure 10.
+2.     Right-click the namespace in Program.cs, choose Rename, and change it to BattleshipLiteLibrary, as shown in Figure 11.
+These two steps should change the namespace everywhere in the project.
+With this resource ready to go, we can build a new x86 Release binary.
+Dumping the next stage
+The reason we went through all this trouble to get KeysNormalize.dll running is to efficiently debug it and dump the next stage.
+This can be done in dnspy. So, let’s load the dll_wrapper.exe in dnspy and put a breakpoint to the call to the abiJPmfBfTL6iLfmaW.Y5tFvU8EY() function, as shown in Figure 12.
+After starting the debugger and pressing a key when requested, we hit the breakpoint. From there, we can click ‘Step into’, which will also make dnspy decompile KeysNormalize.dll, allowing us to debug that binary as well.
+After reviewing the code in Figure 13, we can see the following:
+- Line 76 calls the function that loads the resource as a bitmap.
+- This bitmap is loaded into array, and some transformation is performed.
+- Line 83 calls the function that loads array as an Assembly object. This means array probably contains the next stage.
+- Line 84 calls the function that will invoke a function in the loaded Assembly object and, through that, passes the execution to the next stage in Line 93.
+Now we know that we can dump array at line 83 and find out which function is invoked at line 93.
+Figure 14 shows the array variable in memory. It contains a PE file. This is going to be Metal.dll, the next stage of the attack.
+Figure 15 shows the ethodInfo variable containing the function's name invoked in the loaded Assembly object. The function name is "OwbdG5aNVQQYu6X20i.o9pVsMvoTr75y5TrkE.V4j9c6YCwC()"
+At this point, to continue the analysis, we need to look at this function in the dumped Metal.dll. But that is another story.
+Conclusion
+This blog post looked at how we can create a custom .NET program to help debug a DLL loaded and invoked directly in memory. We also looked at how to add a resource to the program to satisfy the requirements of the debugged binary. And finally, we debugged the target DLL to dump the next stage binary and find out which function is its entry point.
+Fortinet Protections
+The Fortinet Antivirus engine already covers all discussed binaries using the following signatures:
+MSIL/Kryptik.AGIJ!tr – Uj bejelentkezEsi adatai·pdf.exe
+
+W32/PossibleThreat – KeyNormalize.dll
+
+MSIL/Agent.UDJ!tr – Metall.dll
+
+W32/Agent.TJS!tr – Warzone payload
+
+W32/AntiAV.NIZ!tr – Privilege Escalation payload WM_DSP
+The FortiGuard Web Filtering service has rated the C2 server as ‘Malicious’ and blocks it accordingly.
+FortiMail and FortiSandbox can detect and quarantine the malicious attachments in this campaign, and Fortinet’s CDR (Content Disarm and Reconstruction) service can disable them.
+FortiEDR detects the malicious executable attachment and its WarZone RAT payload as malicious based on their behavior.
+In addition to these protections, Fortinet can help train users to detect and understand phishing threats:
+The FortiPhish Phishing Simulation Service uses real-world simulations to help organizations test user awareness and vigilance to phishing threats and to train and reinforce proper practices when users encounter targeted phishing attacks.
+Our FREE NSE training program—NSE 1 – Information Security Awareness—includes a module on Internet threats designed to help end users learn how to identify and protect themselves from phishing attacks.
+IOCs
+
+
+Uj bejelentkezEsi adatai·pdf.exe	21d09c77de01cc95209727752e866221ad3b66d5233ab52cfe5249a3867ef8d8
+KeyNormalize.dll	8b533ffaed24e0351e489b14aaac6960b731db189ce7ed0c0c02d4a546af8e63
+Metall.dll	66319bf905acac541df26fecc90843a9a60fdbc1a8a03e33f024088f586cb941
+<Warzone sample>	27743b5b7966384cc8ef9cfef5c7a11c8b176123b84c50192926c08ab7e6d7d7
+
+
+
+171[.]22[.]30[.]72:5151	C2 Server
+ATT&CK Framework TTPs
+A detailed Warzone RAT TTP collection can be found at https://attack.mitre.org/software/S0670/.
+Learn more about Fortinet’s FortiGuard Labs threat research and intelligence organization and the FortiGuard Security Subscriptions and Services portfolio.
+Learn more about Fortinet’s free cybersecurity training, an initiative of Fortinet’s Training Advancement Agenda (TAA), or the Fortinet Network Security Expert program, Security Academy program, and Veterans program. Learn more about Labs’ global threat intelligence and research and the FortiGuard Security Subscriptions and Services portfolio.
+advanced malware, 
+    
+      fortimail, 
+    
+      fortisandbox, 
+    
+      antivirus, 
+    
+      security attack, 
+    
+      .net, 
+    
+      FortiGuards Labs, 
+    
+      FortiEDR
+Related Posts
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+
+
+
+
+
+
+
+
+News Releases
+News Articles
+
+Threat Research
+FortiGuard Labs
+Threat Map
+Ransomware Prevention
+
+Fortinet Community
+Partner Portal
+Investor Relations
+Product Certifications
+
+About Us
+Exec Mgmt
+Careers
+Training
+Events
+Industry Awards
+Social Responsibility
+CyberGlossary
+Sitemap
+Blog Sitemap
+
+(866) 868-3678
+Copyright © 2025 Fortinet, Inc. All Rights Reserved
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+Filename
+sha256 hash
+Uj bejelentkezEsi adatai·pdf.exe
+21d09c77de01cc95209727752e866221ad3b66d5233ab52cfe5249a3867ef8d8
+KeyNormalize.dll
+8b533ffaed24e0351e489b14aaac6960b731db189ce7ed0c0c02d4a546af8e63
+Metall.dll
+66319bf905acac541df26fecc90843a9a60fdbc1a8a03e33f024088f586cb941
+<Warzone sample>
+27743b5b7966384cc8ef9cfef5c7a11c8b176123b84c50192926c08ab7e6d7d7
+Network address
+Type
+171[.]22[.]30[.]72:5151
+C2 Server

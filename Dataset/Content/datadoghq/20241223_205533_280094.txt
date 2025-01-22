@@ -1,0 +1,106 @@
+
+A core challenge for threat detection engineering is reproducing common attacker behavior. Several open source and commercial projects exist for traditional endpoint and on-premise security, but there is a clear need for a cloud-native tool built with cloud providers and infrastructure in mind.
+To meet this growing demand, we're happy to announce Stratus Red Team, an open source project created to emulate common attack techniques directly in your cloud environment. Stratus Red Team allows you to easily execute offensive techniques against live environments and validate your threat detection logic end-to-end.
+Stratus Red Team is available for free on GitHub, and you can find its documentation at stratus-red-team.cloud. It's a lightweight, easy-to-install Go binary that comes packaged with a number of AWS-specific attack techniques, such as:
+
+Credential access: Steal EC2 instance credentials
+Discovery: Execute discovery commands on an EC2 instance
+Defense evasion: Stop a CloudTrail trail
+Exfiltration: Exfiltrate data from an S3 bucket by backdooring its bucket policy
+Stratus Red Team is opinionated about the attack techniques it packages. This ensures that each simulated attack is granular, self-sufficient, and provides fully actionable value. You can find the full list of packaged attack techniques here. Each attack technique is mapped to the MITRE ATT&CK framework and has a documentation page, such as the example below, which is automatically generated from its definition in Go code.
+
+
+The project also manages the full lifecycle of each attack technique, including creating and removing any infrastructure or configuration you need to execute them. This is what we call warming up an attack technique; once an attack technique is warm, it can be detonated (i.e., executed to emulate the intended attacker behavior). Once detonated, it can be cleaned up so that any infrastructure created as part of the warm-up phase is removed.
+We've created a detailed page about how Stratus Red Team compares to other popular cloud security projects, such as Atomic Red Team, Leonidas, Pacu, Amazon GuardDuty, and CloudGoat.
+Getting started with Stratus Red Team
+You can see the Getting Started guide for an introduction to Stratus Red Team and its building concepts.
+
+As a walkthrough of a sample usage, we'll first authenticate to our AWS account using aws-vault. Stratus Red Team expects you to be authenticated against AWS prior to using it, so you can use any authentication method supported by the Go SDK V2 for AWS (e.g., $HOME/.aws/config, AWS SSO, hardcoded keys in your environment, etc.)
+aws-vault exec sandbox --no-session
+Let's have a look at the available AWS techniques for persistence:
+
+
+We can view additional details about any attack technique by running stratus show <TECHNIQUE ID> or by viewing the documentation. For example, $ stratus show aws.persistence.lambda-backdoor-function establishes persistence by backdooring a lambda function to allow its invocation from an external AWS account. The warm up phase creates a Lambda function and the detonation phase modifies the Lambda function resource-base policy to allow lambda:InvokeFunction from an external, fictitious AWS account.
+Detonating this attack technique with Stratus Red Team is as simple as running:
+stratus detonate aws.persistence.lambda-backdoor-function
+The detonate command will:
+
+Warm up the attack technique by creating any prerequisites for it being able to run. For this specific technique, it will create a Lambda function.
+Detonate the attack technique by calling lambda:AddPermission to backdoor the Lambda execution policy and allow it to be executed by an external AWS account.
+You should see the following output from these two steps:
+Checking your authentication against the AWS API
+Warming up aws.persistence.backdoor-lambda-function
+Initializing Terraform to spin up technique prerequisites
+Applying Terraform to spin up technique prerequisites
+Lambda function arn:aws:lambda:us-east-1:751353041310:function:stratus-sample-lambda-function is ready
+
+Backdooring the resource-based policy of the Lambda function stratus-sample-lambda-function
+{"Sid":"backdoor","Effect":"Allow","Principal":"*","Action":"lambda:InvokeFunction","Resource":"arn:aws:lambda:us-east-1:751353041310:function:stratus-sample-lambda-function"}
+Once detonated, we can check our Lambda function execution policy in the AWS Console and confirm it has been backdoored:
+
+
+To remove any infrastructure created for this attack technique, we simply run:
+stratus cleanup aws.persistence.backdoor-lambda-function
+At any point in time, we can see the status of our attack techniques by running stratus status.
+
+
+Defining attack techniques as code
+All attack techniques packaged in Stratus Red Team are defined as Go code and can automatically generate user-friendly documentation.
+Here is what the attack technique Stop CloudTrail Trail looks like, which emulates an attacker attempting to disrupt CloudTrail logging for defense evasion purposes.
+stratus.GetRegistry().RegisterAttackTechnique(&stratus.AttackTechnique{
+  ID:                 "aws.defense-evasion.stop-cloudtrail",
+  FriendlyName:       "Stop CloudTrail Trail",
+  Platform:           stratus.AWS,
+  MitreAttackTactics: []mitreattack.Tactic{mitreattack.DefenseEvasion},
+  Description: `
+Stops a CloudTrail Trail from logging. Simulates an attacker disrupting CloudTrail logging.
+Warm-up: 
+- Create a CloudTrail Trail.
+Detonation: 
+- Call cloudtrail:StopLogging to stop CloudTrail logging.
+`,
+  PrerequisitesTerraformCode: tf,
+  IsIdempotent:               true, // cloudtrail:StopLogging is idempotent
+  Detonate:                   detonate,
+  Revert:                     revert,
+})
+You'll notice the attack techniques have prerequisite infrastructure. In this case, it requires a CloudTrail trail in order to stop it. Stratus Red Team packages the Terraform code needed to create and remove all prerequisites.
+The detonation function is the core part of the attack technique, simulating the actual malicious behavior. It is written using the AWS SDK for Go V2 in an imperative manner:
+func detonate(params map[string]string) error {
+	cloudtrailClient := cloudtrail.NewFromConfig(providers.AWS().GetConnection())
+  
+  	// Retrieve the pre-requisite CloudTrail Trail name
+	trailName := params["cloudtrail_trail_name"]
+
+	log.Println("Stopping CloudTrail trail " + trailName)
+	_, err := cloudtrailClient.StopLogging(context.Background(), &cloudtrail.StopLoggingInput{
+		Name: aws.String(trailName),
+	})
+
+	if err != nil {
+		return errors.New("unable to stop CloudTrail logging: " + err.Error())
+	}
+
+	return nil
+}
+Using Stratus Red Team as a Go library
+Although the main entrypoint of Stratus Red Team is its command-line interface, it can also be used programmatically as a Go library.
+This is valuable to automate the detonation of attack techniques; e.g., in a nightly build as part of a continuous integration system. Read our instructions and examples of programmatic usage for more information.
+What's next?
+While Stratus Red Team is currently focused on AWS, we plan to add support for Kubernetes and Azure in the future.
+We will also continue adding new attack techniques and refining the project based on community feedback.
+Acknowledgments
+The maintainer of Stratus Red Team is Christophe Tafani-Dereeper. We would like to thank the following people for actively improving the project with their early feedback:
+
+Zack Allen, Sam Christian, Andrew Krug, and Adam Stevko from Datadog
+Alberto Certo from Nexthink
+Nick Frichette from State Farm
+Rami McCarthy from Cedar
+stratus show <TECHNIQUE ID>
+$ stratus show aws.persistence.lambda-backdoor-function
+lambda:InvokeFunction
+detonate
+Warm up the attack technique by creating any prerequisites for it being able to run. For this specific technique, it will create a Lambda function.
+Detonate the attack technique by calling lambda:AddPermission to backdoor the Lambda execution policy and allow it to be executed by an external AWS account.
+lambda:AddPermission
+stratus status

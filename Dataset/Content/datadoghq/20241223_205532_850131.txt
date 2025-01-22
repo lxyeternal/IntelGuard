@@ -1,0 +1,224 @@
+
+Introduction
+On March 22, 2023, a vulnerability in the Linux kernel was publicly disclosed. It is a local privilege escalation vulnerability, allowing an unprivileged user to escalate their privileges to the root user.
+Key points and observations:
+
+January 27, 2023: Vulnerability is patched on the Linux source tree
+March 22, 2023: Vulnerability is publicly disclosed on the NIST NVD as CVE-2023-0386
+May 4, 2023: Proof-of-concept (PoC) exploits appear on GitHub
+The vulnerability, dubbed CVE-2023-0386, is trivial to exploit and applicable to a wide-ranging set of popular Linux distributions and kernel versions. As of May 10, 2023, there has been no observed exploitation in the wild, but due to the existence of open source PoCs, we recommend prioritizing patching.
+Check if your system is vulnerable
+This vulnerability exclusively affects Linux-based systems. The easiest way to check whether your system is vulnerable is to see which version of the Linux kernel it uses by running the command uname -r.
+A system is likely to be vulnerable if it has a kernel version lower than 6.2.
+For more precise instructions on how to check if a system is vulnerable, you can refer to the advisory specific to your Linux distribution listed in the next section.
+Remediate affected systems
+To remediate the vulnerability, ensure your Linux systems are running a patched kernel version.
+Major Linux distributions have released dedicated security bulletins to help mitigate the vulnerability, including:
+
+Ubuntu
+Debian
+Amazon Linux
+Red Hat
+Background on the SUID bit and OverlayFS
+Before we examine in detail how to exploit the vulnerability, let's review two concepts: the SUID bit and the overlay file system. If you're already familiar with these, feel free to jump right to how the exploit works.
+The SUID bit
+The SUID bit (for "set user ID") is a special file permission that allows a binary to impersonate the owner of the binary using the setuid system call family, instead of the user executing it.
+Let's see a quick example using the following code:
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+
+int main(void) {
+    int result;
+
+    result = setuid(0);
+    if (result != 0 ) {
+      printf("could not setuid(0): %s\n", strerror(errno));
+      return result;
+    }
+
+    result = setgid(0);
+    if (result != 0) {
+      printf("could not setguid(0): %s\n", strerror(errno));
+      return result;
+    }
+
+    printf("Starting root shell...\n");
+    system("/bin/bash");
+    return 0;
+}
+This program attempts to impersonate the root user (UID 0). The operation will succeed only if the binary is owned by root and if the binary has the SUID bit set.
+Let's compile the binary and try to run it, as an unprivileged user:
+john@machine:~$ gcc -Wall setuid.c -o setuid
+john@machine:~$ chmod +x setuid
+john@machine:~$ ./setuid
+could not setuid(0): Operation not permitted
+To change the ownership of the file to root, we need to be root (by design). Let's do it as a privileged user and add the SUID bit to it:
+root@machine:/home/john$ chown root:root setuid
+root@machine:/home/john$ chmod +s setuid
+Going back to our unprivileged user shell, let's run it again:
+john@machine:~$ ./setuid
+Starting root shell...
+root@machine:~$ id
+uid=0(root) gid=0(root) groups=0(root),1002(john)
+The unprivileged user was able (by design) to escalate to root using our binary with the SUID bit set.
+The overlay file system
+The overlay file system (often abbreviated as OverlayFS) allows a user to "merge" several mount points into a unified file system.
+Let's see an example of how it works. We start by creating several folders, representing our different mount points, and create a directory structure inside them:
+mkdir base base/foo base/bar
+mkdir upper
+We can then create a "unified" file system mount combining these directories using an OverlayFS mount:
+# Create mount point and empty "workdir" directory required by OverlayFS
+mkdir /mnt/overlay workdir
+
+sudo mount overlay -t overlay -o lowerdir=./base,upperdir=./upper,workdir=./workdir /mnt/overlay
+When a file is written to one of the "lower" directories (here, base), it is copied up to the "upper" directory and ends up in the overlay mount as well.
+When we write a file to our overlay file system, it is reflected only in the "upper" directory (here, upper):
+$ touch /mnt/overlay/foo/hello
+$ ls base/foo/ # 'hello' was not created in the "lower" directory
+$ ls upper/foo/ # 'hello' was created in the "upper" directory
+hello
+Finally, when we write a file to any of the mount points (base or upper), it is reflected on the overlay file system.
+$ touch base/from-the-base
+$ touch upper/from-upper
+$ ls /mnt/overlay/from*
+/mnt/overlay/from-the-base 
+/mnt/overlay/from-upper
+Below is a diagram that shows how file changes propagate in an overlay file system:
+
+
+As we'll see in the next section, the CVE-2023-0386 vulnerability can be exploited when the kernel copies a file from the overlay file system to the "upper" directory.
+How the CVE-2023-0386 vulnerability works
+CVE-2023-0386 lies in the fact that when the kernel copied a file from the overlay file system to the "upper" directory, it did not check if the user/group owning this file was mapped in the current user namespace. This allows an unprivileged user to smuggle an SUID binary from a "lower" directory to the "upper" directory, by using OverlayFS as an intermediary.
+The exploit works as follows:
+
+Create a FUSE (File System in User Space) file system. This virtual file system is backed by a piece of code making it appear as if it contains a single binary that is owned by root (UID 0) and has the SUID bit set. This step requires FUSE, as we do not have the permissions to chmod root:root and chmod +s on the real file system (which, as explained in a previous section, requires the user to be root).
+Enter a new "user" and "mount" namespace using the unshare system call. The sole purpose of this step is to allow us to use mount in the next step to create our overlay file system (which normally requires the user to be root).
+Create a new OverlayFS mount, with:
+
+as the "lower" directory, the FUSE file system created in step 1
+as the "upper" directory, a world-writable directory such as /tmp.
+
+Trigger a copy of our SUID binary from the overlay file system to the "upper" directory—for instance, by running touch on it. The kernel will:
+
+catch the file change on the overlay file system
+read the malicious binary from our FUSE file system
+consider that it has the SUID bit set and is owned by root (UID 0), since our FUSE file system tells it so
+write the file with the same properties to the "upper" directory, in our case /tmp.
+At this point, we are left with a SUID binary owned by root in /tmp—all we need to do is exit the user namespace created in step 2 and execute the binary, allowing us to escalate to super admin privileges.
+
+
+We make available detailed reproduction steps on our GitHub repository on an Ubuntu 22.04.1 virtual machine, using the proof of concept created by "xkaneiki".
+Analysis of the patch
+Let's have a look at how the vulnerability was patched in the Linux kernel:
+diff --git a/fs/overlayfs/copy_up.c b/fs/overlayfs/copy_up.c
+index 140f2742074d4e..c14e90764e3565 100644
+--- a/fs/overlayfs/copy_up.c
++++ b/fs/overlayfs/copy_up.c
+@@ -1011,6 +1011,10 @@ static int ovl_copy_up_one(struct dentry *parent, struct dentry *dentry,
+ 	if (err)
+ 		return err;
+ 
++	if (!kuid_has_mapping(current_user_ns(), ctx.stat.uid) ||
++	    !kgid_has_mapping(current_user_ns(), ctx.stat.gid))
++		return -EOVERFLOW;
++
+ 	ctx.metacopy = ovl_need_meta_copy_up(dentry, ctx.stat.mode, flags);
+ 
+ 	if (parent) {
+This piece of code is part of the OverlayFS implementation inside the kernel, and runs under the context of the user that created the overlay file system. In our case, this is root (UID 0) within the new user namespace created in step 2, mapped to john (UID 1002) outside of the user namespace.
+Consequently, in the patch:
+
+current_user_ns() refers to the user namespace created in step 2, so we could run mount to create the overlay file system
+ctx.stat.uid refers to the owner UID of the file that the kernel is copying. In our case, this will be 0, as returned by our FUSE file system created in step 1
+Then, kuid_has_mapping checks whether ctx.stat.uid (0 in our case) is mapped inside of the the user namespace. In our case, only the UID of the unprivileged user (john) is mapped (to root). We can illustrate what the UID mapping looks like inside of our user namespace:
+# We are john (UID 1002)
+$ id
+uid=1002(john) gid=1002(john) groups=1002(john)
+
+# Create a new user namespace, mapping the current user john (UID 1002) to root (UID 0)
+$ unshare --user --map-user 0
+
+# We are 'root' inside the user namespace
+$ id
+uid=0(root) gid=0(root) groups=0(root)
+
+# Root (UID 0) in our user namespace corresponds to john (UID 1002) outside of the user namespace
+# In other words, UID 1002 is mapped to UID 0 inside the user namespace
+$ cat /proc/self/uid_map
+0  1002  1
+Since UID 0 is not mapped inside of the user namespace, the call to kuid_has_mapping returns false and causes the kernel to abort the file copy, fixing the vulnerability.
+Detection opportunities
+You'll recall from the previous section that exploitation of this vulnerability works by tricking the kernel into creating a SUID binary owned by root in a world-writable folder and executing it.
+This gives us several detection opportunities, which we'll review below.
+Strategy
+We can detect exploitation of this vulnerability in several ways:
+
+Detect when a SUID binary is created inside of a world-writable folder, such as /tmp
+Detect when a SUID binary owned by root is executed by a non-root user and the associated process has an effective uid of 0, meaning it successfully executed setuid(0)
+Detect when a SUID binary that was recently modified on the file system is executed
+Another (albeit noisier) method is to use auditd, for instance with the following rules:
+-a always,exit -F dir=/tmp/CVE-2023-0386 -F perm=wa -F key=copyup_suid_detection
+
+-a always,exit -F dir=/tmp/ -F arch=b64 -S stat -F key=copyup_suid_detection
+
+-a always,exit -F dir=/tmp/ -F arch=b64 -S execve -C uid!=euid -F euid=0 -k key=copyup_suid_detection
+
+-a always,exit -F dir=/tmp/ -F arch=b64 -S execve -C gid!=egid -F egid=0 -k key=copyup_suid_detection
+After the exploit has been triggered (post-mortem forensics), we can also search the file system for any unusual SUID binary:
+find / -type f -perm -u=s 2>/dev/null
+In particular, we can exclude directories that are generally only writable by root:
+find / -type f -perm -u=s -not -path '/usr/*' -and -not -path '/snap/*' 2>/dev/null
+In our case, the only hit we have is the malicious binary:
+/home/john/CVE-2023-0386/ovlcap/lower/file
+Detecting with Datadog Cloud Workload Security
+We can craft rules in Datadog Cloud Workload Security to implement the detection strategies discussed in the previous section.
+You can use this rule to detect when a root-owned SUID binary is executed by a non-root user and successfully calls setuid(0):
+(setuid.euid == 0 || setuid.uid == 0)   # setuid(0) or seteuid(0)
+&& process.file.mode & S_ISUID > 0 		# SUID binary
+&& process.file.uid == 0 				# owned by root
+&& process.uid != 0 					# executed by a non-root user
+&& process.file.path != "/usr/bin/sudo"
+&& process.file.path != "/usr/bin/fusermount3"
+This one will help you detect when a SUID binary is executed shortly after having been modified:
+exec.file.name != ""					    # process execution event
+&& process.file.mode & S_ISUID > 0 			# SUID binary
+&& process.file.uid == 0					# owned by root
+&& process.file.modification_time < 30s		# recently modified
+Sample detection:
+
+
+If you're currently a Cloud Workload Security customer, you can participate in our Remote Configuration Public Beta to automatically receive and update the default Agent rules maintained by Datadog Security Research. This allows you to quickly detect threats in your infrastructure using our most up-to-date rules.
+Without Remote Configuration, new and updated Agent rules must be manually deployed to the Datadog Agent.
+What about containers?
+OverlayFS is used extensively for containers, as it allows container runtimes to store the base image only once on the host system as the "lower" directory and persist changes made inside the container image somewhere else.
+However, while an attacker can exploit CVE-2023-0386 from inside a container, to the best of our knowledge they would not be able to directly perform a container escape to the host. That said, escalating privileges to root inside the container might allow an attacker to exploit other attack vectors.
+Conclusion
+This vulnerability is significant because it provides attackers an easy-to-use local privilege escalation in many widely used Linux distributions. However, the risks and disruptions this vulnerability makes possible can be mitigated through a defense-in-depth security approach.
+Head over to our GitHub repository for detailed instructions on how to exploit the vulnerability in a test environment.
+uname -r
+setuid
+root
+base
+upper
+base
+upper
+chmod root:root
+chmod +s
+unshare
+mount
+/tmp
+touch
+/tmp
+root
+john
+current_user_ns()
+mount
+ctx.stat.uid
+kuid_has_mapping
+ctx.stat.uid
+kuid_has_mapping
+setuid(0)
+setuid(0)

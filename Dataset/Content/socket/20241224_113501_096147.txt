@@ -1,0 +1,92 @@
+
+Supply chain attacks in the npm ecosystem are on the rise. We’ve seen this time and time again with malware published to npm to launch cryptominers, password stealers, or even ransomware scripts.
+If you are following these developments, you may have noticed that most npm malware relies on npm scripts like postinstall, preinstall and install to auto-launch malicious payload after infecting your system. You may also be led to believe that turning off install scripts with --ignore-scripts is an effective preventative measure against most npm malware, or that you are safe if your npm code only ever runs on the front end.
+In this post, we are going to shatter those illusions and show yet another attack vector that can allow malicious packages to pwn your computer.
+Bin scripts#
+An npm package can export executable files by adding a bin field to their package.json. When installed, the executable files are unpacked and symbolically linked into node_modules/.bin, which is added to the global $PATH variable when executing any npm scripts.
+(This nifty feature is used everywhere, from build tools like typescript, webpack to test runners like tape or mocha and even in web frameworks like next. Clearly, executable packages are really great and add a ton of value to the npm ecosystem...)
+Danger lurks within...
+...BUT npm places few restrictions on executable packages. In fact, there’s nothing stopping a hacker from naming thier bin script exports to whatever they like, including ‘node’ and ‘npm’ itself. This leads to a subtle and dangerous shell injection attack, which can be triggered by any dependency even if it was installed using --ignore-scripts. This flag has no bearing on “bin” scripts.
+Proof of concept#
+We call this attack bin script confusion and have created a proof of concept, which hijacks a host—whether Windows or Unix based, in two steps:
+1. First, the victim installs a compromised package:
+npm install --ignore-scripts npm-bin-script-poc
+2. Now their system is infected with the malware. Any subsequent npm script will trigger the payload. For example:
+npm start
+Here’s the attack in action:
+
+The actual malicious package is quite simple and contains two files
+1. A package.json file, which overrides the system definition of npm and node
+{
+  "name": "npm-bin-script-poc",
+  "version": "1.0.0",
+  "description": "Test package, please ignore and do not install",
+  "bin": {
+    "npm": "payload.sh",
+    "node": "payload.sh"
+  }
+}
+2. payload.sh which pops up Rick Astley’s famous music video
+#!/bin/sh
+command -v xdg-open > /dev/null && xdg-open https://www.youtube.com/watch?v=dQw4w9WgXcQ
+command -v open > /dev/null && open https://www.youtube.com/watch?v=dQw4w9WgXcQ
+Once installed this package will override any subsequent invocations of npm or node, meaning that any invocation of npm or npx could trigger it. Even when installing other packages or running tests!
+Known active exploitation to date#
+Bin script confusion isn’t entirely new, but little thought has been given to all malicious use cases made possible by “bin” exports, including remapping of the “node” command itself—which we call bin script shell injection—as we explain here.
+In 2019, full stack developer Daniel Ruf demonstrated ways in which threat actors could abuse ‘bin’ scripts.
+After Ruf’s report, CVEs followed:
+CVE-2019-10773 - Arbitrary Symlink Generation in yarn
+CVE-2019-16775 - Arbitrary File Write in npm
+CVE-2019-16776 - Arbitrary File Write in npm
+CVE-2019-16777 - Arbitrary File Overwrite in npm
+Both npm and NodeJS released updates addressing the major part of the issue (arbitrary file overwrites), but not other attack vectors. At the time, after “scanning the registry for examples of this attack,” npm did not find any published packages in the registry exploiting the arbitrary file overwrite or symlink creation aspects of the attack.
+In 2021, however, ReversingLabs researchers analyzed a malicious npm package called ‘nodejs_net_server’ that abused “bin” exports to remap the location of the legitimate ‘jstest’ package.
+Impact#
+Compared to install scripts, bin script confusion is a bit harder to exploit since the victim needs to run a command (e.g. npm start) after installing the malicious package. But it comes with its own share of problems. Being a relatively lesser widely known attack vector makes malicious use of bin exports harder to detect and prevent without reviewing all dependencies. As we explain, even best practices like --ignore-scripts fall short of preventing shell injection via bin script confusion.
+Moreover, legitimate use cases of “bin” scripts in npm packages may cause developers to ignore any (malicious) uses of such scripts during code reviews.
+Transitive dependencies
+This problem is made worse by some quirks in npm. Because npm moves all transitive dependencies’ executables to the root, any package in your tree can potentially hijack your $PATH.
+Another interesting thing to note is that lockfiles do not provide much protection and that the npm CLI has a race condition where installing multiple packages with the same exported executable will produce non-deterministic bin script configurations. For example, two packages “foo” and “bar,” each with a “bin” export called “cmd” set to different locations.
+Because many front end developers use npm scripts (i.e. typescript or webpack) in their build processes, the potential attack area for this is much greater than simply adding malicious code to an existing package, where it would otherwise be confined to run in a browser sandbox. This could be exploited to steal credentials from production deployments, mine cryptocurrency, etc.
+Finally, unlike with pre/postinstall scripts, the delayed execution of “bin” scripts may actually make them more insidious if they can lie dormant until a build or server command is run in a production environment with stronger credentials than the install script. Hypothetically, a CI system could npm install a malicious package in a restricted build environment and then trigger the build script later when running a subsequent build step.
+Mitigation#
+We believe that this behavior is not ideal and poses a security risk. We had earlier disclosed our research on these risks to npm via GitHub’s bug bounty program. GitHub’s response is that this functionality is currently working as designed and that they neither consider this a security vulnerability nor have plans to address it. And, to GitHub’s defense, even if they did agree with our concerns, curtailing the behavior of npm “bin” exports is no easy task. Bin scripts and the dependencies between them currently rely on this behavior and changing it would break countless existing packages and development workflows.
+A preventative measure for developers is to use --bin-scripts=false when installing new packages, however, this is very fragile. Unlike --ignore-scripts, it is not sticky on a per-package basis and if you ever rerun npm ci to update your dependencies from a lockfile it will again trigger bin script confusion.
+Removing bin scripts for all packages may not be a viable option either for most developers using tools like typescript or webpack.
+Developers can install Socket’s free GitHub app which can detect bin script confusion attacks and other supply chain risks in your package.json files.
+At the time of writing, Socket is the only tool that catches bin script confusion and bin script shell injection attacks, and we are continuously working on rolling out improvements that help developers stay ahead of supply chain risks.
+Install Socket for GitHub and get protected today.
+postinstall
+preinstall
+install
+--ignore-scripts
+npm
+bin
+node_modules/.bin
+$PATH
+typescript
+webpack
+tape
+mocha
+next
+npm
+--ignore-scripts
+npm
+node
+payload.sh
+npm
+node
+npm
+npx
+npm start
+--ignore-scripts
+$PATH
+typescript
+webpack
+npm install
+npm
+--bin-scripts=false
+--ignore-scripts
+npm ci
+typescript
+webpack

@@ -1,0 +1,244 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102820_126439\SmartScaleHeader1024x5121.jpg
+These days IoT devices are an easy entry point for malicious users to invade users‘ privacy. With that in mind, we tested the AEG Smart Scale PW 5653 BT, specifically the Bluetooth security (Bluetooth Low Energy or BLE). We also tested the mobile applications Smart Scale for Android and Smart Scale for iOS. To complete our tests, we used our commercial static application security testing tool CxSAST, some tools we made ourselves, and open source software. The Checkmarx Security Research Team found several security issues that have impact on the clients using the smart scale, its associated apps, and for the company itself.
+Security Issues by Severity
+We ranked the security Issues we found from high to low based on the Common Vulnerability Scoring System Calculator Version 3 (CVSS 3) score. Here’s an overview of the issues we found and what the possible attack scenarios might be.
+
+Denial of Service (Medium – CVSS 7.1)
+
+Possible attack scenario: An attacker could trigger a special request via BLE that crashes the smart scale. The victim needs to remove the batteries or wait until the batteries run out. Keep in mind that the device loses most of its information during this crash.
+
+Changing privacy settings (Medium – CVSS 5.3)
+
+Possible attack scenario: A malicious user – within BLE range – could track the victim because the device keeps the MAC address fixed due to a configuration in the Generic Attribute Profile (GATT). GATT establishes in detail how to exchange all profile and user data over a BLE connection.
+
+Changing device name (Medium – CVSS 5.3)
+
+Possible attack scenario: An attacker – within BLE range – could change the name of the device to something offensive or even to trick innocent users. Also it can be used to better identify the specific device to aid in combining this attack with other attacks.
+
+Mobile application (Smart Scale) Man-in-The-Middle (Medium – CVSS 4.8)
+
+Possible attack scenario: Some requests made by the mobile application don’t use HTTPS, which might allow malicious users to intercept the information sent between the mobile application and the host.
+Hardware Reconnaissance
+Next, we investigate the hardware — in this case, the scale itself. Here’s an overview of what we learned.
+
+BD ADDR
+
+98:84:e3:36:a7:56
+
+Characteristics/services with write permission:
+
+READ WRITEREAD WRITEREAD WRITEREAD WRITEREAD WRITE
+
+
+0003	78667579-a914-49a4-8333-aa3c0cd8fedc	?	WRITE
+000c	29f11080-75b9-11e2-8bf6-0002a5d5c51b	?	WRITE
+0013	00002a02-0000-1000-8000-00805f9b34fb	Peripheral Privacy Flag	READ WRITE
+0015	00002a03-0000-1000-8000-00805f9b34fb	Reconnection Address	READ WRITE
+001e	78667579-db57-4c4a-8330-183d7d952170	?
+0020	78667579-5605-4f75-8e54-fceb7ea465a9	?
+0022	78667579-d0fd-4b77-9515-d03224220c29	?
+0024	78667579-e255-4c76-8a12-7be9b176e551	?
+0029	78667579-ae48-4e5b-ae14-b8eb728398ec	?
+002b	78667579-5773-439a-bbcd-7672550a181b	?	READ WRITE
+0042	00002a06-0000-1000-8000-00805f9b34fb	Link Loss -> Alert Level	READ WRITE
+0045	00002a06-0000-1000-8000-00805f9b34fb	Immediate Alert -> Alert Level	WRITE NO RESPONSE
+Permissions required by the mobile application:
+
+android.permission.BLUETOOTH_ADMIN
+
+android.permission.BLUETOOTH
+
+android.permission.WRITE_EXTERNAL_STORAGE android.permission.MOUNT_UNMOUNT_FILESYSTEMS
+
+android.permission.VIBRATE
+
+android.permission.ACCESS_NETWORK_STATE android.permission.ACCESS_WIFI_STATE
+
+android.permission.READ_PHONE_STATE
+
+android.permission.INTERNET
+
+android.permission.ACCESS_FINE_LOCATION android.permission.ACCESS_COARSE_LOCATION
+Vulnerabilities
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102820_126439\AEGSmartScaleData.jpg
+Now that we’ve gone over the security issues by severity and the hardware settings, let’s take a look at the vulnerabilities. One of the things we try in every assessment is to fuzz some bytes to see if it triggers things that should not happen. In this case we noticed that the service Immediate Alert -> Alert Level allowed us to write. So we tried to write one byte with the value 1. A single request didn’t result in any issues, but after a couple of requests, it crashed the smart scale. It was a bit difficult to replicate, but we found a pattern. When the smart scale was in standby and anyone sends the request below, it will crash the smart scale.
+
+char-write-req 0x0045 01
+
+We wrote a small proof-of-concept exploit (using pygatt python lib) to replicate it.
+
+It connects to the device.
+Sleeps for 5 seconds (meanwhile the device enters standby mode).
+Sends the request.
+Crashes the smart scale.
+Now the only way to get the smart scale working again is to remove one of the batteries or wait until they run out, because the screen is frozen with the light on. We kept it for 30 minutes and the smart scale never went off. It’s also important to mention that resetting the smart scale removes information, such as other configuration steps the user took in the past. So we must also consider that the integrity of those settings is at stake also.
+
+Watch a quick video showing what happens:
+Changing Privacy Settings
+The privacy flag defines if the device sends the original BD address (the unique 48-bit identifier assigned to each Bluetooth device by the manufacturer) in the BLE advertisements packets. If privacy is enabled, the device changes the BD address randomly, making it very hard to track the user. By default, this smart scale has Privacy Disabled, so it’s possible to track a user.
+
+This option should not have the property set to WRITE and should be enabled by default. If a user has experience with connecting to Bluetooth devices, he or she can use GATTTool to change it with the following request:
+
+char-write-req 0x0013 01
+
+Changing Device Name
+
+An attacker could change the device name to another. Originally it has the value:
+
+VScale
+
+You can change the name using GATTTool:
+
+char-write-req 0x001e 064f574e000000
+
+This request changes the device name to OWN. For some reason, 06 must be an operation code, because you will need that byte to change the name.
+Smart Scale Man-in-The-Middle
+Monitoring the mobile application Smart Scale we noticed that some requests are sending packets without https:
+
+log.umsns.com
+
+alog.umeng.com
+
+ex.mobmore.com
+
+ex.puata.info
+
+open.yixin.im
+
+vt.lotuseed.com
+
+t2.qpic.cn
+Mobile Application
+The mobile applications (Android and iOS) were developed by a Chinese company named VTrump, which makes IoT applications for companies like AEG, Texas Instruments and Realtek. One of the things we noticed about the mobile application, which is referred to in the AEG Smart Scale package, is that many users are reporting that some mobile antivirus tools are blocking the app.
+So let’s take a look at the permissions needed on Android:
+
+android.permission.BLUETOOTH_ADMIN
+
+android.permission.BLUETOOTH
+
+android.permission.WRITE_EXTERNAL_STORAGE
+
+android.permission.MOUNT_UNMOUNT_FILESYSTEMS
+
+android.permission.VIBRATE
+
+android.permission.ACCESS_NETWORK_STATE
+
+android.permission.ACCESS_WIFI_STATE
+
+android.permission.READ_PHONE_STATE
+
+android.permission.INTERNET
+
+android.permission.ACCESS_FINE_LOCATION android.permission.ACCESS_COARSE_LOCATION
+
+Immediately some of these permissions triggered alerts for our research team, such as ACCESS_FINE_LOCATION. WRITE_EXTERNAL_STORAGE, and ACCESS_COARSE_LOCATION. Why does this smart scale app need to know the user‘s location or have permission to write on external storage? Also the app has the ability to change the permissions for MOUNT_UNMOUNT_FILESYSTEMS, which allows it to mount and unmount file systems for removable storage. Why does a smart scale app need that?
+
+One of the packages loaded by the apps is umeng.com. This package has a service that allows it to download an Android Package Kit (APK) from the Internet: com.umeng.common.net.DownloadingService.
+com.umeng.common.a.c(DownloadingService.t, String.format("saveAPK: url = %1$15st|tfilename = %2$15s", new Object[]{this.k.c, this.d.getAbsolutePath()}));
+
+HttpURLConnection a = a(new URL(this.k.c), this.d);
+
+Besides com.umeng, another package also requests the International Mobile Equipment Identity (IMEI) from the user: android.telephony.TelephonyManager.getDeviceId.The IMEI is the unique numerical identifier for each mobile device. Again, why does the smart scale app need that information?
+
+umeng
+tencent
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102820_126439\GatherLotusSeedComRequest.png
+Switching to the iOS ap, we noticed the following POST request to gather.lotuseed.com (http):
+
+
+
+Here’s what we learn from decoding the information that is sent:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102820_126439\AndroidInformationSentSmartScale.png
+What we’d like to focus is that private information is sent to a server in China (without https):
+
+Application version: 1.2.0
+
+Navigator: 1.3.7.1
+
+Application: com.vtrump.vscale
+
+Country: PT
+
+Language: EN
+
+Phone Operator: MEO
+
+Router MAC:  11:22:33:44:55:66
+
+Wifi SSID: REDACTED
+
+On Android, the information sent is much more complete.
+
+
+
+Decoding that information, we get the following:
+Here’s a more readable version of the data sent to the Chinese server:
+
+MAC: 11:22:33:44:55:66
+
+IMEI: REDACTED
+
+IMEI2: REDACTED
+
+Phone brand: SELECTLINE
+
+Filesystem: /dev, /sys/fs/cgroup, /mnt, /system, /data, /cache, /productinfo, /sale, /storage, /storage/emulated, /storage/self
+
+Phone functions: Light sensor, Accelerometer, Proximity sensor
+
+Kernel: release2@ww-linuxf4 #1 SMP PREEMPT Tue Nov 15 11:09:41 CST
+
+Wifi SSID: REDACTED-2g
+
+Lotuseed is a mobile data analysis software platform based in China. This data is sent without https, meaning that the communications between the app and Chinese server are not encrypted. After we notified VTrump about our findings, they declined to make the changes we suggested. Later, however, we tested again and found that they “fixed” the app by adding encryption, however, they were still sending the same private information. I don’t believe that this type of information is necessary for a smart scale to collect, much less send to a third party for data analysis.
+Smart Scale Fails at Security & Privacy
+The Checkmarx Security Research Team advised AEG to launch a patch that fixes clients’ smart scales to prevent malicious users from damaging the hardware. We tried to contact AEG to determine if they sold the brand rights for this type of equipment to any Chinese company, but we didn’t get any response to that question. We also noticed during our research that a lot of clients have issues with the mobile applications, especially because of the bad reputation of the URL used by the app. Based on our research findings, we recommend that you do not use either the Android or iOS app. The permissions these apps require are beyond what is necessary for a smart scale, and the apps share private data insecurely with third-party clients.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102820_126439\15ec501ba09846b89c07f53efa2e338f.png
+hbspt.cta.load(146169, ’15ec501b-a098-46b8-9c07-f53efa2e338f’, {});
+BD ADDR
+98:84:e3:36:a7:56
+android.permission.BLUETOOTH_ADMIN
+android.permission.BLUETOOTH
+android.permission.WRITE_EXTERNAL_STORAGE android.permission.MOUNT_UNMOUNT_FILESYSTEMS
+android.permission.VIBRATE
+android.permission.ACCESS_NETWORK_STATE android.permission.ACCESS_WIFI_STATE
+android.permission.READ_PHONE_STATE
+android.permission.INTERNET
+android.permission.ACCESS_FINE_LOCATION android.permission.ACCESS_COARSE_LOCATION
+char-write-req 0x0045 01
+char-write-req 0x0013 01
+VScale
+char-write-req 0x001e 064f574e000000
+log.umsns.com
+alog.umeng.com
+ex.mobmore.com
+ex.puata.info
+open.yixin.im
+vt.lotuseed.com
+t2.qpic.cn
+android.permission.BLUETOOTH_ADMIN
+android.permission.BLUETOOTH
+android.permission.WRITE_EXTERNAL_STORAGE
+android.permission.MOUNT_UNMOUNT_FILESYSTEMS
+android.permission.VIBRATE
+android.permission.ACCESS_NETWORK_STATE
+android.permission.ACCESS_WIFI_STATE
+android.permission.READ_PHONE_STATE
+android.permission.INTERNET
+android.permission.ACCESS_FINE_LOCATION android.permission.ACCESS_COARSE_LOCATION
+ACCESS_FINE_LOCATION
+WRITE_EXTERNAL_STORAGE
+ACCESS_COARSE_LOCATION
+MOUNT_UNMOUNT_FILESYSTEMS
+umeng.com
+com.umeng.common.net.DownloadingService
+com.umeng.common.a.c(DownloadingService.t, String.format("saveAPK: url = %1$15st|tfilename = %2$15s", new Object[]{this.k.c, this.d.getAbsolutePath()}));
+HttpURLConnection a = a(new URL(this.k.c), this.d);
+com.umeng
+android.telephony.TelephonyManager.getDeviceId.
+umeng
+tencent
+gather.lotuseed.com
+(http)

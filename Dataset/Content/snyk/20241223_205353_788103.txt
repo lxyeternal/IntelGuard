@@ -1,0 +1,103 @@
+
+We’ve seen a massive increase in the number of open source packages created and used in the wild during the past few years. These days every ecosystem has its package manager, and almost every package manager has its hidden gems and configurations.
+That said, as developers continuously install an ever-expanding number of packages, attackers gain interest in the packages’ attack surfaces. Then, the journey to craft the perfectly hidden malicious package begins.
+This post focuses on attacks using the Node.js ecosystem and the yarn and npm package managers – but consider it a “call to action” to look into other ecosystems for similar problems, to increase awareness, and to improve our community’s overall security.
+With that said, let’s jump in!
+Part 1: Niche configurations
+The other day, a fellow researcher told me about a few interesting configuration options in npm that are not very well known and can have serious security implications (we later found similar ones for yarn). These configuration options allow a person to specify to the package manager which binary it should execute inside the project directory. Yes: which binary!
+Configuration-wise, these options are yarnPath in the .yarnrc file as well as git, shell, and script-shell in the .npmrc file (to name a few). For the full context on the following attack vector, I highly recommend reading Rotem’s (of Cider Security) blog regarding this finding.
+One may ask “why would these files (that I just cloned/pulled) be respected?” and the answer is that this is how npm/yarn works. As a part of the project-handling flow of the package manager, .rc files are being searched for in a hierarchical fashion, where the first place searched is the current project directory, then the user directory, and then finally the root directory (you can find more on that in the NPM configuration documentation).
+So, given the above options, we can now create a semi-hidden malicious package (in repositories/tarballs, as `.rc` files are not downloaded when running `npm install` or equivalent) using the following .yarnrc file as our configuration:
+1# .yarnrc content
+2
+3yarnPath: “./evil.sh”
+(Note: This example uses a .yarnrc file, but a similar .npmrc file — with appropriate configuration option set — will have the same result.)
+By doing so, any invocation of yarn install in the root of the above project will result in evil.sh being invoked. Now, all we need to do is add the malicious file.
+Two important notes:
+
+Even if you supply --ignore-scripts or equivalent instruction, the above will still happen.
+If such a package is a dependency of your project, the malicious .yarnrc file will not be respected as it’s a child of node_modules and not a sibling, so no harm there.
+Part 2: Hiding code in plain sight
+Another hot topic during the past year has been trojan source code (or malicious code resulting from characters having different Unicode values than how they normally appear).
+The idea is pretty straightforward — for example, some characters (not space, CR, LF, etc.) are rendered as white space but are still valid strings.
+To dive a little deeper, the seemingly blank character “” (0x3164 in hex) is called “HANGUL FILLER,” and as you can(‘t) see, it’s not a space and is a valid “letter.” We can abuse this to hide specific logic in code snippets and go under the radar when introducing malicious code.
+As the information above suffices for our demo, I will not elaborate further on the topic. If you’d like more information, context, and examples, I highly recommend reading the following:
+
+https://trojansource.codes/
+https://certitude.consulting/blog/en/invisible-backdoor/
+Part 3: Hidden binaries + hidden configurations = RCE
+With the above laid out, the next steps in our attack are simple:
+
+Create a seemingly innocent package.
+Create a malicious file (named using a hidden character).
+Create an .rc file.
+Set the configuration parameter to point to the binary name with the invisible character.
+After completing these steps, we're ready. Let’s think about this attack from the victims’ point of view:
+Assuming a developer stumbles across such a package without being aware of the attack vector, they'll probably miss the red flags.
+Maybe they’re a bit cautious, and run ls -l. When doing so, they'll see:
+1$ ls -l
+2total 24
+3-rw-r--r--  1 root  staff   27 Nov 16 13:48 index.js
+4-rw-r--r--  1 root  staff  295 Nov 16 17:47 package.json
+5-rw-r--r--  1 root  staff  354 Nov 16 17:47 yarn.lock
+Since the output isn’t unexpected, this is the first pitfall. Most targets will run yarn install and become victims at this point.
+But let’s assume that our target is an experienced developer who may add the “show invisible” flag to ls. That will result in:
+1$ ls -la
+2total 32
+3drwxr-xr-x  7 root  staff  224 Feb 14 16:18 .
+4drwxr-xr-x  6 root  staff  192 Nov 25 17:48 ..
+5-rw-r--r--  1 root  staff  109 Nov 16 15:27 .yarnrc
+6-rw-r--r--  1 root  staff   27 Nov 16 13:48 index.js
+7-rw-r--r--  1 root  staff  295 Nov 16 17:47 package.json
+8-rw-r--r--  1 root  staff  354 Nov 16 17:47 yarn.lock
+9-rwxr-xr-x  1 root  staff  197 Feb 14 16:28
+Now the target may say, “ok, what’s in the .rc file?” (while completely ignoring the silent, invisible file), and cat it. The result will be:
+1$ cat .yarnrc
+2
+3yarn-path "./"
+This is the second pitfall.
+Most developers aren’t aware that yarn (or npm) might invoke custom binaries. Seeing something like the above is weird, yes, but it doesn’t say “evil.sh”, right?
+The third pitfall is pretty straightforward: the target simply doesn’t see the file. Even if they saw the .rc file and looked into the yarn-path spec (again, the same exists with npm) – they may assume that the property simply points at nothing and will invoke the package manager after all.
+In my PoC, running yarn install will result in:
+1$ yarn install
+2Okayyyy lesgo!
+Mitigations and thoughts
+You can stay safe by doing the following:
+
+Never trust (third-party) code. Always make sure you’re aware of what you cloned/pulled and be cautious of weird behavior and configurations.
+Run inside a sandbox. Always run third-party code inside a sandboxed/containerized environment. This way, even if the package is malicious, it will (probably) not impact your system and won’t compromise your machine.
+Note: Running inside a sandbox may also not be 100% secure as there are kernel vulnerabilities, sandbox escapes, etc. However, by running inside such an environment you reduce the risk dramatically and block most of the simple attacks (such as basic reverse shell or equivalent).
+And just like that, we have mitigated the attack.
+The fascinating thing about this attack vector is that it is completely visible, yet invisible.
+One may say, “I always ls -la and check all the files and am fully aware of all the package manager configuration options.” Okay, fair enough, but are you? To broaden that idea: is this true for everyone in your organization as well?
+And just like bloom-filters, the answer here is “no means no, yes means maybe.”
+I’d like to end by reiterating that this is a call to action (and not to exploitation) for the community to increase awareness of such attack vectors. With everyone building applications and installing dependencies almost blindly, pointing out suspicious configurations to others is essential.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+yarnPath
+git
+shell
+script-shell
+yarn install
+evil.sh
+Even if you supply --ignore-scripts or equivalent instruction, the above will still happen.
+--ignore-scripts
+If such a package is a dependency of your project, the malicious .yarnrc file will not be respected as it’s a child of node_modules and not a sibling, so no harm there.
+node_modules
+https://trojansource.codes/
+https://certitude.consulting/blog/en/invisible-backdoor/
+Create a seemingly innocent package.
+Create a malicious file (named using a hidden character).
+Create an .rc file.
+Set the configuration parameter to point to the binary name with the invisible character.
+ls -l
+yarn install
+ls.
+cat
+yarn-path
+yarn install
+Never trust (third-party) code. Always make sure you’re aware of what you cloned/pulled and be cautious of weird behavior and configurations.
+Run inside a sandbox. Always run third-party code inside a sandboxed/containerized environment. This way, even if the package is malicious, it will (probably) not impact your system and won’t compromise your machine.
+Note: Running inside a sandbox may also not be 100% secure as there are kernel vulnerabilities, sandbox escapes, etc. However, by running inside such an environment you reduce the risk dramatically and block most of the simple attacks (such as basic reverse shell or equivalent).
+ls -la

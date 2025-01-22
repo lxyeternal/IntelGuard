@@ -1,0 +1,112 @@
+
+In this post, we explore a powerful, yet widely unknown attack vector which has emerged in the last couple of years known as ‘Repo Jacking’. During our research, we discovered the enormous potential to compromise software components with tens of millions of downloads across the Terraform IaC (Infrastructure as Code) and Composer (PHP package registry) ecosystems.
+Despite its power, Repo Jacking remains under-researched and frequently misunderstood. Repo Jacking attacks are often mis-attributed to other techniques such as typosquatting or account takeovers. Our goal is to evaluate the ecosystems Snyk’s customers use for their susceptibility to this attack and to shine a light on the critical issue of Repo Jacking.
+What even is Repo jacking?
+Before we can understand the Repo jacking technique and why it is important, we must first look at the root causes of why it is possible. As the name suggests, the issue relates to code repositories. Specifically, it exists in SCM (Source Code Management) providers that allow renaming of organizations and usernames, and automatically redirect repository URLs from the original URL to the new URL.
+Note: in the rest of this article, we will refer to the namespace a repository exists under as an ‘organization’. This could also be a regular Github username, but to save us from being explicit in saying organization and usernames, we simplify this to just a single term.
+So say we have a Github organization named snyk-labs, with a repository called repojacking - the URL might look something like this:
+https://github.com/snyk-labs/repojacking/
+Then after some time, we decided to rename our Github organization to snyk-research. Our repository URL will now look like:
+https://github.com/snyk-research/repojacking/
+However, if something references the original repository URL, Github will perform a redirect (HTTP 301) to the new URL. This all sounds fine so far, but a problem occurs when the SCM provider releases the original organization name for registration. An attacker can now register an organization named ‘snyk-labs’, and then fork our original repository. At this point, requests to the original repository will no longer be redirected, but rather result in a HTTP status code 200 OK and serve up the forked repository which is under the attacker's control.
+At first, this problem appears to not present a realistic attack scenario. This is because an attacker needs to know a Git repository that belongs to an organization that was renamed, and there needs to be consumers actively accessing the repository from its old URL. However, modern supply chain infrastructure is complex and often relies upon Git repository artifacts directly, and we have found in practice that this issue can constitute a realistic attack.
+Package ecosystems
+When developers use third-party software components, these components are generally not managed directly by the developer. Most programming languages contain some centralized registry or index of packages (such as PyPi, Packagist, etc), and some local tooling (such as pip, composer, etc) for installing, and updating the projects’ dependencies from the centralized registry. This removes the need for engineers to manually acquire source code and install software components for their projects while ensuring that all engineers on the project are using components from the same source and version.
+Terraform
+In our research into Repo Jacking, we first decided to dive into the Terraform ecosystem. IaC (Infrastructure as Code) components are by definition, used to provision infrastructure and as such, would typically be configured with secrets granting access to provision resources in an environment (such as AWS, Azure, GCP, etc) - making this a potentially juicy target.
+When using Terraform, infrastructure is expressed as code in the form of HashiCorp Configuration Language (HCL) inside files with the *.tf extension. Terraform can then be run against these files in order to plan and create the desired infrastructure.
+The first important Terraform command to execute is terraform init. This command performs several key tasks. It initializes the Terraform backend, which is essential for storing state information. Additionally, it installs referenced modules, which are pre-written collections of Terraform code that you can reuse to manage resources more efficiently. For instance, the terraform-aws-vpc module can be used to set up a Virtual Private Cloud (VPC) in AWS with subnets, route tables, and gateways. This command also installs provider plugins, which are necessary for Terraform to interact with various cloud providers and services. For example, the AWS provider plugin allows Terraform to manage AWS resources, such as EC2 instances, S3 buckets, and IAM roles.
+Let's create a basic main.tf file and see what happens when we run ‘terraform init’ with an appropriately verbose logging level.
+❯ cat main.tf
+module "clawcluster" {
+  source  = "KittenKloud/clawcluster/kittenkloud"
+  version = "1.0.0"
+}
+From the above trace extract of the terraform init command, we can see that when terraform installs the modules, it first reaches out to the terraform registry to get the metadata for the module. We then see the actual module content is available at a github.com URL.
+This indicates that Terraform might be susceptible to Repo Jacking attacks. Since this is a test package that we control, we can continue to check if it might be exploitable. First, we need to rename our organization within Github. Once renamed, we can see the automatic redirection when we issue a request to the original registry URL, as shown below.
+Due to this automatic redirection, the terraform module installation remains functional and just internally results in the HTTP client following a redirect to the new URL. In theory, we should now be able to abuse this by registering the now available organization URL and creating a repository with the same name.
+As we can see in the screenshot above, the original organization name is available to be registered. We can now fork the original repository so we do not break any existing functionality within the module.
+Once the original repository URL is recreated, let's check if we still receive a redirect when issuing requests.
+Great! We no longer redirect to the original repository, so when Terraform pulls down the URL referenced within the registry, it should pull from a repository that we (as attackers) control. The final step is to modify our forked repository to contain any payload we want, a reverse shell sounds appropriate.
+In the above modification to the main.tf file of the hijacked module, we simply use the local-exec provider to allow us to execute a bash script on the host. We can include the bash script within the repo itself and then reference it as our command to run. Once the changes have been made, we need to create a matching release tag in the repository for the version Terraform is trying to pull down - v1.0.0.
+Once these changes are in place, we can test what happens when our module is installed as part of another terraform configuration.
+The module was successfully installed, let's check our listener…
+As shown above, our netcat listener has received the reverse shell and we have an interactive shell on the host that runs terraform init.
+While fully functional, the above proof-of-concept is a little theoretical because we controlled and renamed the original package. Is this actually likely to happen?
+Due to the differences in HTTP status codes when requesting the repository URL, we can easily check if a given module is hijackable. Our process to assess the impact here was:
+
+Use the Terraform module API to get a list of all Terraform modules and their artifact URLs.
+Make a HTTP request to each artifact URL and check if we receive a 200 OK, or 301 Moved Permanently. Store all 301s in a separate list.
+For each URL in the list of requests that resulted in a 301 redirect, we now extract the organization name and make a second HTTP request to DOMAIN/ORGANIZATION_NAME and check to see if we received a 200 or 404 status code. Results that return a 404 indicate that the organization no longer exists and the repository is hijackable.
+The reason for the third step in this list might not be obvious, but it's possible that after the original organization was renamed, the company preemptively registered an organization with the same name to prevent abuse, or potentially an attacker has already claimed the organization.
+At the time of our research, there were a total of 15,451 Terraform modules. We identified that 301 of these, with a total download count of 661,693, were hijackable. While this is a relatively small number, the exploitation of these affected modules results in a direct compromise of any consumers. As Terraform is used for provisioning infrastructure, this compromise of the machine that runs Terraform could allow an attacker to compromise the entire provider where Terraform is being used to provision resources, such as a company's entire AWS or Azure account. Despite the small number of susceptible modules, the impact is significant and could result in a major supply chain breach.
+We disclosed our issues to Hashicorp on November 20th, 2023. Hashicorp recently implemented the following changes to the Terraform registry which mitigates the Repo Jacking-related issues we reported:
+
+When a module is requested from the Registry, the artifact is pinned via the commit SHA from the time of publication, rather than a mutable tag.
+Management of assets in the Registry is now tied to a user’s GitHub ID, not their changeable username. Additionally, module version publication is tied to the repository's unique ID (not repository or organization name) and publishing is disabled if the repository IDs do not match.
+Composer
+Composer is a popular package manager for PHP applications and relies upon the Packagist package registry. During our analysis of the package managers for various ecosystems, composer was found to also rely upon the repository URL to fetch the actual artifact.
+We can run the below command to add a dependency to our project with the verbose option set:
+composer require ghspacescloud/testpackage -vvv
+We can see in the above extract from the composer require output that the actual artifact is being downloaded from the repository URL that is referenced by the package on Packagist. Following the same approach to validate the issue, we renamed a test organization, claimed the original organization under a new account, and forked the repository to test our attack scenario.
+
+However, based on the above screenshot, you might see a problem. Composer is pulling the release based on its commit SHA and not the release tag. While we can obtain the same commit hash by forking the original repository, we cannot introduce any changes to the artifact without an SHA collision.
+The solution to this problem was on the package page on Packagist. Packagist contains a button to perform a package update, which can be invoked once per day by any user.
+Upon clicking the Update Now button, Packagist will check the repository for any new releases and add them to the package manifest, along with the SHA for the commit associated with the release tag. Thus allowing us to serve up our malicious version of the package when it is installed or updated.
+In our Proof-of-Concept for this, we kept it simple and had a basic PHP application that imports a function from the package and invokes it.
+❯ cat test.php
+<?php
+
+require_once __DIR__ . '/vendor/autoload.php';
+
+use ghspacescloud\HelloWorld;
+
+echo HelloWorld::sayHello();
+Once the application is run we can see that our payload is executed.
+This PoC was simple and relied on the execution of a specific function in the package, but this requirement can be skipped by using composer scripts such as post-install-cmd which will be executed immediately on package installation.
+We used the same approach to identify hijackable packages across the entire Packagist registry as we did for Terraform:
+
+Obtain a list of app packages and artifact URLs
+Request each artifact and monitor for 301 redirects
+For each artifact that resulted in a redirect, extract the organization name
+Check if the organization exists or not
+After checking the packages in Packagist, we found there were a total of 381,204 packages at the time of our research, with 6,837 being hijackable. Across these hijackable packages, there were a total cumulative downloads of over 50 million, with over 600,000 monthly downloads. Each download results in a direct Remote Code Execution on the target device, meaning an attacker could potentially compromise millions of end-user devices, CI/CD environments, and production environments. An attack on the Packagist ecosystem could thus lead to a major supply chain attack affecting thousands of individual companies.
+We reported our findings to Packagist on 20th November 2023 and Packagist has recently implemented changes to mitigate these risks within the composer and Packagist ecosystems.
+The approach is slightly different from Hashicorp but essentially blocks updates when the repository’s unique ID has changed.
+SCM Mitigations
+It would be unfair to disclose our findings without mentioning the measures that certain SCM providers have taken themselves to prevent such issues. GitHub is a good example here and when renaming an organization or username, a notice about the unintended side effects is clearly visible next to the option for performing the renaming.
+The primary protections boil down to GitHub placing restrictions on when the original name + repository name combination can be reused. The criteria below is taken from the GitHub description of this process:
+If the account namespace includes any public repositories that contain an action listed on GitHub Marketplace, or that had more than 100 clones or more than 100 uses of GitHub Actions in the week prior to you renaming your account, GitHub permanently retires the old owner name and repository name combination (OLD-OWNER/REPOSITORY-NAME) when you rename your account.
+While this approach obviously helps in many cases, it is not perfect and still allows many repositories to be hijacked. Repository clones do not account for direct downloads of release artifacts. As we have observed, many popular packages with millions of downloads are still available to reclaim, because consumers of the repository are not cloning the repository directly, and those working on the project did not perform 100 clones in the week prior to renaming the organization.
+As an example, the popular PHP composer package psr/log has a total download count of over 760 million, with around 12 million monthly downloads, but only has a total of 93 commits with the last being 3 years ago. While we don’t have access to the traffic for this repository, it's entirely possible this package may not meet the clone requirements to benefit from GitHub’s repo jacking protections should its organization be renamed tomorrow.
+Summary
+Our research into Repo Jacking has shown the current measures provided by SCM providers are not always sufficient, and that the implications of abusing the way certain providers handle renaming organizations can result in significant problems for third-party ecosystems that rely upon SCM-hosted artifacts. We are happy that our research has led to improvements within the Terraform and Composer ecosystems, which protect against Repo Jacking attacks, and hope that this publication will raise awareness about the general issue of Repo Jacking.
+snyk-labs
+repojacking
+https://github.com/snyk-labs/repojacking/
+
+snyk-research
+https://github.com/snyk-research/repojacking/
+
+*.tf
+main.tf
+terraform init
+main.tf
+local-exec
+v1.0.0
+terraform init
+Use the Terraform module API to get a list of all Terraform modules and their artifact URLs.
+Make a HTTP request to each artifact URL and check if we receive a 200 OK, or 301 Moved Permanently. Store all 301s in a separate list.
+For each URL in the list of requests that resulted in a 301 redirect, we now extract the organization name and make a second HTTP request to DOMAIN/ORGANIZATION_NAME and check to see if we received a 200 or 404 status code. Results that return a 404 indicate that the organization no longer exists and the repository is hijackable.
+DOMAIN/ORGANIZATION_NAME
+When a module is requested from the Registry, the artifact is pinned via the commit SHA from the time of publication, rather than a mutable tag.
+Management of assets in the Registry is now tied to a user’s GitHub ID, not their changeable username. Additionally, module version publication is tied to the repository's unique ID (not repository or organization name) and publishing is disabled if the repository IDs do not match.
+composer require
+Update Now
+post-install-cmd
+Obtain a list of app packages and artifact URLs
+Request each artifact and monitor for 301 redirects
+For each artifact that resulted in a redirect, extract the organization name
+Check if the organization exists or not
+OLD-OWNER/REPOSITORY-NAME
+psr/log

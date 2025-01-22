@@ -1,0 +1,247 @@
+
+前言
+2024年10月31日至11月3日期间，天问软件供应链分析平台检测到一起针对npm生态的软件供应链攻击事件。在此次攻击中，攻击者利用了以太坊智能合约对恶意C2地址进行了隐蔽，并且通过多阶段复杂的恶意攻击向受害用户主机植入后门，并进行持续控制。
+天问供应链威胁监测模块是奇安信技术研究星图实验室研发的“天问”软件供应链安全分析平台的子模块，“天问”分析平台对Python、npm等主流的开发生态进行了长期、持续的监测，发现了大量的恶意包和攻击行为。
+攻击事件分析
+这起攻击事件最早可以追溯至2024年10月21日，我们发现了一个名为haski的恶意npm包，它与npm生态中流行软件包husky拥有相同的读音，是攻击者诱导用户下载的方式之一。在该恶意软件包的package.json中， 包含了一个 postinstall 的 hook指令， 这也是攻击者经常利用的npm软件包安装特性。该指令会在npm包安装完成后自动执行，通过进一步查看该install-script.js 脚本，发现其中是进行了严重混淆的代码。现在软件包中越来越多的使用混淆技术对抗扫描，我们团队也在反混淆技术领域做出了一系列成果，如收录于网络安全国际顶级会议CCS中PowerShell反混淆的工作。
+
+
+image: .\Dataset\Image\qianxin\20241223_205437_699596\image20241104112839152.png
+并且在同一天（10月21日），攻击者又发布了名为jest-fet-mock的恶意包，其中包含完全相同的执行脚本和混淆代码。但这两个恶意包完全由不同的用户进行发布，所使用的邮箱分别是 fldllfdogldoposdfnhfdgdkjg@gmail.com 和 tertryrgfhfghgfh546464645@proton.me 一个是Gmail的邮箱， 而另一个是匿名邮箱。
+在两天后（10月23日）攻击者再次发布了一个包含有相同恶意行为的npm包1234wdzwkcsf，从名字来看十分随意，但发布者的邮箱又进行了变更，变成了alt.bu-9ozrmv55@mail.3a88.dev，根据针对邮箱域名的调查，同样疑似第三方提供的匿名邮箱。
+以上三个恶意包似乎都是攻击者的一些前期测试，而从2024年10月31日起至11月3日，攻击陆续发布了34个类似的恶意包，这些恶意包中攻击所使用的恶意代码完全一致。但是更明显的是，这些软件包都是进行了精心构造的，每个恶意包都是由一个独立的用户发布，并且npm包的元数据描述信息也是对正常软件包的仿照。攻击者所使用的邮箱均为Gmail邮箱，且从邮箱所使用的名称来看，是按照某种模式来生成的，例如：PatriciaJacksonut97377@gmail.com 和MargaretPhillipsvl29441@gmail.com。
+image: .\Dataset\Image\qianxin\20241223_205437_699596\image20241104112803610.png
+同时，恶意包的元数据中所包含的描述信息Description字段、repository字段、homepage字段、dependencies字段等信息，看起来与正常软件包无异。但其中仍然包含一个postinstall的执行脚本命令，并且脚本名称也由原来测试阶段的install-script.js 变成了一个随机字符命名的JS脚本（os44oz5q.cjs ）。 上图所示的即为恶意包puppeteerfox的部分元数据信息，其依赖信息和正常的流行软件包puppeteer中的相同，并且恶意软件包由于恶意代码执行需要，额外添加了两个依赖项 axios 和 ethers。
+此次攻击来看，攻击者在前期进行了充分的测试，并在合适的时机利用typosquatting的方式进行了大量的恶意软件包投毒攻击。接下来，我们将分析攻击过程中攻击者所使用的全新的攻击方式。
+攻击细节分析
+所有的恶意软件包中均使用了相同的混淆代码，我们对其进行反混淆后进一步分析。
+image: .\Dataset\Image\qianxin\20241223_205437_699596\image20241104114358475.png
+通过分析反混淆后的恶意代码，我们发现其恶意行为主要是根据不同的操作系统类型，从远程C2下载恶意的远程payload文件，并在在系统后台进行静默运行。
+
+
+
+
+其中，用于获取下载恶意负载的远程C2地址的方法是之前从未出现过的，攻击者利用了以太坊智能合约的特性动态来获取C2地址。
+由于以太坊智能合约允许开发者定义和存储多种类型的数据（包括整数、布尔值、字符串等）并将其存储在区块链上。同时合约开发者可以在合约中定义特定的“读取”函数（例如getString）来返回某些存储变量的值。而当这个函数被设定为“公开”访问级别（public）时，区块链的公开透明性就使得任何人都可以通过合约地址和对应的方法来调用这个合约的函数，无需特殊权限。 所以攻击者利用这一点通过合约地址和钱包地址就可以调用合约中的已经约定好的getString 方法 获取到一个字符串的返回值。并且调用“getString”方法时不需要对交易进行签名，且也不消耗gas，所以攻击者可以在任意恶意代码执行的地方隐蔽的获取到C2地址。
+image: .\Dataset\Image\qianxin\20241223_205437_699596\image20241104182444862.png
+
+当我们进一步对合约地址进行深挖时发现，攻击者还在合约中定义了setString的相关方法，并且通过发起交易来动态的修改这个字符串的值，如此就可以使得恶意代码所获取的C2地址是动态的，更好的躲避了安全检查，达到隐蔽自身的目的。当然，使用智能合约也有一些对安全分析人员来说的优势，攻击者所有在区块链上的操作都是公开透明的，都会被记录下来且无法被消除。我们查看了合约地址0xa1b40044EBc2794f207D45143Bd82a1B86156c6b上的所有交易记录（如上图所示）。攻击者在近期进行了多次字符串的修改。我们逐一查看了交易记录，分析其中所修改的字符串记录如下：
+
+Sep-23-2024 12:49:47 AM UTC : 合约创建
+Sep-23-2024 12:55:23 AM UTC : 调用setString 方法，输入参数为 http://localhost:3001
+Sep-24-2024 06:18:11 AM UTC : 调用setString 方法，输入参数为 http://45.125.67.172:1228
+Oct-21-2024 05:01:35 AM UTC : 调用setString 方法，输入参数为 http://45.125.67.172:1337
+Oct-22-2024 02:54:23 PM UTC : 调用setString 方法，输入参数为 http://193.233.201.21:3001
+Oct-26-2024 05:44:23 PM UTC : 调用setString 方法，输入参数为http://194.53.54.188:3001
+image: .\Dataset\Image\qianxin\20241223_205437_699596\image20241105105935625.png
+
+从合约内容修改的记录上来看，攻击者早在2024年9月23日时就开始了本地的测试，并指定了字符串值为localhost:3001，并且在9月24日和10月21日进行了远程的测试。并且从时间来判断，其中10月21日所设置的string值http://45.125.67.172:1337，即为我们发现的npm恶意包haski和jest-fet-mock测试时所使用。
+
+
+在分析反混淆的代码后，我们发现同时攻击在获取远程C2地址后，会根据不同的系统平台（windows、linux、macos）来获取到不同的远程恶意负载。
+截止目前分析为止，最新的所获取到的string 地址http://194.53.54.188:3001 仍然活跃，我们获取到了针对不同平台的远程恶意负载，并进行了分析。 根据天穹沙箱的分析结果，该恶意软件运行后会添加启动自执行，并且等待接收C2的指令。
+攻击溯源
+在反混淆后的脚本中我们看到一些俄语的打印信息，例如'Ошибка при получении IP адреса' 译为“获取IP地址时出错”，以及'Ошибка установки' 译为 ”’安装错误“。同时我们对获取的C2地址进行溯源时，发现这些智能合约被托管在一家俄罗斯的云服务主机商iHor上。
+总结
+在此次攻击中，攻击者利用了一种软件供应链攻击中的新型技术手段，利用以太坊智能合约动态且隐蔽地获取恶意 C2 地址，对传统的安全检测方式带来的一定的挑战。攻击者通过在 npm 生态中发布与流行包名称相似的恶意包，使用 postinstall 脚本执行混淆后的恶意代码，成功在受害者系统中植入后门，实现了持续控制。同时，经过我们的分析，这次攻击过程的是一个经过精心策划、多次测试，以及对区块链技术的恶意利用，表明软件供应链安全威胁正变得日益复杂和隐蔽。 天问软件供应链安全分析平台将持续监测和发现开源生态中具备高级威胁的攻击事件并进行分析。
+IOC
+
+智能合约地址：0xa1b40044EBc2794f207D45143Bd82a1B86156c6b
+钱包地址：0x52221c293a21D8CA7AFD01Ac6bFAC7175D590A84
+URL：
+
+http[:]//45[.]125[.]67[.]172[:]1228
+
+http[:]//45[.]125[.]67[.]172[:]1337
+
+http[:]//193[.]233[.]201[.]21[:]3001
+
+http[:]//194[.]53[.]54[.]188[:]3001
+
+http[:]//45[.]125[.]67[.]172[:]1228
+http[:]//45[.]125[.]67[.]172[:]1337
+http[:]//193[.]233[.]201[.]21[:]3001
+http[:]//194[.]53[.]54[.]188[:]3001
+文件SHA1：
+
+2addf6ef678f9f663b00e13e3bb2fa0a37299dd0  （node-linux）
+
+7ac12ba9822df1f6652fd3dd67f61e026719a76a  （node-macos）
+
+5ded160d97657902a14ecca95acfb01c7bf957d1  （node-win.exe）
+
+2addf6ef678f9f663b00e13e3bb2fa0a37299dd0  （node-linux）
+7ac12ba9822df1f6652fd3dd67f61e026719a76a  （node-macos）
+5ded160d97657902a14ecca95acfb01c7bf957d1  （node-win.exe）
+恶意npm包名称：
+
+haski@2.8.5
+jest-fet-mock@16.4.5
+1234wdzwkcsf@1.0.0
+puppeteer-firfox@0.5.1
+puppeteerfox@0.5.1
+puppeterfirefox@0.5.1
+puppeteer-html2pd@1.0.0
+solity@0.0.1
+etherscna-api@10.3.0
+bignum.js@9.1.2
+ethquer@2.1.2
+eth-rpceerrors@2.0.2
+eth-qery@2.1.2
+cryptocomapre@1.0.0
+coinbse@2.0.8
+coingeco@1.0.0
+metamaks@0.0.1-security
+blocypher@0.3.0
+blockypher@0.3.0
+blockcyper@0.3.0
+monro@1.0.6
+monnero@1.0.6
+tezo-sdk@0.0.1-security
+libbitcon@0.1.4
+btdc@0.0.6
+pasportt@0.7.0
+grapql-yoga@5.8.0
+n-http-proxy@0.2.4
+exp-http-proxy@2.1.1
+pass-http@0.3.0
+p-oauth@1.0.0
+pass-oauth2@1.8.0
+nod-http@0.0.5
+http-proxi-cache@1.1.3
+ax-ntlm@1.4.2
+axios-nlm@1.4.2
+axiosthrotle@1.0.2
+
+haski@2.8.5
+jest-fet-mock@16.4.5
+1234wdzwkcsf@1.0.0
+puppeteer-firfox@0.5.1
+puppeteerfox@0.5.1
+puppeterfirefox@0.5.1
+puppeteer-html2pd@1.0.0
+solity@0.0.1
+etherscna-api@10.3.0
+bignum.js@9.1.2
+ethquer@2.1.2
+eth-rpceerrors@2.0.2
+eth-qery@2.1.2
+cryptocomapre@1.0.0
+coinbse@2.0.8
+coingeco@1.0.0
+metamaks@0.0.1-security
+blocypher@0.3.0
+blockypher@0.3.0
+blockcyper@0.3.0
+monro@1.0.6
+monnero@1.0.6
+tezo-sdk@0.0.1-security
+libbitcon@0.1.4
+btdc@0.0.6
+pasportt@0.7.0
+grapql-yoga@5.8.0
+n-http-proxy@0.2.4
+exp-http-proxy@2.1.1
+pass-http@0.3.0
+p-oauth@1.0.0
+pass-oauth2@1.8.0
+nod-http@0.0.5
+http-proxi-cache@1.1.3
+ax-ntlm@1.4.2
+axios-nlm@1.4.2
+axiosthrotle@1.0.2
+haski
+husky
+install-script.js
+jest-fet-mock
+fldllfdogldoposdfnhfdgdkjg@gmail.com
+tertryrgfhfghgfh546464645@proton.me
+1234wdzwkcsf
+alt.bu-9ozrmv55@mail.3a88.dev
+PatriciaJacksonut97377@gmail.com
+MargaretPhillipsvl29441@gmail.com
+os44oz5q.cjs
+puppeteerfox
+puppeteer
+axios
+ethers
+getString
+0xa1b40044EBc2794f207D45143Bd82a1B86156c6b
+Sep-23-2024 12:49:47 AM UTC : 合约创建
+Sep-23-2024 12:55:23 AM UTC : 调用setString 方法，输入参数为 http://localhost:3001
+http://localhost:3001
+Sep-24-2024 06:18:11 AM UTC : 调用setString 方法，输入参数为 http://45.125.67.172:1228
+http://45.125.67.172:1228
+Oct-21-2024 05:01:35 AM UTC : 调用setString 方法，输入参数为 http://45.125.67.172:1337
+http://45.125.67.172:1337
+Oct-22-2024 02:54:23 PM UTC : 调用setString 方法，输入参数为 http://193.233.201.21:3001
+http://193.233.201.21:3001
+Oct-26-2024 05:44:23 PM UTC : 调用setString 方法，输入参数为http://194.53.54.188:3001
+http://194.53.54.188:3001
+localhost:3001
+http://45.125.67.172:1337
+haski
+jest-fet-mock
+http://194.53.54.188:3001
+'Ошибка при получении IP адреса'
+'Ошибка установки'
+iHor
+智能合约地址：0xa1b40044EBc2794f207D45143Bd82a1B86156c6b
+钱包地址：0x52221c293a21D8CA7AFD01Ac6bFAC7175D590A84
+URL：
+
+http[:]//45[.]125[.]67[.]172[:]1228
+http[:]//45[.]125[.]67[.]172[:]1337
+http[:]//193[.]233[.]201[.]21[:]3001
+http[:]//194[.]53[.]54[.]188[:]3001
+http[:]//45[.]125[.]67[.]172[:]1228
+http[:]//45[.]125[.]67[.]172[:]1337
+http[:]//193[.]233[.]201[.]21[:]3001
+http[:]//194[.]53[.]54[.]188[:]3001
+文件SHA1：
+
+2addf6ef678f9f663b00e13e3bb2fa0a37299dd0  （node-linux）
+7ac12ba9822df1f6652fd3dd67f61e026719a76a  （node-macos）
+5ded160d97657902a14ecca95acfb01c7bf957d1  （node-win.exe）
+2addf6ef678f9f663b00e13e3bb2fa0a37299dd0  （node-linux）
+7ac12ba9822df1f6652fd3dd67f61e026719a76a  （node-macos）
+5ded160d97657902a14ecca95acfb01c7bf957d1  （node-win.exe）
+恶意npm包名称：
+
+haski@2.8.5
+jest-fet-mock@16.4.5
+1234wdzwkcsf@1.0.0
+puppeteer-firfox@0.5.1
+puppeteerfox@0.5.1
+puppeterfirefox@0.5.1
+puppeteer-html2pd@1.0.0
+solity@0.0.1
+etherscna-api@10.3.0
+bignum.js@9.1.2
+ethquer@2.1.2
+eth-rpceerrors@2.0.2
+eth-qery@2.1.2
+cryptocomapre@1.0.0
+coinbse@2.0.8
+coingeco@1.0.0
+metamaks@0.0.1-security
+blocypher@0.3.0
+blockypher@0.3.0
+blockcyper@0.3.0
+monro@1.0.6
+monnero@1.0.6
+tezo-sdk@0.0.1-security
+libbitcon@0.1.4
+btdc@0.0.6
+pasportt@0.7.0
+grapql-yoga@5.8.0
+n-http-proxy@0.2.4
+exp-http-proxy@2.1.1
+pass-http@0.3.0
+p-oauth@1.0.0
+pass-oauth2@1.8.0
+nod-http@0.0.5
+http-proxi-cache@1.1.3
+ax-ntlm@1.4.2
+axios-nlm@1.4.2
+axiosthrotle@1.0.2

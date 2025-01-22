@@ -1,0 +1,662 @@
+
+One of the main goals of this research was to explore C/C++ vulnerabilities in the context of NodeJS npm packages. The focus will be on exploring and identifying classic vulnerabilities like Buffer Overflow, Denial of Service (process crash, unchecked types), and Memory Leakages in the context of NodeJS C/C++ addons and modeling relevant sources, sinks, and sanitizers using Snyk Code (see Snyk brings developer-first AppSec approach to C/C++).
+The targets for this research are NPM packages that use C/C++ interfaces as part of their implementation. We haven’t targeted projects that are not listed on NPM.
+In this blog post, we aim to provide an overview of common security vulnerabilities and vulnerable patterns that can occur when writing C/C++ add-ons in NodeJS. We’ll also provide remediation examples and suggestions for open source maintainers.
+This blog post was inspired by the paper “Bilingual Problems: Studying the Security Risks Incurred by Native Extensions in Scripting Languages” by Cristian-Alexandru Staicu, Sazzadur Rahaman, Àgnes Kiss, and Michael Backes.[1] In their original paper, the authors provided an analysis of the security risk of native extensions in popular languages, including JavaScript.
+NodeJS C/C++ add-ons background
+NodeJS provides different APIs to call native C/C++ code. The scope of this research is to investigate security vulnerabilities that could occur when using one of the following mechanisms:
+
+node_api.h: Node-API
+napi.h: C++ wrapper around Node-API
+A good resource that provides examples of using the libraries above can be found in GitHub.
+For a complete introduction to add-ons and how to build them, refer to NodeJS's official documentation.
+The vulnerabilities covered and identified in at least one package are:
+
+Memory leaks
+Unchecked type (DoS)
+Reachable assertion (DoS)
+Unhandled exceptions (DoS)
+Buffer overflow
+Integer overflow
+In the following sections, examples of vulnerable patterns will be provided with also an explanation of the conditions to be satisfied in order to make the vulnerability exploitable.
+Examples of vulnerable patterns
+In this section, we are going to explore how add-on-specific APIs can lead to security issues if not properly handled and some vulnerable patterns identified as part of this study.
+NOTE: The following examples do not represent a comprehensive list. There might be more scenarios
+that can lead to security issues not covered in this blog post.
+Setup
+Install node-gyp (https://github.com/nodejs/node-gyp).
+The following files are used to run the examples in the next section:
+package.json
+1{
+2  "main": "main.js",
+3  "private": true,
+4  "gypfile": true,
+5  "dependencies": {
+6    "bindings": "^1.5.0",
+7    "nan": "^2.18.0",
+8    "node-addon-api": "^7.0.0"
+9  }
+10}
+binding.gyp
+1{
+2  "targets": [
+3    {
+4      "target_name": "test_napi_exceptions",
+5      "cflags!": [ "-fno-exceptions" ],
+6      "cflags_cc!": [ "-fno-exceptions" ],
+7      "sources": [ "test_napi_exceptions.cpp" ],
+8      "include_dirs": [
+9        "<!@(node -p \"require('node-addon-api').include\")"
+10      ],
+11      'defines': [ 'NAPI_DISABLE_CPP_EXCEPTIONS' ], # if this line is commented, all the tests in test_napi_exceptions.cpp will not crash the process
+12    },
+13    {
+14      "target_name": "test_node_api_assert",
+15      "sources": [ "test_node_api_assert.c" ]
+16    },
+17    {
+18      "target_name": "test_napi_unchecked_type",
+19      "cflags!": [ "-fno-exceptions" ],
+20      "cflags_cc!": [ "-fno-exceptions" ],
+21      "sources": [ "test_napi_unchecked_type.cpp" ],
+22      "include_dirs": [
+23        "<!@(node -p \"require('node-addon-api').include\")"
+24      ],
+25      'defines': [ 'NAPI_DISABLE_CPP_EXCEPTIONS' ], # if this line is commented, all the tests in test_napi_unchecked_type.cpp will not crash the process
+26    },
+27    {
+28      "target_name": "test_napi_memory_leak",
+29      "sources": [ "test_napi_memory_leak.c" ]
+30    }
+31  ]
+32}
+Run the following commands to build the C/C++ extensions:
+
+node-gyp configure
+node-gyp build
+Run specific example:
+1node main.js <test1|test2|...>
+main.js
+1const test_napi_exceptions = require('bindings')('test_napi_exceptions');
+2const test_node_api_assert = require('bindings')('test_node_api_assert');
+3const test_napi_unchecked_type = require('bindings')('test_napi_unchecked_type');
+4const test_napi_memory_leak = require('bindings')('test_napi_memory_leak');
+5
+6function test1(){
+7    console.log('[+] Running test1');
+8    try {
+9        console.log(test_napi_exceptions.test1('foo', 'bar')); // TEST1 - OK
+10        console.log(test_napi_exceptions.test1('foo')); // throws an exception
+11    } catch (e) {
+12        // executed
+13        console.log(e); // TypeError: TEST3 - Err1
+14    }
+15
+16    try {
+17        test_napi_exceptions.test1(1); 
+18        /*
+19            FATAL ERROR: Error::ThrowAsJavaScriptException napi_throw
+20            ...
+21            Aborted
+22        */
+23    } catch (e) {
+24        console.log(e);
+25    }
+26}
+27
+28function test2(){
+29    console.log('[+] Running test2');
+30    try {
+31        console.log(test_napi_exceptions.test2('foo', 'bar')); // TEST2 - OK
+32
+33        console.log(test_napi_exceptions.test2('foo'));
+34         /*
+35        terminate called after throwing an instance of 'Napi::Error'
+36        Aborted
+37        */
+38
+39    } catch (e) {
+40        console.log(e);
+41    }
+42
+43}
+44
+45function test3(){
+46    console.log('[+] Running test3');
+47    console.log(test_napi_exceptions.test3('foo', 'bar', 'baz')); // TEST3 - OK
+48
+49    try {
+50        console.log(test_napi_exceptions.test3('foo', 'bar')); 
+51    } catch (e) {
+52        console.log(e); // TypeError: TEST3 - Error2
+53    }
+54
+55    console.log(test_napi_exceptions.test3('foo')); 
+56    /*
+57        FATAL ERROR: Error::ThrowAsJavaScriptException napi_throw
+58        ...
+59        Aborted
+60    */
+61}
+62
+63function test4(){
+64    console.log('[+] Running test4');
+65    try {
+66        console.log(test_node_api_assert.test1());
+67    } catch (e) {
+68        console.log(e); // TypeError: Wrong number of arguments
+69    }
+70
+71    try {
+72        console.log(test_node_api_assert.test1(1)); // 2
+73
+74        console.log(test_node_api_assert.test1('1'));
+75        /*
+76        node: ../test_Assert.c:24: Test1: Assertion `status == napi_ok' failed.
+77        Aborted
+78        */
+79    } catch (e) {
+80        console.log(e);
+81    }
+82}
+83
+84function test5(){
+85    console.log('[+] Running test5');
+86
+87    console.log(test_napi_unchecked_type.test1('foo')); 
+88    // foo
+89    // TEST1 - OK
+90
+91    console.log(test_napi_unchecked_type.test1({'foo': 'bar'})); 
+92    // [object Object]
+93    // TEST1 - OK
+94
+95    try {
+96        test_napi_unchecked_type.test1({'toString': 'foo'});
+97        /*
+98        FATAL ERROR: Error::New napi_get_last_error_info
+99        ...
+100        Aborted
+101        */
+102    } catch (e) {
+103        console.log(e);
+104    }
+105
+106}
+107
+108function test6(){
+109    console.log('[+] Running test6');
+110
+111    console.log(test_napi_unchecked_type.test2({'foo': 'bar'})); 
+112    // bar
+113    // TEST2 - OK
+114
+115    try {
+116        test_napi_unchecked_type.test2({'foo': {'toString': 'foo'}});
+117        /*
+118        FATAL ERROR: Error::New napi_get_last_error_info
+119        ...
+120        Aborted
+121        */
+122    } catch (e) {
+123        console.log(e);
+124    }
+125
+126}
+127
+128function test7(){
+129    console.log('[+] Running test7');
+130
+131    console.log(test_napi_unchecked_type.test3(1)); 
+132    // 1
+133    // TEST3 - OK
+134
+135    console.log(test_napi_unchecked_type.test3({'foo': 'bar'})); 
+136    // nan
+137    // TEST3 - OK
+138
+139    try {
+140        test_napi_unchecked_type.test3({'toString': 'foo'});
+141        /*
+142        FATAL ERROR: Error::New napi_get_last_error_info
+143        ...
+144        Aborted
+145        */
+146    } catch (e) {
+147        console.log(e);
+148    }
+149
+150}
+151
+152function test8(){
+153    console.log('[+] Running test8');
+154    console.log(test_napi_memory_leak.test1(10)); // Xtest1In
+155    console.log(test_napi_memory_leak.test1(30)); // Xtest1InitTest14
+156
+157}
+158
+159const tests = new Map();
+160tests.set('test1', test1);
+161tests.set('test2', test2);
+162tests.set('test3', test3);
+163tests.set('test4', test4);
+164tests.set('test5', test5);
+165tests.set('test6', test6);
+166tests.set('test7', test7);
+167tests.set('test8', test8);
+168
+169function poc() {
+170    const args = process.argv.slice(2);
+171
+172    const t = args[0];
+173
+174    const test = tests.get(t) || test1;
+175    test();
+176
+177    // never executed
+178    console.log('Done');
+179}
+180
+181poc();
+Unhandled exceptions
+Impact: Denial of Service (DoS)
+The napi API provides different functions to handle exceptions and throw errors. However, depending on the flag used in the binding.gyp file, some attention needs to be taken in order to avoid unexpected crashes.
+For example, if the flag NAPI_DISABLE_CPP_EXCEPTIONS is set in the binding.gyp file, the following scenarios can lead to a process crash (DoS):
+
+Napi::TypeError::New(env, "").ThrowAsJavaScriptException(); in addition to other functions that can generate an error (for example, wrong type argument)
+throw Napi::Error::New not surrounded by try/catch
+Multiple Napi::TypeError::New(env, "").ThrowAsJavaScriptException(); without return that can be reached within the same function
+As explained in the docs, “after throwing a JavaScript exception, the code should generally return immediately from the native callback, after performing any necessary cleanup.” .
+test_napi_exceptions.cpp
+1#include <napi.h>
+2
+3Napi::Value Test1(const Napi::CallbackInfo& info) {
+4    Napi::Env env = info.Env();
+5
+6    std::string data = info[0].As<Napi::String>().Utf8Value();
+7
+8    if (info.Length() < 2) {
+9        Napi::TypeError::New(env, "TEST1 - Error").ThrowAsJavaScriptException();
+10    }
+11    return Napi::String::New(env, "TEST1 - OK");
+12
+13}
+14
+15Napi::Value Test2(const Napi::CallbackInfo& info) {
+16    Napi::Env env = info.Env();
+17
+18    if (info.Length() < 2) {
+19        throw Napi::Error::New(env, "TEST2 - Error");
+20        // missing try-catch
+21    }
+22    return Napi::String::New(env, "TEST2 - OK");
+23
+24}
+25
+26Napi::Value Test3(const Napi::CallbackInfo& info) {
+27    Napi::Env env = info.Env();
+28
+29    // multiple reachable ThrowAsJavaScriptException
+30    if (info.Length() < 2) {
+31        Napi::TypeError::New(env, "TEST3 - Error1").ThrowAsJavaScriptException();
+32    }
+33
+34    if (info.Length() < 3) {
+35        Napi::TypeError::New(env, "TEST3 - Error2").ThrowAsJavaScriptException();
+36    }
+37
+38    return Napi::String::New(env, "TEST3 - OK");
+39
+40}
+41
+42Napi::Object Init(Napi::Env env, Napi::Object exports) {
+43    exports.Set(Napi::String::New(env, "test1"), Napi::Function::New(env, Test1));
+44    exports.Set(Napi::String::New(env, "test2"), Napi::Function::New(env, Test2));
+45    exports.Set(Napi::String::New(env, "test3"), Napi::Function::New(env, Test3));
+46    return exports;
+47}
+48
+49NODE_API_MODULE(addon, Init)
+Run these examples:
+1node main.js test1
+2node main.js test2
+3node main.js test3
+Reachable assert
+Impact: Denial of Service (DoS)
+Looking at the provided examples, we can see that in some examples , assert is used to check the return value of some functions. However, if an assert is reached by tainted values (from the javascript code) during the program execution, it can lead to a crash (DoS). While reviewing some projects, we found several occurrences of reachable asserts in the code logic, so I thought it’s worth mentioning as part of the previous list.
+A possible fix for this scenario would be to check the return value inside an if and then return the appropriate value (depending on the logic of the program), instead of using an assert.
+test_node_api_assert.c
+1#include <assert.h>
+2#include <node_api.h>
+3#include <stdlib.h>
+4
+5static napi_value Test1(napi_env env, napi_callback_info info) {
+6    napi_status status;
+7
+8    size_t argc = 1;
+9    napi_value args[1];
+10    status = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+11    assert(status == napi_ok);
+12
+13    if (argc < 1) {
+14        napi_throw_type_error(env, NULL, "Wrong number of arguments");
+15        return NULL;
+16    }
+17
+18    double value0;
+19    status = napi_get_value_double(env, args[0], &value0);
+20    assert(status == napi_ok); // if value0 is not double, the assert will fail
+21
+22    // potential fix
+23    // if (status != napi_ok) {
+24    //     return NULL;
+25    // }
+26
+27    napi_value sum;
+28    status = napi_create_double(env, value0 + value0, &sum);
+29    assert(status == napi_ok);
+30
+31    return sum;
+32}
+33
+34#define DECLARE_NAPI_METHOD(name, func){ name, 0, func, 0, 0, 0, napi_default, 0 }
+35
+36static napi_value Init(napi_env env, napi_value exports) {
+37    napi_status status;
+38    napi_property_descriptor desc = DECLARE_NAPI_METHOD("test1", Test1);
+39    status = napi_define_properties(env, exports, 1, &desc);
+40    assert(status == napi_ok);
+41    return exports;
+42}
+43
+44NAPI_MODULE(addon, Init)
+Run this example:
+1node main.js test4
+Unchecked data type
+Impact: Denial of Service (DoS)
+napi provides several APIs to coerce JavaScript types. For example,
+Napi::Value::ToString() “returns the Napi::Value coerced to a JavaScript string.” Similarly, Napi::Value::ToNumber() “returns the Napi::Value coerced to a JavaScript number.”
+The napi Napi::Value::ToString() API, under the hood calls napi_coerce_to_string from Node-API:
+1inline MaybeOrValue<String> Value::ToString() const {
+2  napi_value result;
+3  napi_status status = napi_coerce_to_string(_env, _value, &result);
+4  NAPI_RETURN_OR_THROW_IF_FAILED(
+5      _env, status, Napi::String(_env, result), Napi::String);
+6}
+Reference
+Similarly, the napi Napi::Value::ToNumber() API, under the hood calls napi_coerce_to_number from Node-API :
+1inline MaybeOrValue<Number> Value::ToNumber() const {
+2  napi_value result;
+3  napi_status status = napi_coerce_to_number(_env, _value, &result);
+4  NAPI_RETURN_OR_THROW_IF_FAILED(
+5      _env, status, Napi::Number(_env, result), Napi::Number);
+6}
+Reference
+From the official docs for napi_coerce_to_string: “This API implements the abstract operation ToString() as defined in Section 7.1.13 of the ECMAScript Language Specification. This function potentially runs JS code if the passed-in value is an object.” This means that if the user input defines a toString property, the value of that property will be returned (instead of calling the toString()), leading to unexpected results.
+If we call other methods on the values returned by Napi::Value::ToString(), and the input defines a property toString, we can occur in an exception, most of the time leading to the process crash. The same holds for napi_coerce_to_number.
+Vulnerable pattern:
+
+calls like Napi::String::Utf8Value() on an Napi::Value resulted from ToString() or ToNumber without proper type checking
+A possible remediation to avoid these scenarios, is to check if the value returned from Napi::Value::ToString() or Napi::Value::ToNumber() are, respectively, string or number before calling other methods on these values.
+NOTE: Like the unhandled exceptions cases mentioned previously, these issues occur if the flag NAPI_DISABLE_CPP_EXCEPTIONS is set in the binding.gyp file.
+test_napi_unchecked_type.cpp
+1#include <napi.h>
+2#include <iostream>
+3
+4Napi::Value Test1(const Napi::CallbackInfo& info) {
+5    Napi::Env env = info.Env();
+6
+7    // possible fix
+8    /*
+9        if (!info[0].IsString()) {
+10            return Napi::String::New(env, "TEST1 - Input is not a string");
+11        }
+12    */
+13
+14    std::string data = info[0].As<Napi::String>().ToString().Utf8Value();
+15
+16    std::cout << data << "\n";
+17
+18    return Napi::String::New(env, "TEST1 - OK");
+19}
+20
+21Napi::Value Test2(const Napi::CallbackInfo& info) {
+22    Napi::Env env = info.Env();
+23
+24    Napi::Object obj = info[0].As<Napi::Object>();
+25
+26    std::string data = obj.Get("foo").ToString().Utf8Value();
+27
+28    std::cout << data << "\n";
+29
+30    return Napi::String::New(env, "TEST2 - OK");
+31}
+32
+33Napi::Value Test3(const Napi::CallbackInfo& info) {
+34    Napi::Env env = info.Env();
+35
+36    double data = info[0].As<Napi::String>().ToNumber().DoubleValue();
+37    std::cout << data << "\n";
+38
+39    return Napi::String::New(env, "TEST3 - OK");
+40}
+41
+42Napi::Object Init(Napi::Env env, Napi::Object exports) {
+43    exports.Set(Napi::String::New(env, "test1"),Napi::Function::New(env, Test1));
+44    exports.Set(Napi::String::New(env, "test2"),Napi::Function::New(env, Test2));
+45    exports.Set(Napi::String::New(env, "test3"),Napi::Function::New(env, Test3));
+46    return exports;
+47}
+48
+49NODE_API_MODULE(addon, Init)
+Run these examples:
+1node main.js test5
+2node main.js test6
+3node main.js test7
+Memory leaks
+Impact: Information Disclosure
+The napi API provides several methods to create a JavaScript string value from a UTF8, UTF16-LE or ISO-8859-1 encoded C string. These APIs are:
+
+napi_create_string_utf8
+napi_create_string_utf16
+napi_create_string_latin1
+All these methods have the same signature:
+1napi_create_string_*(napi_env env, const char* str, size_t length, napi_value* result)
+The interesting value to carefully check is the [in] length, that is, the length of the string in bytes. If this value is controlled by an attacker or is hardcoded and the input value is tainted, then it’s possible to store in the result value, unexpected memory values.
+To avoid such problems, use NAPI_AUTO_LENGTH for the size_t length value.
+Vulnerable pattern:
+
+napi_create_string_* with size_t length greater than the length of the const char* str
+test_napi_memory_leak.c
+1#include <assert.h>
+2#include <node_api.h>
+3
+4napi_value Test1(napi_env env, napi_callback_info info) {
+5    napi_status status;
+6
+7    size_t argc = 1;
+8
+9    napi_value args[1];
+10
+11    status = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+12    assert(status == napi_ok);
+13
+14    int32_t n;
+15    status = napi_get_value_int32(env, args[0], &n);
+16    assert(status == napi_ok);
+17
+18    napi_value result;
+19
+20    // leak n bytes
+21
+22    status = napi_create_string_utf8(env, "X", n, &result);  
+23
+24    // status = napi_create_string_utf16(env, u"X", n, &result);
+25
+26    // status = napi_create_string_latin1(env, "X", n, &result);
+27
+28    assert(status == napi_ok);
+29
+30    return result;
+31}
+32
+33#define DECLARE_NAPI_METHOD(name, func){ name, 0, func, 0, 0, 0, napi_default, 0 }
+34
+35static napi_value Init(napi_env env, napi_value exports) {
+36    napi_status status;
+37
+38    napi_property_descriptor desc[] = {
+39        DECLARE_NAPI_METHOD("test1", Test1),
+40    };
+41
+42    status = napi_define_properties(env, exports, sizeof(desc) / sizeof(*desc), desc);
+43    assert(status == napi_ok);
+44    return exports;
+45}
+46
+47NAPI_MODULE(addon, Init)
+Run this example:
+1node main.js test8
+Methodology
+To test and find as many issues as possible automatically, I used the following approach to leverage the power of Snyk Code:
+
+Create a dataset of npm packages that calls C/C++ using NodeJS add-on APIs
+Write security rules in Snyk Code to model:Sources: in this context, sources are values coming from JavaScript code, that could be data coming Napi::CallbackInfo::Env() in the context of napi - or napi_get_value_* - in the context of node_apiSinks: depending on the security issue, I modeled the presence of multiple ThrowAsJavaScriptException calls within the same function, the assert check, and several methods used to create string values (just to name a few). I also took into account situations where the code is not vulnerable because of the presence of some arguments like NAPI_AUTO_LENGTH in case of Memory Leak issues
+
+Sources: in this context, sources are values coming from JavaScript code, that could be data coming Napi::CallbackInfo::Env() in the context of napi - or napi_get_value_* - in the context of node_api
+Sinks: depending on the security issue, I modeled the presence of multiple ThrowAsJavaScriptException calls within the same function, the assert check, and several methods used to create string values (just to name a few). I also took into account situations where the code is not vulnerable because of the presence of some arguments like NAPI_AUTO_LENGTH in case of Memory Leak issues
+Write rules that use the sink and sources defined to perform a taint analysis, to track taint from sources to sink
+Use the sources defined in the the existing rules we support (for example, Buffer Overflow or Integer Overflow), so that I can cover even more C/C++ vulnerabilities (not only those specific that use NodeJS add-ons APIs)
+Run these rules against the previously built dataset
+Manually review the results and eventually build a PoC
+Using this approach, I was able to find several issues in npm packages by modeling the relevant APIs related to the NodeJS add-ons by using Snyk Code.
+However, for some of the issues found, I sampled some projects from the dataset build and manually reviewed them.
+Outcomes
+Multiple vulnerabilities in packages were found as a result of this research. These can be found below
+
+CVE-2024-21521
+CVE-2024-21522
+CVE-2024-21523
+CVE-2024-21524
+CVE-2024-21525
+CVE-2024-21526
+Conclusion
+On a personal note, this research was an incredible learning experience for several reasons. I had the opportunity to deep-dive into the world of NodeJS add-ons, review existing literature about existing issues, and try to model some scenarios using Snyk Code to find issues in a large set of repositories.
+While I’m pretty familiar with JavaScript and many other languages, C/C++ is a language that I recently started learning due to the work we did (and are still doing) to support multiple security rules that are now available to Snyk Code customers. Combining both aspects, learning experience and the opportunity to use Snyk Code to model several security issues, I really enjoyed this research, and for this, I want to thank Snyk for the opportunity provided.
+References
+
+[1] Bilingual Problems: Studying the Security Risks Incurred by Native Extensions in Scripting Languages - Cristian-Alexandru Staicu and Sazzadur Rahaman and Àgnes Kiss and Michael Backes, Proceedings of the 32nd USENIX Conference on Security Symposium, 2021
+Node-API - https://nodejs.org/api/n-api.html
+node-addon-api - https://github.com/nodejs/node-addon-api
+C++ addons - https://nodejs.org/api/addons.html
+
+node_api.h: Node-API
+node_api.h
+napi.h: C++ wrapper around Node-API
+napi.h
+Memory leaks
+Unchecked type (DoS)
+Reachable assertion (DoS)
+Unhandled exceptions (DoS)
+Buffer overflow
+Integer overflow
+node-gyp
+package.json
+binding.gyp
+node-gyp configure
+node-gyp configure
+node-gyp build
+node-gyp build
+main.js
+napi
+binding.gyp
+NAPI_DISABLE_CPP_EXCEPTIONS
+binding.gyp
+Napi::TypeError::New(env, "").ThrowAsJavaScriptException(); in addition to other functions that can generate an error (for example, wrong type argument)
+Napi::TypeError::New(env, "").ThrowAsJavaScriptException();
+throw Napi::Error::New not surrounded by try/catch
+throw Napi::Error::New
+try/catch
+Multiple Napi::TypeError::New(env, "").ThrowAsJavaScriptException(); without return that can be reached within the same function
+Napi::TypeError::New(env, "").ThrowAsJavaScriptException();
+return
+test_napi_exceptions.cpp
+assert
+assert
+if
+assert
+test_node_api_assert.c
+napi
+Napi::Value::ToString()
+Napi::Value::ToNumber()
+napi
+Napi::Value::ToString()
+napi_coerce_to_string
+napi
+Napi::Value::ToNumber()
+napi_coerce_to_number
+napi_coerce_to_string
+toString
+toString()
+Napi::Value::ToString()
+toString
+napi_coerce_to_number
+calls like Napi::String::Utf8Value() on an Napi::Value resulted from ToString() or ToNumber without proper type checking
+Napi::String::Utf8Value()
+Napi::Value
+ToString()
+ToNumber
+Napi::Value::ToString()
+Napi::Value::ToNumber()
+NAPI_DISABLE_CPP_EXCEPTIONS
+binding.gyp
+test_napi_unchecked_type.cpp
+napi
+napi_create_string_utf8
+
+napi_create_string_utf8
+
+napi_create_string_utf16
+
+napi_create_string_utf16
+
+napi_create_string_latin1
+napi_create_string_latin1
+
+[in] length
+result
+NAPI_AUTO_LENGTH
+size_t length
+napi_create_string_* with size_t length greater than the length of the const char* str
+napi_create_string_*
+size_t length
+const char* str
+test_napi_memory_leak.c
+Create a dataset of npm packages that calls C/C++ using NodeJS add-on APIs
+Write security rules in Snyk Code to model:
+
+Sources: in this context, sources are values coming from JavaScript code, that could be data coming Napi::CallbackInfo::Env() in the context of napi - or napi_get_value_* - in the context of node_api
+Sinks: depending on the security issue, I modeled the presence of multiple ThrowAsJavaScriptException calls within the same function, the assert check, and several methods used to create string values (just to name a few). I also took into account situations where the code is not vulnerable because of the presence of some arguments like NAPI_AUTO_LENGTH in case of Memory Leak issues
+Sources: in this context, sources are values coming from JavaScript code, that could be data coming Napi::CallbackInfo::Env() in the context of napi - or napi_get_value_* - in the context of node_api
+Napi::CallbackInfo::Env()
+napi
+napi_get_value_*
+node_api
+Sinks: depending on the security issue, I modeled the presence of multiple ThrowAsJavaScriptException calls within the same function, the assert check, and several methods used to create string values (just to name a few). I also took into account situations where the code is not vulnerable because of the presence of some arguments like NAPI_AUTO_LENGTH in case of Memory Leak issues
+ThrowAsJavaScriptException
+assert
+NAPI_AUTO_LENGTH
+Write rules that use the sink and sources defined to perform a taint analysis, to track taint from sources to sink
+Use the sources defined in the the existing rules we support (for example, Buffer Overflow or Integer Overflow), so that I can cover even more C/C++ vulnerabilities (not only those specific that use NodeJS add-ons APIs)
+Run these rules against the previously built dataset
+Manually review the results and eventually build a PoC
+CVE-2024-21521
+CVE-2024-21522
+CVE-2024-21523
+CVE-2024-21524
+CVE-2024-21525
+CVE-2024-21526
+[1] Bilingual Problems: Studying the Security Risks Incurred by Native Extensions in Scripting Languages - Cristian-Alexandru Staicu and Sazzadur Rahaman and Àgnes Kiss and Michael Backes, Proceedings of the 32nd USENIX Conference on Security Symposium, 2021
+Node-API - https://nodejs.org/api/n-api.html
+node-addon-api - https://github.com/nodejs/node-addon-api
+C++ addons - https://nodejs.org/api/addons.html

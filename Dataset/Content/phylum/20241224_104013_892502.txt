@@ -1,0 +1,264 @@
+
+One of the biggest challenges with application security fundamentally comes from the amount of data that must be reasoned about. Nowhere is this more true than the moderation of issues stemming from open-source packages - it is easy for teams to be totally inundated with issues and findings.
+One of Phylum’s key design goals was to help address this issue: Provide users with the tools they need in order to proactively reduce the number of false positives they face, by allowing better automation from start to finish. It’s with these tools we start to really enable the building blocks of automation, and to that end, allowing better integration into the overall development ecosystem.
+Phylum provides robust tools to proactively manage policy and allows organizations to create custom options to address more granular needs. As an example, we will explore the development of a custom policy framework to enable automated triage of issues, as well as proactive screening of major engineering hygiene and compliance problems.
+We will start here with a slightly more in-depth, custom version of the existing NPM shim extension, a tool that enforces default project policy when installing npm packages. This custom extension will do some additional custom validation before allowing the installation process to continue.
+First, per the API documentation, we will start with the manifest file for our new extension - PhylumExt.toml:
+name = "npm-policy" 
+description = "Example custom policy extension" 
+entry_point = "main.ts" 
+[permissions] 
+  read = ["./package.json", "./package-lock.json"] 
+  write = ["./package.json", "./package-lock.json"] 
+  run = ["npm"]
+Now, let’s start working on the custom policy extension. First, create a basic skeleton in main.ts that essentially emulates the behavior of the linked shim extension. In the current implementation of the extension API, the first two command line arguments (the binary path + first value - what would usually be contained in arg[0] and arg[1] are effectively consumed before the extension itself is invoked. This means that once the extension is installed, since the registered name is npm-policy, we can invoke the CLI with the following command: phylum npm-policy install packageX, Deno.args[0] will contain install and Deno.args[1] will contain packageX.
+Starting with a rough analog to the npm policy shim, we get something similar to the following:
+import { PhylumApi } from 'phylum'; 
+ 
+const LOCKFILE_NAME = "./package-lock.json"; 
+const PACKAGEFILE_NAME = "./package.json"; 
+ 
+type NullableString = string | null; 
+ 
+ 
+// This method will return a promise containing a null value if the file is  
+// missing, and the containing text otherwise.  
+async function readTextFileIfExists(path: string): Promise <NullableString> { 
+  try { 
+    // We will attempt to read the contents of an existing 
+    // lockfile, if one exists. This will let us restore 
+    // the data after we perform our analysis. 
+    return await Deno.readTextFile(path);  
+  } catch(e) { 
+    // Pass - we will just know that we won't need to _restore_ the lockfile after 
+    //  the operation is complete if we have no file content. 
+    return null; 
+  } 
+ 
+}
+
+// Method to attempt: generating a new lockfile, parsing said lockfile, and 
+// performing analysis on the contained package information. 
+async function preAnalyzeNpm(subcmd: string, args: string[]): Promise <Object> { 
+  try { 
+    // Attempt to leverage npm to generate a new lockfile based on the 
+    // provided arguments 
+    await Deno.run({ 
+      cmd: ['npm', subcmd, '--package-lock-only', ...args], 
+      stdout: 'piped', 
+      stderr: 'piped', 
+    }).status();
+ 
+    // Attempt to parse the new lockfile - if that fails, we will return 
+    // an error.  
+    const lockFile = await PhylumApi.parseLockFile(LOCKFILE_NAME, 'npm'); 
+    if(!lockFile.packages.length) 
+       return {pass: false, message: 'error: no packages found in lockfile'};
+       
+    // Analyze the underlying packages, and get back the job information 
+    const jobId = await PhylumApi.analyze('npm', lockFile.packages); 
+    const results = await PhylumApi.getJobStatus(jobId);
+ 
+    // Give back the results 
+    return results; 
+ 
+  } catch(e) { 
+    // An error occurred along the way - likely with command execution or similar 
+    return {pass: false, message: `error: analysis attempt failed! ${e}`}; 
+  } 
+}
+ 
+ 
+async function runNpmAnalysis(): Promise<Object> { 
+  // First, we will capture the existing text within both the  
+  // package and lockfiles. 
+  const packageList = readTextFileIfExists(PACKAGEFILE_NAME); 
+  const lockfile = readTextFileIfExists(LOCKFILE_NAME); 
+  // We can't _really_ proceed without a package.json. 
+  if(!packageList) 
+    return {pass: false, message: "package.json is missing"}; 
+ 
+  // Attempt the analysis 
+  const data = preAnalyzeNpm(Deno.args[0], Deno.args.slice(1)); 
+  try { 
+    // We now need to restore the lockfile and package.json.  
+    // Since we dont know if we want to allow the installation to 
+    // proceed just yet. 
+    await Deno.writeTextFile(PACKAGEFILE_NAME); 
+    if(lockfile) 
+      await Deno.writeTextFile(LOCKFILE_NAME); 
+    else 
+      await Deno.remove(LOCKFILE_NAME); 
+  } catch(e) { 
+    console.error(`Error: failed to restore either package or lockfile! ${e}`); 
+  } 
+ 
+  // Give back the data to the user. 
+  return data; 
+}
+ 
+ 
+const args = new Set(['install', 'isntall', 'update', 'udpate']); 
+ 
+if(Deno.args.length >= 1 && args.has(Deno.args[0])) { 
+  // Attempt the analysis if we meet the criteria above 
+  const res = await runNpmAnalysis(); 
+  // Now we will do some basic validation - this basically 
+  // gets us parity with the current extension: 
+  if(!res.pass) { 
+    if(res.message) { 
+      console.error(`An error occurred while attempting to check - ${res.message}`) 
+      Deno.exit(-1); 
+    } 
+ 
+    console.error("the installation attempt triggered a policy failure!"); 
+    Deno.exit(-2); 
+  } 
+   
+  if('complete' !== res.status) { 
+    console.warn("Scan is incomplete - please try again shortly!"); 
+    Deno.exit(-3); 
+  } 
+  // TODO: Add more validation  
+} 
+ 
+ 
+console.log("[phylum] installation ok to proceed..."); 
+ 
+const status = await Deno.run({cmd: ['npm', ...Deno.args]}).status(); 
+ 
+Deno.exit(status);
+Now, start to drill into specific issues. Add logic to filter for certain types of licenses, or even apply local environment checks. Probably the best place to start our journey would be the Phylum API documentation around the actual analysis object. This gives us a spot to start digging into the types of findings that may come back. From that perspective, start by adding a set of new methods that can be plumbed through to handle the extra validations. From this view, make sure that this API is flexible and easy to extend. A suggestion to start with is as follows:
+// First, we will define our "filter" type to handle examination of each 
+// package analysis result that comes back from our request. We will return 
+// an error message to display to the user if the check fails, or null if  
+// the package is ok to use. 
+type Filter = (pkg: Object) => NullableString; 
+ 
+// Our validation method will take a list of packages (from our API response), 
+// and a list of "filter" methods (as defined above). It will return an error 
+// message to display to the user if the checks fail, or null if all pass. 
+const packageValidator = (pkgList: Object[], fltList: Filter[]): NullableString => { 
+  let errorMessages = []; 
+ 
+  // We will walk through the list of packages here 
+  for(const pkg of pkgList) { 
+     // For each package, we will apply each provided 
+     // filter method, and add the result to our list 
+     // of errors if a problem is found. 
+     for(const flt of fltList) { 
+       const res = flt(pkg); 
+       if(res) 
+         errorMessages.push(res); 
+     } 
+  } 
+ 
+  // Now we will return either a consolidated error list, or null. 
+  if(errorMessages.length) 
+    return errorMessages.join("\n"); 
+ 
+  return null; 
+}
+Now that there is a general framework, you can apply rules. If you take the operative block of code from the first example where we left our // TODO: initially, you can start by slotting in the new filter method:
+// ... 
+ 
+// TODO: populate with new filters! 
+const filterMethods: Filter[] = []; 
+ 
+if(Deno.args.length >= 1 && args.has(Deno.args[0])) { 
+  // Attempt the analysis if we meet the criteria above 
+  const res = await runNpmAnalysis(); 
+  // Now we will do some basic validation - this basically 
+  // gets us parity with the current extension: 
+  if(!res.pass) { 
+    if(res.message) { 
+      console.error(`An error occurred while attempting to check - ${res.message}`) 
+      Deno.exit(-1); 
+    } 
+ 
+    console.error("the installation attempt triggered a policy failure!"); 
+    Deno.exit(-2); 
+  } 
+   
+  if('complete' !== res.status) { 
+    console.warn("Scan is incomplete - please try again shortly!"); 
+    Deno.exit(-3); 
+  } 
+  // Now, we slot in our filter method, and provide the package list from 
+  // our previous analysis 
+  const filteredResult = packageValidator(res.packages, filterMethods); 
+  if(filteredResult) { 
+    // If we have landed here, that means at least one error was returned. 
+    // In that case, we will print the error message to the user and exit. 
+    console.error(filteredResult); 
+    Deno.exit(-4); 
+  } 
+ 
+  // Otherwise, our new filter methods have passed - this means we are free to 
+  // continue as before. 
+} 
+ 
+// ...
+The point has now been reached where it makes sense to start adding in filters. For this, start with a view of what the actual package structure will look like. You should receive a call to each of the filters for each package structure returned by the API. This will have a set of fields describing various attributes of the package, and optionally a list of issues. To keep things simple, start by writing a rule that filters packages with certain, restrictive licenses. This could include GPL or AGPL software, so it simply can’t be installed anymore from here on out.
+// List of validators to check licenses against 
+const disallowedLicenses = [/(A|L)?GPL-\d+.*/, /CC-BY-.*/]; 
+ 
+const licenseValidator = (pkg: Object): NullableString => { 
+  // Now we will walk through the list of disallowed license regexes, 
+  // and if any match, we will return an error.  
+  for(const license of disallowedLicenses) 
+    if(license.test(pkg.license)) 
+      return `disallowed license ${pkg.license} in ${pkg.name}:${pkg.version}`; 
+       
+  return null; 
+}
+Perhaps in addition to this, you want to add in some filters to help manage against actual issues returned by the API; in this case, keep the example simple and focus on filtering malware issues above a threshold of “medium,” and all other “critical” issues identified:
+const disallowedMalware = new Set(['medium', 'high', 'critical']); 
+ 
+const issueValidator = (pkg: Object): NullableString => { 
+  // Issues are currently defined as: 
+  // { 
+  //    tag: "UNIQUE_ID", 
+  //    title: "issue title", 
+  //    description: "Issue description" 
+  //    severity: "low | medium | high | critical", 
+  //    domain: "malicious_code | author | engineering | license | vulnerability" 
+  // } 
+  for(const issue of pkg.issues) { 
+    // If we encounter _any_ critical issues, we will return now 
+    if('critical' === issue.severity) 
+      return `critical issue ${issue.title} found in ${pkg.name}:${pkg.version}`; 
+ 
+    // Similarly, we will check to see if the issue is both a malware finding, 
+    // and has a severity of medium or higher. 
+    if(issue.domain === 'malicious_code' && disallowedMalware.has(issue.severity)) 
+      return `potential malware ${issue.title} found - ${pkg.name}:${pkg.version}`; 
+  } 
+ 
+  // If we made it here, none of the issues have created an error we need to report 
+  return null; 
+}
+Now, go back and slot in the two new filter methods, and you should have some validation during the installation process while utilizing this new extension:
+// ... 
+ 
+const filterMethods: Filter[] = [licenseValidator, issueValidator]; 
+ 
+if(Deno.args.length >= 1 && args.has(Deno.args[0])) { 
+// ... 
+ 
+  // Now, with the update at the top to filterMethods, we will apply  
+  // our two new filters to each returned package. 
+  const filteredResult = packageValidator(res.packages, filterMethods); 
+  if(filteredResult) { 
+ 
+// ...
+This should provide enough to begin building even stronger policy capabilities on top of Phylum’s tooling and API.
+Ready to create more? Share your contributions with the Phylum community here.
+extension - PhylumExt.toml
+main.ts
+arg[0]
+arg[1]
+phylum npm-policy install packageX, Deno.args[0]
+Deno.args[1]
+packageX
+// TODO:

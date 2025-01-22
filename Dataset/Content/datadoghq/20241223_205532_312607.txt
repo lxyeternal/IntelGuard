@@ -1,0 +1,148 @@
+
+IP addresses play a crucial role in identifying and tracking users for security features like rate limiting and monitoring suspicious activities. However, attackers can exploit vulnerabilities by spoofing IP addresses, making it harder to detect malicious behavior.
+In this post, we explain what IP spoofing is, why it’s a concern in cloud environments, and how it affects systems relying on reverse proxies. We’ll also cover practical steps you can take to protect your applications from this threat.
+What is IP spoofing and why should you care?
+IP spoofing is a set of techniques to trick a victim's web service into believing the request came from a different IP than that of an attacker. Since many safety features such as rate limiting or impossible travel detection rely on IP addresses, spoofing them is a serious threat. An attacker who succeeds in doing so would be able to rotate the apparent IP at no cost and evade scrutiny.
+“But wait,” you’ll say. “We’re talking about HTTP. How is it possible to fake the IP in a TCP connection? Aren’t you going to break the handshake?” You’re right, but Layer 7 of the OSI model introduces complexities that sometimes interrupt the TCP connection. For instance, in the case of reverse proxies (such as load balancers, CDNs, or WAFs), the HTTP transaction needs to be received and processed before being forwarded. This breaks the direct TCP connection to the application server: the TCP source IP will be the internal IP address of the load balancer.
+That can become a problem if you need the user’s IP for security features (such as rate limiting) as it did multiple times in the past (see HackerOne reports #1011767, #1072277, #855013, or #1206777). For example, consider this simplistic rate limiting feature, which assumes that only a single instance of our application is running:
+// Implement a login endpoint that rejects any login attempt from an IP with more than 10 failures
+app.get('/login', (req, res) => {
+  if (loginFailures[req.ip] > 10) { // Check rate limiting
+    failure(res);
+  } else if(login(req)) {           // Try to login
+    success(res);
+  } else {                          // In case of failures, increase the failure counter
+    loginFailures[req.ip] = (loginFailures[req.ip] || 0) + 1;
+    failure(res);
+  }
+});
+Thankfully, web developers have found a way to work around this problem: a (semi) standard header where the reverse proxy will write the IP address it saw as the TCP source. If multiple devices process the request, each new IP is appended to the list:
+X-Forwarded-For: 103.0.113.165, 60.91.3.17
+In this example, the request initially originated from 103.0.113.165 was processed by 60.91.3.17, and a final device (the TCP source) before reaching the application server.
+Unfortunately, there is a problem here: there is no way for the application receiving the HTTP request to validate this header. The application server has no way to know which IPs were added by internal network devices and which were faked by an attacker.
+For instance, in the example above, this could either be a request coming from 103.0.113.165 that went through two proxies, or a malicious 60.91.3.17 that sent a request with a forged X-Forwarded-For HTTP header, which was then processed by a single proxy. In the latter case, 103.0.113.165 was never involved with this connection: the HTTP header was simply written in the initial request by the attacker and trusted by the internal proxies.
+curl -H "X-Forwarded-For: 103.0.113.165" "http://myapp.com/endpoint"
+How big a problem is this anyway?
+We decided to investigate how big of an attack surface this IP spoofing attack vector really was by looking at our global telemetry, representing thousands of organizations.
+Our findings show that over 32 percent of organizations received requests with X-Forwarded-For headers, whether legitimate or not. Around half of these also received trusted vendor headers (like Cloudflare’s). With proper configuration, these organizations can leverage these trusted vendor headers and are safe from IP spoofing (marked in green).
+What this means is that a third of organizations have to take active measures to deal with IP spoofing, and a sixth of them (depicted in yellow below) don’t have an easy solution for this, since they don’t have any header they can trust. We suspect that this figure extrapolates to the greater web.
+That’s bad, but are attackers looking at it?
+Unfortunately, yes.
+Analyzing thousands of applications, we identified that 14 percent of organizations had applications seeing very few requests with X-Forwarded-For (XFF) headers compared to their overall traffic. This means that these applications weren't exposed behind a reverse proxy, and thus that those attempts are user-provided X-Forwarded-For which are likely to be malicious probing.
+Finally, we noticed inconsistent headers (i.e., headers with a variable number of IPs in them) in applications from another 11 percent of organizations in our dataset. This either means that these applications have a complex network topology (a variable number of reverse proxies), or that there is spoofing activity. We believe that it’s unlikely that such a high share of organizations have such complex network topologies, hinting at abuse.
+How to defend yourself?
+There is no way, from a single request and with no outside context, to know if the header is legitimate or not. Therefore, there are two solutions: either making sure the header is always trustworthy, or telling the application what to trust.
+Reset the X-Forwarded-For header at the edge
+The simplest solution is to configure the networking at your edge (e.g., CDN or load balancer) to drop the X-Forwarded-For header. Don’t trust any proxy outside your control. This method may sometimes result in false positives (e.g., university proxies) where many different users will share the same IP, but it at least keeps you safe. It also has the upside that even if you introduce new services, you don’t need to configure them—it all works out of the box.
+Unfortunately, the large cloud providers don’t offer this feature in their application load balancers (e.g., AWS ALB and Google Cloud CLB): you can’t drop the existing content of the X-Forwarded-For header and still append the latest client IP.
+Use manual sanitization
+Azure’s Application Gateway works a little bit differently in not enriching the X-Forwarded-For header by default and requiring you to configure the transformation. Other cloud providers offer similar capability, although they don’t advertise them for this purpose (AWS’s Lambda@Edge, for instance).
+This is a decent solution since it empowers the engineer, but it comes with the requirement of being aware of the problem. Many security issues are caused by not being aware of the risk, so this solution feels unsatisfactory.
+Use a platform-specific, trusted HTTP header
+As a more resource-intensive but still effective solution, you can tell (each of) your applications which header to trust. CDNs often write the TCP source IP to custom headers:
+
+CF-Connecting-IP for Cloudflare
+Fastly-Client-IP for Fastly
+True-Client-IP for Akamai
+CloudFront-Viewer-Address for CloudFront
+Using these, you can ignore X-Forwarded-For. Since those headers contain a single IP and are cleared by the CDN, it's safe to trust them. You simply need to tell your application to use this header (see examples for Spring Boot and Django).
+However, this method requires the security team to reach out to each service owner and ensure they’re properly configuring this setting, instead of being able to roll out one protection once and for all.
+Trust only the last value of the X-Forwarded-For header
+If you rely on one of the cloud load balancers above, you can tell the application server how “deep” to trust the header. You could tell it, “I only have one reverse proxy, so I can only trust the last IP that was added. Anything before that didn’t come from me and can’t be trusted.” The support can either come from the application server, such as Express.js or Flask, or from your own code. However, this is harder to roll out since each application needs this code, and if it’s forgotten, the application will still appear to work.
+What should you do?
+Use trustworthy headers
+If you can, sanitize the X-Forwarded-For header by dropping its value at the gateway to your network.
+
+If you’re using a CDN, you may also configure your application server to read the CDN’s header instead of X-Forwarded-For (e.g., Cloudflare, Fastly, Akamai).
+function getClientIp(req) {
+	// Uses the custom header, or the TCP IP if there is no trusted header
+	return req.header('CF-Connecting-IP') || req.socket.remoteAddress;
+}
+At the application level, you can then decide to trust this header to determine the source IP address. For instance, when using Spring Boot, you can use the following configuration:
+server.tomcat.remote-ip-header=cf-connecting-ip
+Configure a custom reverse proxy at the edge
+If you can set up your own nginx instance (or a similarly flexible reverse proxy), you can modify the request to introduce your own safe header.
+http {
+  server {
+    listen 80;
+    server_name example.com;
+
+    location / {
+      # Capture client IP and set as custom header
+      add_header X-Custom-IP-Header $remote_addr;
+
+      # Extra logic...
+    }
+  }
+}
+You can then apply the same code snippet as above with X-Custom-IP-Header, which can only come from your reverse proxy. What’s important here is that you ignore the IP coming from X-Forwarded-For, and don’t parse headers from CDNs you’re not using (since they could be forged just as easily as X-Forwarded-For).
+If you're on AWS, you can deploy a Lambda@Edge function in front of your Application Load Balancer:
+'use strict';
+
+exports.handler = async (event) => {
+    // Get the request object
+    const request = event.Records[0].cf.request;
+
+    // Get the client's IP address from the request
+    const clientIp = request.clientIp;
+
+    // Add the custom header with the client's IPﬁ
+    request.headers['x-custom-ip-header'] = [{ 
+        key: 'X-Custom-IP-Header', 
+        value: clientIp 
+    }];
+
+    // Return the modified request
+    return request;
+};
+Instruct the framework how to parse the X-Forwarded-For header
+If you’re using one of the services that doesn’t let you sanitize the header or create a more trusted one, you have to implement logic (or use framework features) to pick the last trusted IP of the header instead of the oldest one.
+For instance, if you’re using Express.js and you know that you have a single load balancer, you can add the following snippet to ensure it extracts the last trustworthy IP (i.e., the second newest, the one that originated the request to the load balancer).
+app.set('trust proxy', 1);
+
+// In route handling code
+clientIp = req.ip;
+Conclusion
+In this post, we reviewed some of the challenges for applications to access the client's real IP, depending on the architecture in use. We also identified that attackers often like to exploit these flaws, and that there are no satisfactory standards working across cloud providers and architecture patterns. It's worth noting that these challenges also apply to gRPC.
+Thanks for reading and stay tuned for upcoming posts! You can subscribe to our monthly newsletter to receive our latest research in your inbox, or use our RSS feed.
+Annex: Methodology
+For our analysis in the How big of a problem is this anyway? section, we examined APM traces and spans from thousands of organizations over a one-week period in October 2024.
+
+Organizations in the X-Forwarded-For and additional vendor header bucket include those receiving HTTP requests containing both an X-Forwarded-For header and a vendor-specific header, such as x-real-ip, true-client-ip, x-client-ip, x-forwarded, forwarded-for, x-cluster-client-ip, fastly-client-ip, cf-connecting-ip, or cf-connecting-ipv6.
+Organizations in the X-Forwarded-For only bucket include those receiving HTTP requests containing only the X-Forwarded-For header (and no vendor-specific headers listed above).
+Organizations in the No IP header bucket had HTTP requests with either the X-Forwarded-For header or any of the listed vendor-specific headers.
+For our analysis in the That’s bad, but are attackers looking at it? section, we again examined APM traces and spans from thousands of organizations over the same period.
+
+Organizations in the XFF with variable number of hops bucket include those with at least one service receiving X-Forwarded-For headers showing an inconsistent number of hops across their HTTP requests.
+Organizations in the Low number of XFF bucket include those with at least one service receiving a comparatively low volume of X-Forwarded-For headers relative to overall HTTP traffic.
+The Normal XFF bucket contains organizations that do not fall into the other categories. This designation does not imply the X-Forwarded-For header was necessarily valid or benign.
+103.0.113.165
+60.91.3.17
+103.0.113.165
+60.91.3.17
+103.0.113.165
+X-Forwarded-For
+X-Forwarded-For
+X-Forwarded-For
+X-Custom-IP-Header
+X-Forwarded-For and additional vendor header
+X-Forwarded-For
+x-real-ip
+true-client-ip
+x-client-ip
+x-forwarded
+forwarded-for
+x-cluster-client-ip
+fastly-client-ip
+cf-connecting-ip
+cf-connecting-ipv6
+X-Forwarded-For only
+X-Forwarded-For
+No IP header
+X-Forwarded-For
+XFF with variable number of hops
+X-Forwarded-For
+Low number of XFF
+X-Forwarded-For
+Normal XFF
+X-Forwarded-For

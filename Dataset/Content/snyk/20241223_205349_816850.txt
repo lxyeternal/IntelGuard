@@ -1,0 +1,139 @@
+
+We just released parlay, a new open source tool that can enrich SBOMs with additional information. You can read more in the announcement blog post. In that post, we briefly mentioned why this is important for decision-making based on SBOM data, but thought a few quick examples might be interesting.
+parlay can add a lot of extra information to an SBOM, and we can use that information to write more powerful policies. While lines of JSON aren’t a perfect barometer, you can see in this particular example that the SBOM grew by more than 400% — which opens up lots of use cases.
+1$ snyk sbom --format cyclonedx1.4+json | jq | wc -l
+2    262
+3$ snyk sbom --format cyclonedx1.4+json | parlay e enrich - | jq | wc -l
+4    1169
+License policies
+An SBOM with just the minimum elements won’t have information about the licenses that apply to the included packages. Let’s use Parlay and the Ecosyste.ms data to add that information.
+snyk sbom --format cyclonedx1.4+json | parlay e enrich -
+Now that we have a richer SBOM, we can write more powerful policies. For this example, we’ll use Open Policy Agent and its powerful Rego programming language. Here we create two lists of policies, one to deny and one to warn on.
+1package main
+2
+3name = input.metadata.component.name
+4
+5licenses_to_deny = [
+6  "LGPL",
+7]
+8
+9licenses_to_warn = [
+10  "MIT"
+11]
+12
+13deny[msg] {
+14  component := input.components[_]
+15  expression := component.licenses[_].expression
+16  startswith(expression, licenses_to_deny[_])
+17  msg := sprintf("%s is using %s which is licensed with an %s license", [name, component.name, expression])
+18}
+19
+20warn[msg] {
+21    component := input.components[_]
+22    expression := component.licenses[_].expression
+23    startswith(expression, licenses_to_warn[_])
+24    msg := sprintf("%s is using %s which is licensed with an %s license", [name, component.name, expression])
+25}
+Let’s continue our love of Unix pipes and use Conftest to apply that policy to the enriched SBOM.
+snyk sbom --format cyclonedx1.4+json | parlay e enrich - | conftest test -
+In the example project, this issued a series of warnings about certain packages using indicated licenses.
+1WARN - - main - snykit is using diff-lcs which is licensed with an MIT license
+2WARN - - main - snykit is using mustermann which is licensed with an MIT license
+3WARN - - main - snykit is using nio4r which is licensed with an MIT license
+4WARN - - main - snykit is using puma-metrics which is licensed with an MIT license
+5WARN - - main - snykit is using rack which is licensed with an MIT license
+6WARN - - main - snykit is using rack-protection which is licensed with an MIT license
+7WARN - - main - snykit is using rack-test which is licensed with an MIT license
+8WARN - - main - snykit is using rake which is licensed with an MIT license
+9WARN - - main - snykit is using rspec which is licensed with an MIT license
+10WARN - - main - snykit is using rspec-core which is licensed with an MIT license
+11WARN - - main - snykit is using rspec-expectations which is licensed with an MIT license
+12WARN - - main - snykit is using rspec-mocks which is licensed with an MIT license
+13WARN - - main - snykit is using rspec-support which is licensed with an MIT license
+14WARN - - main - snykit is using sinatra which is licensed with an MIT license
+15WARN - - main - snykit is using tilt which is licensed with an MIT license
+16
+1716 tests, 1 passed, 15 warnings, 0 failures, 0 exceptions
+Vulnerability policies
+Let’s try something a bit more complicated. Let’s write a policy to flag vulnerabilities over a certain CVSS score in direct dependencies. This is a good example of when you need package data, dependency data, and vulnerability data.
+1deny[msg] {
+2  vulnerability := input.vulnerabilities[_]
+3  rating := vulnerability.ratings[_]
+4  rating.source.name == "Snyk"
+5  rating.score > max_cvss_score
+6  component := input.components[_]
+7  bom_ref = vulnerability["bom-ref"]
+8  component["bom-ref"] == bom_ref
+9
+10  root = input.metadata.component["bom-ref"]
+11
+12  dependency := input.dependencies[_]
+13  dependency.ref == root
+14
+15  direct := dependency.dependsOn[_]
+16  direct == bom_ref
+17
+18  msg := sprintf("%s version %s has a vulnerability with a CVSS score of %s", [component.name, component.version, round(rating.score)])
+19}
+20
+21round(n) = f {
+22  f := sprintf("%.2f", [n])
+23  contains(f, ".") # Ensure that it was a float
+24}
+25
+26round(n) = f {
+27  not contains(sprintf("%.2f", [n]), ".") # Test if it wasn't a float
+28  f := sprintf("%v.00", [n]) # Fudge the decimals for integer values
+29}
+We can then generate or take our SBOM, enrich it using the Snyk vulnerability data, and then apply our policy using Conftest.
+1snyk sbom --format cyclonedx1.4+json | parlay s enrich - | conftest test -
+2FAIL - - main - puma version 4.2.1 has a vulnerability with a CVSS score of 9.10
+3
+43 tests, 2 passed, 0 warnings, 1 failure, 0 exceptions
+Here we see it reporting on one vulnerability that matched our criteria.
+Remember, this is just an example. The Rego language used by Open Policy Agent can be used to describe complex logic if required. And if you prefer another policy tool, that should work too.
+Who is the author of this software?
+One last quick example. The following example uses parlay to enrich our SBOM, and then uses jq and awk to output some useful information. In this case, we’re pulling out the named author of each package. Again, this information is often not in an SBOM with the minimum elements.
+1$ snyk sbom --format cyclonedx1.4+json | parlay e enrich - | jq -r '(.components[] | [.name, .author]) | @tsv' | awk '{print $1; $1=""; print}'
+2nio4r
+3 Socketry
+4puma
+5 Puma
+6prometheus-client
+7 Prometheus
+8puma-metrics
+9
+10rack
+11 Official Rack repositories
+12rack-test
+13 Official Rack repositories
+14rake
+15 The Ruby Programming Language
+16rspec-support
+17 RSpec
+18rspec-core
+19 RSpec
+20diff-lcs
+21 Austin Ziegler
+22rspec-expectations
+23 RSpec
+24rspec-mocks
+25 RSpec
+26rspec
+27 RSpec
+28ruby2_keywords
+29 The Ruby Programming Language
+30mustermann
+31 Sinatra
+32rack-protection
+33 Sinatra
+34tilt
+35 Jeremy Evans
+36sinatra
+37 Sinatra
+There are lots more things you can do with richer SBOM data, and lots more data that would be useful to enrich SBOMs with as well. Let us know what you’d like to see, and please share examples of your experiments with parlay.
+parlay
+parlay
+parlay
+jq
+awk

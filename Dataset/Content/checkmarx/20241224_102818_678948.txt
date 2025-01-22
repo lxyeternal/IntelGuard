@@ -1,0 +1,147 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_678948\shutterstock_1147086383.jpg
+2 security issues found on spring function cloud.
+The Spring Framework application provides a flexible and comprehensive method for programming and configuring Java-based enterprise applications. One of the main purposes of Spring is to relieve developers from many infrastructural tasks so they can focus on writing application business logic.
+Spring consists of many projects and frameworks (that contain subprojects) where each one has its own objective and can be easily integrated into a larger Spring application. In our research, we focused
+on the Spring Cloud framework and specifically on the Spring cloud function project, which resulted in the findings of a denial of service (DoS) vulnerability and an unintended function invocation. The Cloud framework provides tools for developers to write their applications in a distribution environment, with technologies such as routing, load-balancing, circuit breakers, and more.
+The function project opens an API (via a web endpoint, a stream processor, or a task) to run specific functions which fit a Spring Bean definition, reducing development overhead and boilerplate by mapping the function directly to a route.
+Overview
+Now that we are familiar with the purpose of the project, let’s take a deep dive into the features and code functionality.
+The web endpoint provides two methods to invoke functions:
+
+Via the URI ‘/functionRoute’, where the invoked bean function name is provided in one of the headers: spring.cloud.function.routing-expression / spring.cloud.function.definition.
+Or have the name of the function in the URI itself – for example http://host/function_name.
+Both will end up invoking the same vulnerable function, but we will use the latter in the examples since it is simpler to demonstrate.
+An interesting mechanism is in case the function input’s is an object. Spring will try to construct the object (only if it has a default/nullary constructor) and expose the setters to the user’s input. For instance, we have the function “isBigTree” which gets an object Tree that has a default/nullary constructor and a setter “setHeight”. We can call the function via POST to http://host/isBigTree using the payload {‘height’:50}, the function will receive a Tree object with the height = 50.
+In addition, there is a feature that enables us to chain multiple functions which will be executed one after the other (and pass the output of one as an input to the next one) via the ‘,’ or ‘|’ char. For example, the URL http://host/function_a,function_b, will run function_a and pass its output as an input to function_b.
+So, let’s say function_b receives an object without a default/nullary constructor, we couldn’t call it directly, but in case function_a’s output is the same object type we can chain those functions together.
+Denial-of-Service (DoS) – Flooding the Function Router
+Technical details
+The function name from the URL will end up in the lookup function which will try to determine and retrieve the function itself. The lookup function has a ‘cache’ mechanism that caches functions that have already been invoked in order to save time on subsequent lookups.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_678948\Photo_1925x10241.png
+The check if the function is in the cache is done in the doLookup call (line 114). In case the function is null, indicating it is not in the cache, the process of retrieving the function is performed. After finding the function the register call will add the function to the cache (line 148).
+Knowing the feature discussed before, the splitting of functions via the characters ‘,’ or ‘|’ is done after the cache check and before the insertion of a new lookup result (the red square, line 118), which means that calling a function with ‘,’ or ‘|’ at the end will add it to the cache even if all chained functions are already in it. So, we can populate a list with endless permutations of known functions, all of whom will be added to the router. Flooding the router with XXX results will eventually slow down the server, resulting in significant delay and eventual timeouts, and will inevitably crash the application by exhausting memory.  Even with the spring-boot-starter-security dependency (which prevents unauthorized execution of bean functions), we can achieve denial-of-service since the verification of invocation permissions is only made after the lookup function.
+Proof of Concept
+Using the sample code created by Spring, function-sample-pojo, which has the following functions
+
+Uppercase
+Lowercase
+Words
+(Note that for the PoC to work, we need to call a function that exists so it will register in the cache).
+POST  http://host/uppercase,
+payload: {‘a’:1}
+As you can see below, the cache increases in size over time and affects the response time accordingly (the functionRegistrations list is in the register function):
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_678948\Photo_21024x521.png
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_678948\Photo_31024x431.png
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_678948\Photo_41024x431.png
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_678948\Photo_51024x451.png
+Mitigation
+Update Spring Cloud Function to 3.2.6 or above.
+Unintended Function Invocations
+Technical details
+This bug affects the same lookup function, which attempts to determine if the function itself should be executable as a bean function. In the second line, the function name passes through the normalizeFunctionDefinition function –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_678948\Photo_61024x7931.png
+This function will create a list named ‘eligibleFunction’ which contains the function a user can invoke. In case there is only one function defined, it will replace whatever name it got to that ‘default’ function name, otherwise, it will return the input as-is.
+Here, similar to the aforementioned DoS issue, the splitting of the function names is done after this function, so if the function name contains ‘,’ or ‘|’, the replacement to the ‘default’ function won’t happen.
+In the following example, we add a cloud.fn dependency which is meant to add a function to our project (using the function-sample-pojo project as an example).
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_678948\Photo_71024x3171.png
+We have the following list:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_678948\Photo_81.png
+Despite having an ‘eligibleFunction’ list, later in the lookup function, Spring Cloud Function will try to determine the function in the ‘this.discoverFunctionInBeanFactory(functionName);’ line. The discoverFunctionInBeanFactory function searches in the whole beanFactory of the applicationContext, which is actually far more extensive than the list in eligibleFunctions and contains way more functions than intended and defined by developers via bean annotations, encompassing the entire bean library in ApplicationContext:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_678948\Photo_91024x4831.png
+Although we have here over 580 other functions, other filters are being done later in the lookup function before registering.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_678948\Photo_10925x10241.png
+The red highlights are the steps the functionCandidate needs to pass in order to register a function – but registering a function does not mean we can invoke them. These functions were not meant to execute from the function router like that; this results in unexpected behavior, where unintended functions attempt to execute but fail due to extraneous errors.  This is best shown in two common exceptions when attempting to invoke arbitrary functions from ApplicationContext:
+
+Casting to a Supplier exception – happens to void functions, as these functions must have a return value
+Argument mismatch – the input of the function is an object without a default/nullary constructor. Invocation fails without a simple constructor. (We can control to a certain extent the input type via different post payloads so sometimes this exception could be avoided)
+The red highlighted code checks filter many beans from ApplicationContext but not all. For example, if the bean is a class, it must have one ‘functional’ function – a class pattern where the class has one function aside from the constructor. This means that while not all ApplicationContext beans are accessible, some beans are exposed, and some are not in a way that is completely tangential to whether they should have been exposed and invoked from URL function invocation.
+The following code will dump all the functions a user can invoke in ApplicationContext, and when running this will show many more invokable functions than intended.
+public static void main(String[] args) {
+		Collection registeredBeans = new ArrayList<String>();
+		Collection supplierRegisteredBeansExceptions = new ArrayList<String>();
+		ApplicationContext context = SpringApplication.run(DemoApplication.class, args);
+		FunctionCatalog catalog = context.getBean(FunctionCatalog.class);
+		System.out.println("Num of Beans: " + context.getBeanDefinitionNames().length);
+		for (String functionName : context.getBeanDefinitionNames())
+		{
+			try
+			{
+				SimpleFunctionRegistry.FunctionInvocationWrapper function = (SimpleFunctionRegistry.FunctionInvocationWrapper)catalog.lookup(functionName);
+				if (function != null)
+				{
+					//get non Supplier beans
+					if (function.isSupplier())
+					{
+						try {
+							((Supplier)function.getTarget()).get();
+						}
+						catch (ClassCastException exception){supplierRegisteredBeansExceptions.add(functionName);}
+					}
+					registeredBeans.add(functionName);
+				}
+			}
+			catch (Exception e)
+			{
+			}
+		}
+		System.out.println("Num of registered functions: " + registeredBeans.size());
+		System.out.println(registeredBeans);
+		Collection nonSupplierRegisteredBeans = new HashSet<String>( registeredBeans );
+		nonSupplierRegisteredBeans.removeAll(supplierRegisteredBeansExceptions);
+		System.out.println("Non Supplier Functions: " + nonSupplierRegisteredBeans);
+}
+As an example of an output, we can see some internal functions, configurations, and more:
+The applicationContext beans are dependent on user-code and dependencies imported into the project (just by adding dependencies to the pom.xml – more beans are added as per Spring’s core design, and thus more bean functions to potentially invoke). The impact of this can vary and is highly dependent on the application, its dependencies, and internal bean implementation, but the nature of this function invocation is entirely arbitrary.
+When we tried to find some interesting functions to invoke, we didn’t encounter anything with a real impact. But keep in mind that the search is endless and could change depending on the environment.
+Here is an example of an arbitrary function we can invoke that won’t cause any threat (org.springframework.boot.autoconfigure.context.LifecycleAutoConfiguration):
+(In order for the function to run it needs an input and depending on the type of parameter the post body needs to change. As you will see in the next example showing a Boolean parameter).
+A second example is when having the dependency org.apache.camel.springboot:camel-geocoder-starter-3.17.0 in the pom.xml. The class where we invoke the function is in the spring-cloud-commons package, but camel-geocoder-starter actually inserts this class into the application context. 
+createBuilder in the DefaultOkHttpClientFactory class is the function, it changes ‘this.builder’ to disable SSL validation or enable it.
+The screenshots below show that the builder changes are saved to ‘this’ object. Thus, we can change the builder to disable SSL validation for subsequent invocations. The severity of this specific invocation is questionable since the usage of this factory elsewhere in code is complicated, but this demonstrates a real example of an attacker changing a configuration by altering a global flag through a bound object that doesn’t seem to be the author’s intent.
+2nd invocation, the sslSockerFactoryOrNull is changed from the first call:
+Potential Impact Demonstration
+The following code is written by us (Checkmarx Researchers.) It is completely fabricated and doesn’t exist in Spring. The purpose of this code is to demonstrate the potential impact of the issue, since the function itself is not inherently dangerous without user input, yet it is arbitrarily exposed via Spring Cloud Function.
+Having the following code and the dependency – org.springframework.amqp:spring-rabbit in the project.
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.stereotype.Component;
+
+@Component
+public class RabbitTest {
+
+    public RabbitTest(){}
+
+    public Boolean checkMandatory(RabbitTemplate rabbitTemplate) {
+        return rabbitTemplate.isMandatoryFor(new Message(new byte[]{'a'}));
+    }
+}
+In this example, the @Component annotation adds the class to the application context. (Note that no @Bean annotation is required; components for dependency injection also end up in the application context). Since it’s a class, it must have one functional method according to the checks made in the lookup function (only one method apart from the constructor). Now we can call the checkMandatory function with the rabbitTest URI.
+The object RabbitTemplate has a default/nullary constructor and a setter that will take a string and parse a SpEL expression out of it. The isMandatoryFor function will execute getValue to that malicious expression, which, if you are familiar with SPeL vulnerabilities, results in expression execution, which, in SPeL’s case, is equivalent to a Java code Injection:
+POST http://springhost/rabbitTest
+ 
+{"mandatoryExpressionString":"T(java.lang.Runtime).getRuntime().exec("open -a /System/Applications/Calculator.app")"}
+(Known issue – In case this doesn’t work and runs the default function, because of the normalizeFunctionDefinition replacement, we can bypass this validation by calling  http://springhost/rabbitTest, (note the comma) . This will register the function to the cache and then we can call it again normally and execute it):
+This execution will result in RCE:
+Another example with the dependency org.springframework.cloud:spring-cloud-starter-stream-rabbit, we get exposed to the function spelConverter, which gets a string and returns an Expression. With the feature of passing one’s output to another’s input, having a class like so, this is also vulnerable:
+We can’t directly call ‘get’ since the Expression object doesn’t have a default/nullary constructor, but it’s possible with the output of spelConverter. This hints at a much deeper issue where, using certain dependencies, a gadget of chained application context beans could be crafted.
+The examples above have some custom code written, but here are some interesting functions we found only by adding dependencies to the pom.xml without a real impact.
+Mitigation
+Update Spring Cloud Function to 3.2.6 or above, which contains basic filtering of some beans, use the configuration spring.cloud.function.ineligible-definitions to exclude additional unintended functions.
+Timeline
+
+June 2, 2022: Vulnerability was reported responsibly
+Issues acknowledged
+June 15, 2022: Checkmarx SCA customers using spring function cloud were warned and provided mitigation guidance, without exposing the technical details of the findings.
+June 15, 2022: Fixed version was released.
+June 16, 2022: CVE-2022-22979 was assigned
+Final Words
+Discovering vulnerabilities like the ones documented in this report is why the Checkmarx Security Research Team performs investigations into open source projects. With open source making up the vast majority of today’s commercial software, security vulnerabilities must be taken seriously and handled carefully across the industry.
+Solutions like Checkmarx SCA are essential in helping organizations identify, prioritize, and remediate open source vulnerabilities more efficiently to improve their overall software security risk posture. Checkmarx SCA customers receive notice of issues like the ones described above in advance of public disclosure. For more information or to speak to an expert about how to detect, prioritize, and remediate open source risks in your code, contact us.
+References
+
+https://advisory.checkmarx.net/advisory/CX-2022-5010/
+https://advisory.checkmarx.net/advisory/CX-2022-5009/
+https://tanzu.vmware.com/security/cve-2022-22979
+Dos Fix – https://github.com/spring-cloud/spring-cloud-function/commit/9b6952f041ed028aba1165a55f38589ec6a93c09
+Unintended function invocation mitigation – https://github.com/spring-cloud/spring-cloud-function/commit/1381cd4e6d04961d028683d2226242c01d7397ab

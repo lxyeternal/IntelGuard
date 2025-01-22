@@ -1,0 +1,56 @@
+
+Introduction
+Even if you lived under a rock in the last few months, I’m sure you still have heard about OpenAI – especially their ChatGPT project. If you still don’t know what it is, let ChatGPT introduce itself:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_811270\open_ai_image11.png
+When OpenAI first allowed users to sign up for an account, it was offering a free credit as a trial to try their AI projects (around $7).
+Although it was enough for any user willing to start using ChatGPT, it was clearly insufficient for those looking forward to being the first to come up with some sort of integrated product.
+What we’ve found during the OpenAI signup process, was that there is a mechanism in place which validates user phone-numbers, which is used as a layer of validation to ensure users are unique individuals in order to prevent abuse of the free credit trial. By intercepting and modyfing the OpenAI API request, we’ve identified a vulnerability which allows us to bypass these restrictions. This allowed us to sign up for an arbitrary number of user accounts using the same phone number, getting as many free credits as we wanted.
+Vulnerability Details
+Account Validation Behavior
+Before going into the details of how this vulnerability might be exploited, allow me to explain how the registration process worked:
+1. Register an e-mail
+2. Click on the e-mail activation link
+3. Enter a phone number
+4. Enter the validation code received by SMS
+Both e-mail and phone number must be unique, otherwise, the user would be informed that the account already exists, and no free credits would be granted.
+Bypass Validation
+After understanding this process, we dove into the API underneath the web application.
+Providing a valid e-mail could be achieved by using a catch-all e-mail account on a private mail domain, or any of the many temporary e-mail services. You could even automate that with a script to monitor an inbox and follow the activation link for you. Bypassing the phone number restriction, however, was a bit more challenging.
+As a result, this is what we did:
+1. Register Account A (https://auth0.openai.com/u/signup/) with our unique phone number
+2. Register Account B (https://auth0.openai.com/u/signup/) with the same phone number.
+Account B was created but without being assigned the free credits. Account B was informed that the entered phone number had already got the free credits.
+How to bypass it?
+After intercepting the traffic with Burp proxy, we noticed the following request:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_811270\open_ai_image21.png
+Our first thought was to do subtle changes to the “phone_number”, prepending the country code (00351):
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_811270\open_ai_image31.png
+This resulted in the following response:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_811270\open_ai_image41.png
+At this point, we noticed that we could use different variations of essentially the same phone number, and get the same number associated to different accounts. This would allow a malicious user to have multiple accounts with as many credits as they need, while effortlessly using the same phone number.
+Just using this technique, the attacker could keep adding leading zeros in order to create an arbitrary number of phone number variations.
+However, the amount of zeros would likely be finite, and we wanted to increase our credit value to a more respectable and significant sum, and deliver a better proof-of-concept to OpenAI.
+This is where the open-source tool REcollapse was put to use (https://github.com/0xacb/recollapse). This tool allows a user to fuzz inputs and bypass validations and discover normalization, canonicalization, and sanitization in web applications and APIs.
+After some initial testing, some patterns were observed to be sanitized by OpenAI API. Using Unicode encoding on certain non-ASCII bytes allowed us to bypass it and register more accounts.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_811270\open_ai_image61024x4911.png
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_811270\open_ai_image51024x4491.png
+Root Cause?
+The likely root cause for this issue is that one upstream component, probably around user management, observes the phone number as a unique value, under the assumption that if it is invalid, it simply will not function for the purpose of account validation.
+Given the arbitrary prepended zeros and inline non-ASCII bytes, these permutations of the original value are not identical at an early point where comparison is made. However, once the system attempts to validate the phone number associated with the account, this tainted phone number is passed on to another component (or components), which sanitizes the value for prefixed zeros and unwanted bytes before using it as a proper phone number.
+This late-stage normalization can cause a massive, if not infinite, set of different values (e.g., 0123, 00123, 12u000a3, 001u000au000b2u000b3 etc.) that are treated as unique identifiers to collapse into a single value (123) upon use, which allows bypassing the initial validation mechanism altogether.
+The likely solution to this is to run the same normalization before ever processing the value, so that it is identical, both when used as a unique value upstream, and as a phone number downstream.
+Disclosure
+We can say that OpenAI was on top of this issue after we sent the report, even in the middle of a big Microsoft investment and lots of project changes.
+OpenAI feedback:
+Thank you again for your detailed report. We have validated the finding and have fixed the issue.
+We appreciate your reporting this to us and adhering to the OpenAI coordinated vulnerability disclosure policy (https://openai.com/policies/coordinated-vulnerability-disclosure-policy).
+Timeline:
+2 December 2022 – Report sent to OpenAI
+6 December 2022 – OpenAI replied back that they were investigating the issue
+28 February 2023 – We requested an update on the issue
+1 March 2023 – OpenAI replied that the issue was fixed
+4 May 2023 – Full Disclosure
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_811270\Screenshot20230503at2.55.16PM1.png
+It was a pleasure to collaborate so effectively with the OpenAI , who took ownership and were professional through the disclosure and remediation process. For this reason, and a great researcher experience, we’re granting OpenAI  the Checkmarx Seal of Approval.
+And, as always, our security research team will continue to focus on ways to improve application security practices everywhere

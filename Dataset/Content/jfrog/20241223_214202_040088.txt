@@ -1,0 +1,203 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214202_040088\CVE20243094XZBackdoor863x3001.png
+
+Update April 1st – Updated “What is the malicious payload of CVE-2024-3094?” due to newly released OSS tools
+Update April 7th – Updated “What is the malicious payload of CVE-2024-3094?” due to more published payload research
+
+On March 29th, it was reported that malicious code enabling unauthorized remote SSH access has been detected within XZ Utils, a widely used package present in major Linux distributions (The GitHub project originally hosted here is now suspended). Fortunately, the malicious code was discovered quickly by the OSS community and managed to infect only two of the most recent versions of the package, 5.6.0 and 5.6.1, which were released within the past month. Stable versions of most Linux distributions were not affected.
+The sophisticated malicious payload that came with the affected versions of XZ Utils ran in the same process as the OpenSSH server (SSHD) and modified decryption routines in the OpenSSH server in order to allow specific remote attackers (that own a specific private key) to send arbitrary payloads through SSH which will be executed before the authentication step, effectively hijacking the entire victim machine.
+This supply chain attack came as a shock to the OSS community, as XZ Utils was considered a trusted and scrutinized project. The attacker built up a credible reputation as an OSS developer over the span of multiple years and used highly obfuscated code in order to evade detection by code reviews. Following our initial research communication, this post will detail its fundamentals and impact.
+
+Who is affected by CVE-2024-3094?
+How to detect CVE-2024-3094
+How to remediate CVE-2024-3094
+JFrog OSS tools for detection of CVE-2024-3094
+CVE-2024-3094 technical analysis
+Is the JFrog Platform affected by CVE-2024-3094?
+Is Conan affected by CVE-2024-3094?
+Detecting and resolving CVE-2024-3094 with JFrog Xray
+Who is affected by CVE-2024-3094?
+The following distributions were affected by the attack –
+
+
+Fedora	40, 41, Rawhide (active development)	xz-5.6.0-*
+xz-5.6.1-*	Fedora 40 – Update to latest version (5.4.x).
+Fedora 41 & Rawhide – Stop using immediately.	
+Debian	testing, unstable (sid), experimental	xz-utils 5.5.1alpha-0.1
+(uploaded on 2024-02-01), up to and including 5.6.1-1	Update to latest version (5.6.1+really5.4.5-1)	No stable branches are affected
+Alpine	Edge (active development)	xz 5.6.1-r0, 5.6.1-r1	Update to latest version (5.6.1-r2)	No stable branches are affected
+Kali	N/A	xz-utils 5.6.0-0.2
+(Kali installations updated between March 26th to March 29th)	Update to latest version (5.6.1+really5.4.5-1)	
+OpenSUSE	Tumbleweed	xz-5.6.0, xz-5.6.1	Update to latest version (5.6.1.revertto5.4)	
+Arch Linux	N/A	xz 5.6.0-1	Update to latest version (5.6.1-2)	
+
+The following distributions were not affected –
+
+
+
+Red Hat Enterprise Linux	N/A	N/A	N/A	No versions of Red Hat Enterprise Linux (RHEL) are affected.
+Ubuntu	N/A	N/A	N/A	The affected version of xz-utils was only in noble-proposed, and
+was removed before migrating to noble itself.
+Amazon Linux	N/A	N/A	N/A	
+Wolfi	N/A	N/A	N/A	The affected version of liblzma was briefly available (now reverted) but Wolfi’s OpenSSH does not link to liblzma, making it unaffected.
+Gentoo	N/A	xz-utils 5.6.0, xz-utils 5.6.1	Update to latest version (restores 5.4.2)	Although Gentoo pulled the vulnerable version, it isn’t affected since its OpenSSH isn’t patched to work with systemd-notify, which is a prerequisite for the backdoor.
+How to detect CVE-2024-3094
+Check if your version of “xz” is one of the affected versions (5.6.0 or 5.6.1, see table above) by running –
+strings `which xz` | grep '5\.6\.[01]'
+Example of a vulnerable output –
+$ strings `which xz` | grep '5\.6\.[01]'
+xz (XZ Utils) 5.6.1
+Example of a safe output –
+$ strings `which xz` | grep '5\.6\.[01]'
+Note that in Alpine Linux (edge branch), the output of xz --version  is “5.6.1” even on the fixed version (5.6.1-r2) –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214202_040088\1_AlpineLinuxoutputofxzversionis5_6_1.png
+
+It is possible to validate the exact version using the Alpine Package Manager –
+$ apk list xz
+xz-5.6.1-r2 x86_64 {xz} ...
+How to remediate CVE-2024-3094
+Immediately downgrade your version of xz to an earlier version (5.4.6 is the latest unaffected version in most distributions).
+After downgrading xz, either reboot your machine or restart the OpenSSH server in order to remove the patched code from memory –
+sudo systemctl restart ssh
+If upgrading is not possible, another possible workaround is to take advantage of the backdoor’s “kill switch”. Adding the following string to /etc/environment will disable the malicious backdoor functionality (applies after restarting SSH and Systemd) –
+yolAbejyiejuvnup=Evjtgvsh5okmkAvj
+JFrog OSS tools for detection of CVE-2024-3094
+The JFrog Research team published an open-source detector for CVE-2024-3094.
+The tool checks whether the local machine is both vulnerable to CVE-2024-3094 (SSH payload is able to run) and currently affected by CVE-2024-3094 (malicious version of XZ is currently installed).
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214202_040088\detector.png
+
+Update April 2nd –
+
+We fixed several reported issues with the tool on Github.
+Added contributed code to detect the malicious versions in Arch Linux.
+Added another detection method of malicious liblzma by looking for encrypted strings the malware decrypts and uses in runtime, such as yolAbejyiejuvnup=Evjtgvsh5okmkAvj and Shutdown. On most of the malicious liblzma versions we have analyzed, these strings can be found in the .rodata section.
+CVE-2024-3094 technical analysis
+What is the malicious payload of CVE-2024-3094?
+TL;DR – the end goal of the malicious backdoor introduced by CVE-2024-3094, is to inject code to the OpenSSH server (SSHD) that runs on the victim machine, and allow specific remote attackers (that own a specific private key) to either –
+1. Send arbitrary payloads through SSH which will be executed before the authentication step
+
+OR
+
+2. Bypass SSH password-based authentication (attacker can login with any password)
+Both of these abilities effectively hijack the entire victim machine.
+The backdoor payload is still under analysis, but based on preliminary analysis, initial open-source tools and technical tweets it seems that the payload is highly sophisticated –
+
+The payload gets injected into OpenSSH server (sshd process), since liblzma (that contains the malicious code) is a dependency of certain builds of OpenSSH.
+The payload hooks the RSA_public_decrypt function, a function originally used for validating RSA signatures.
+The malicious hook code examines the RSA public modulus (“N” value) passed inside the RSA struct (4th argument of RSA_public_decrypt). Note that this modulus is completely controlled by the connecting SSH client (in our case, the attackers).
+The malicious hook code examines the first 16 bytes of the “N” value, which are used in a simple calculation to derive a “Command Number” between 0 and 3. The command number sets the backdoor’s current operation –
+
+– Command 0x00 – Unknown
+
+– Command 0x01 – SSH authentication bypass
+
+– Command 0x02 – Execute shell command
+
+– Command 0x03 – Execute shell command with specified UID/GID
+The malicious hook code then decrypts the last 240 bytes of the “N” value using the ChaCha20 symmetric stream cipher, with a hardcoded decryption key –
+
+0a 31 fd 3b 2f 1f c6 92 92 68 32 52 c8 c1 ac 28
+
+34 d1 f2 c9 75 c4 76 5e b1 f6 88 58 88 93 3e 48
+
+Since this is a symmetric, hardcoded key it can be used to decrypt network captures of real-world attack attempts to understand which commands were sent from the attacker to the victim.
+The decrypted data contains 114 bytes of signature which are checked for validity by using the Ed448 asymmetric elliptic curve signing algorithm, specifically using the following Ed448 public key –
+
+0a 31 fd 3b 2f 1f c6 92 92 68 32 52 c8 c1 ac 28
+
+34 d1 f2 c9 75 c4 76 5e b1 f6 88 58 88 93 3e 48
+
+10 0c b0 6c 3a be 14 ee 89 55 d2 45 00 c7 7f 6e
+
+20 d3 2c 60 2b 2c 6d 31 00While the public key is well-known, only the attackers have the corresponding Ed448 private signing key, ensuring that only the attackers can generate valid payloads for the backdoor. Furthermore, the signature is bound to the host’s public key, meaning that a valid signature for one host cannot be reused on a different host.
+If the signature was verified as valid, the backdoor uses the bytes directly following the signature bytes as command-specific payload data. For example in command 0x02, the payload bytes contain A NULL-terminated shell command string (ex. cat /etc/shadow), that is directly passed to system()
+If the data is invalid in any way (malformed payload, invalid signature), the original implementation of RSA_public_decrypt is resumed in a transparent manner. This means the detection of vulnerable machines over the network may be impossible for anyone besides the attackers.
+The sophisticated nature of this attack and the use of highly future proof crypto algorithms (Ed448 vs the more standard Ed25519) led many to believe that the attack may be a nation-state level cyberattack.
+Researchers have published an initial backdoor client that allows sending payloads (shell commands) to machines affected with CVE-2024-3094, given the backdoor’s Ed448 private signing key. Since the original Ed448 private signing key is not publicly known, this tool is mostly relevant for research purposes (to be used against patched versions of the backdoor, where the Ed448 public key has been replaced by a keypair with a known private key)
+Timeline of the attack
+The most notable part of this supply chain attack is the extreme levels of dedication of the attacker, working more than two years to establish themselves as a legitimate maintainer, offering to pick up work in various OSS projects and committing code across multiple projects in order to avoid detection.
+2021 – GitHub user Jia Tan (JiaT75) account created. Started contributing to several projects with 546 commits done in 2021, of which the most suspicious one was made to libarchive. A more detailed account of this commit can be found below.
+2022, February 6th – JiaT75 submits a first (legitimate) commit to the XZ repo. The commit adds arguments validation to the LZMA and LZMA2 encoders.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214202_040088\2_AddParameterValidationtoLZMAandLZMA2encoders.png
+Add Parameter Validation to LZMA and LZMA2 encoders
+2022, November 30th – Lasse Collins, XZ Utils’ creator and sole maintainer so far, changes the bug reporting email to an alias that redirects emails to him and Jia Tan.
+2023, January 11th – Lasse Collins releases his final version, 5.4.1.
+2023, March 18th – Jia Tan builds and releases their first release, 5.4.2.
+2023, June 27-28th – A series of changes were made to XZ Utils, possibly setting the ground for the attack. In these changes, support for ifunc implementation to crc64_fast.c, was added.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214202_040088\3_IntroducingtheifuncimplementationtoXZUtils.png
+Introducing the ifunc implementation to XZ Utils
+Interestingly, this patch was introduced by the original maintainer of the package, Lasse Collin, who credited another contributor for this patch, Hans Jansen. This ifunc implementation is possibly one of the ways which the backdoor seems to operate, according to the analysis by Andres Freund.
+2023, July 8th – JiaT75 opens a Pull Request in oss-fuzz, a project that performs fuzz testing on XZ and many other OSS projects. The PR disables ifunc fuzzing, which effectively prevents oss-fuzz from finding the malicious changes done in XZ.
+2024, February 15th – JiaT75 adds an ignore rule for build-to-host.m4 in the XZ repository, via its .gitignore file. This script file, soon to be included in actual release bundles, is executed during the package’s build, and contains the malicious M4 macros which initializes the backdoor’s installation on the victim’s machine.
+2024, February 23rd – JiaT75 adds the obfuscated binary backdoor in two tests files in the XZ repository –
+
+tests/files/bad-3-corrupt_lzma2.xz
+tests/files/good-large_compressed.lzma
+2024, February 24th – JiaT75 releases version 5.6.0 with the malicious build-to-host.m4. At this stage, the malicious payload is fully operational (any subsequent XZ version is compromised). Malicious xz-utils version 5.6.0 pulled by Debian, Gentoo and Arch Linux.
+2024, February 27th – Malicious xz-utils version 5.6.0 pulled by Fedora.
+2024, March 5th – Malicious xz-utils version 5.6.0 pulled by openSUSE.
+2024, March 9th – JiaT75 updates the backdoor’s binaries to an improved version, and releases version 5.6.1. Malicious xz-utils version 5.6.1 pulled by Fedora, Gentoo and Arch Linux
+2024, March 10th – Malicious xz-utils version 5.6.1 pulled by openSUSE.
+2024, March 11th – Malicious xz-utils version 5.6.1 pulled by Alpine.
+2024, March 26th – Malicious xz-utils version 5.6.1 pulled by Debian.
+2024, March 29th – A detailed account of the malicious activity found in XZ utils was published on the oss-security mailing list by Andres Freund.
+2024, March 30th – Lasse Collins, xz-utils original maintainer, made an official announcement regarding the project’s breach.
+* Some additions we made to this timeline were based on Russ Cox’s research.
+Was only XZ affected by the malicious actor?
+While the malicious code was detected only on the XZ project, other code contributions of the attacker’s account are currently being investigated. As for today, some notable suspicious code was added to the following projects:
+libarchive:
+In 2021, JiaT75 submitted a pull request to the libarchive repository with the title ‘Added error text to warning when untaring with bsdtar’ which seemed legitimate at first glance. However, upon closer inspection, it was discovered that the code in this pull request replaced the safe function safe_fprintf() with the unsafe version fprintf(), potentially introducing a character escape vulnerability. The security implications of this change are currently being investigated, as they are not yet clear. However, since a malicious actor is involved in this code modification, it is reasonable to assume that more sophisticated attacks might be at play in this investigation. A PoC for characters escape was already published:
+PoC by mikesiegel
+A fix to this vulnerability was introduced to libarchive main branch but has not yet been released as a version update at the time of writing.
+oss-fuzz:
+In early 2023, JiaT75 changed the primary email address of the XZ project in Google’s oss-fuzz tool to his own personal Gmail address. This suggests that they may have wanted reports of vulnerabilities found in Project XZ to be reported to them first so that they would know when their malicious actions are discovered –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214202_040088\5_ossfuzz.png
+
+Later in 2023, they opened another PR to disable `Indirect function support` in the fuzzer’s configuration for the XZ project. This looks like preparation for the backdoor they were going to add later to the XZ project to prevent detection by the fuzzer –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214202_040088\6_ossfuzz.png
+
+Currently, both the fuzzers for XZ and liblzma were disabled by the oss-fuzz maintainers.
+Is the JFrog Platform affected by CVE-2024-3094?
+JFrog is not affected by CVE-2024-3094 as none of its products use the vulnerable xz_utils versions.
+Is Conan affected by CVE-2024-3094?
+As of March 30th, recipes containing the vulnerable xz_utils versions have been removed from Conan Center.
+In addition, recipes that depended on the affected versions of xz_utils (cpython and libunwind) have been reverted to require the latest safe version of xz_utils.
+Detecting and resolving CVE-2024-3094 with JFrog Xray
+JFrog Security Essentials (Xray) can be used to identify every vulnerable occurrence across your entire codebase and compiled artifacts, including Docker containers, repository packages, and even standalone binaries.
+JFrog Xray can be used to scan binary artifacts in order to detect the affected libraries –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214202_040088\7_DetectingandresolvingCVE20243094withJFrogXray.png
+
+Stay up-to-date with JFrog Security Research
+The security research team’s findings and research play an important role in improving the JFrog Software Supply Chain Platform’s application software security capabilities.
+Follow the latest discoveries and technical updates from the JFrog Security Research team on our research website, and on X @JFrogSecurity.
+
+xz-5.6.1-*
+
+Fedora 41 & Rawhide – Stop using immediately.
+
+(uploaded on 2024-02-01), up to and including 5.6.1-1
+
+(Kali installations updated between March 26th to March 29th)
+
+was removed before migrating to noble itself.
+xz --version
+/etc/environment
+yolAbejyiejuvnup=Evjtgvsh5okmkAvj
+Shutdown
+sshd
+liblzma
+RSA_public_decrypt
+RSA
+RSA_public_decrypt
+0a 31 fd 3b 2f 1f c6 92 92 68 32 52 c8 c1 ac 28
+
+34 d1 f2 c9 75 c4 76 5e b1 f6 88 58 88 93 3e 48
+0a 31 fd 3b 2f 1f c6 92 92 68 32 52 c8 c1 ac 28
+
+34 d1 f2 c9 75 c4 76 5e b1 f6 88 58 88 93 3e 48
+
+10 0c b0 6c 3a be 14 ee 89 55 d2 45 00 c7 7f 6e
+
+20 d3 2c 60 2b 2c 6d 31 00
+cat /etc/shadow
+RSA_public_decrypt

@@ -1,0 +1,108 @@
+
+Key points and observations
+
+On September 26, 2024, at 8 pm UTC, Simone Margaritelli (a.k.a. evilsocket) released a write-up about a set of vulnerabilities in Common Unix Printing System (CUPS) components.
+The disclosure was leaked two days before (on September 24) on BreachForums.
+Under certain specific conditions, this vulnerability allows arbitrary remote code execution through the UDP port 631. Specifically, the exploit is triggered if the victim system starts a print job.
+At the time of disclosure, a large number of internet-facing systems appear to be exposed. The researcher claims that "several hundred thousands" of machines are vulnerable, although this has not been independently verified yet.
+The vulnerability is unlikely to be exploited on cloud servers that are not used for printing purposes. However, it remains possible that a different attack chain with fewer pre-requisites is disclosed in the future.
+The official CUPS advisory is available here.
+Check if your system is vulnerable
+In order for a system to be exploitable through this attack chain, all of the following conditions must be true:
+
+version 2.0.1 or lower of the cups-browsed package must be installed
+the cups-browsed service must be running and listening on UDP port 631
+the configuration file /etc/cups/cups-browsed.conf must contain the statement  BrowseRemoteProtocols (which is the default configuration)
+Here's what these look like on a potentially vulnerable system:
+$ dpkg -l | grep cups-browsed
+ii  cups-browsed                      1.27.4-1ubuntu0.2                 amd64        OpenPrinting CUPS Filters - cups-browsed
+
+$ systemctl status cups-browsed
+ Active: active (running)
+
+$ netstat -tunapl | grep :631
+tcp        0      0 127.0.0.1:631           0.0.0.0:*               LISTEN      2481747/cupsd
+tcp6       0      0 ::1:631                 :::*                    LISTEN      2481747/cupsd
+udp        0      0 0.0.0.0:631             0.0.0.0:*                           2481898/cups-browse
+
+$ grep BrowseRemoteProtocols /etc/cups/cups-browsed.conf
+BrowseRemoteProtocols dnssd cups
+For specific information, refer to vendor-specific documentation:
+
+Ubuntu: CUPS Remote Code Execution Vulnerability Fix Available
+Red Hat: Red Hat’s response to OpenPrinting CUPS vulnerabilities
+Remediate affected systems
+If the system is not used for printing purposes, remove the cups-browsed package, or stop and disable the cups-browsed service.
+If the system does require printing capabilities:
+
+If updates for the vulnerable components are available on your operating system, apply them. If they are not available yet, you might want to stop and disable the cups-browsed service temporarily.
+Make sure that the UDP port 631 is closed and not accessible from the internet or any untrusted network.
+If the system is vulnerable but does not have UDP port 631 exposed to untrusted networks, it's not immediately exploitable. That said, there have been reports of the attack chain being exploitable over the local network, leveraging mDNS and Bonjour protocols.
+How the attack chain works
+The attack chain leading to remote code execution is made possible by chaining several vulnerabilities in different components of the CUPS:
+
+CVE-2024-47176 in cups-browsed causes the CUPS print service to bind to 0.0.0.0 instead of localhost. This enables a remote attacker to install a remote, attacker-controlled printer.
+CVE-2024-47076 in libcupsfilters allows an attacker to provide malicious printer attributes to the CUPS.
+CVE-2024-47175 in libppd allows the attacker to write malicious printer attributes to a temporary PostScript Printer Description (PPD) file.
+CVE-2024-47177 in cups-filters is a code injection vulnerability that allows the attacker to trigger malicious code when the malicious printer is used.
+This sequence allows an attacker to reach the CUPS UDP port 631, which is meant to only be locally exposed. Using this access, an attacker can install a malicious printer on the system. If the victim triggers a print job to the  printer added by the attacker, the malicious payload will be triggered, leading to code execution. It’s important to note that this exploit chain requires that a user on the machine triggers a print job. Without it, the malicious code will not be executed.
+In more detail, the attack begins with an adversary sending a UDP packet to the victim port 631. This packet includes a URL associated with an IPP server under the attacker’s control. The CUPS on the victim machine will then make an outbound POST request to the attacker-controlled IPP server. This happens because the CUPS believes the IPP server is a new printer and is making a Get-Printer-Attributes request to gain information about this new printer.
+In the next stage, once the Get-Printer-Attributes request has been made, the CUPS will use the information it gathered to create a PostScript Printer Description (PPD) file. PPDs are used to describe the technical capabilities of a given printer and what features it supports. This is problematic as one potential option is FoomaticRIPCommandLine, a directive that will execute arbitrary command line arguments.
+Because the CUPS reads the configuration for the PPD file from the attacker-controlled IPP server, the attacker can specify arbitrary commands to be run using the FoomaticRIPCommandLine directive.
+The final piece of the exploit is that the victim machine must, of its own accord, attempt to print something using the malicious IPP server. This cannot be triggered remotely by the attacker. If a print job is sent, the PPD file is read, and the arbitrary command is executed.
+Reproducing the attack
+Before the vulnerability disclosure was officially released, multiple proof of concept exploits were being shared online. Two example PoCs were shared in a GitHub Gist as well as the official GitHub Security Advisory (GHSA). Both of these examples have different syntactical errors that make them non-functional, but those issues can be resolved easily.
+A third PoC, called cupshax, has also been released. This one uses DNS-SD printer discovery via broadcast messages as opposed to directly querying the cups-browsed port (UDP 631). From testing conducted by Datadog Security Research, this PoC is more reliable but does have the limitation that the victim and attacker must be on the same local network.
+Activity in the wild
+At the time of this writing, internet-wide scan data indicates that tens of thousands of systems have UDP port 631 opened to the internet, making them potentially vulnerable. However, it's important to reiterate that even on a vulnerable system, it's necessary that a user triggers a print job to the malicious printer in order for the attack to be successful.
+In the first hours following disclosure, we identified the following IP addresses opportunistically scanning the internet for vulnerable systems:
+107.170.78[.]108
+134.122.95[.]96
+143.244.47[.]70
+165.22.130[.]13
+167.99.104[.]150
+170.130.204[.]10
+172.234.96[.]249
+185.242.226[.]32
+194.113.74[.]187
+195.228.75[.]121
+In several cases, the scanning activity was accompanied by an exploitation payload. We've seen attempts to install a malicious printer whose definition file was hosted at the following locations:
+http://172.232.150[.]214:12345/printers/vul_scanning
+http://194.113.74[.]187:631/printers/amongus
+http://172.214.128[.]90:65000/printers/YmVuaWduYmUK
+http://80.94.95[.]85:65000/printers/YmVuaWduYmUK
+http://192.34.63[.]88:5674/printers/securitytest3/
+How Datadog can help
+Datadog can help identify exploitation attempts and vulnerable hosts.
+Identifying exploitation attempts
+You can use Datadog Network Performance Monitoring to identify ingress connections to the UDP port 631 by using the following query:
+network.server.port:631 network.transport:udp network.client.ip_type:other -network.client.host:*
+Using the following custom Datadog Cloud Security Management (CSM) Threats rule, you can also identify successful exploitation of the attack chain:
+exec.file.name != "" && process.parent.file.name == "foomatic-rip"
+Identifying potentially vulnerable systems
+You can use Datadog CSM to identify hosts and containers affected by these vulnerabilities. You can also use contextual attributes to focus on more critical or exposed assets first, for instance by filtering on publicly exposed virtual machines.
+You can also use the following CSM Misconfiguration rules to identify cloud instances at risk due to network exposure:
+
+Publicly accessible AWS EC2 instance is vulnerable to CUPS remote code execution attack chain
+Security groups should restrict ingress traffic to specified IPv4 addresses (AWS)
+The network security group should allow specific port rules (Azure)
+Compute instances should only have internal IP addresses (Google Cloud)
+Conclusion
+Although these CUPS vulnerabilities carry a real exploitation risk, they are likely to not be as dangerous for cloud environments that don't interact with printing services.
+Stay tuned for upcoming posts! You can also subscribe to our monthly newsletter to receive our latest research in your inbox, or use our RSS feed.
+Updates made to this entry
+evilsocket
+cups-browsed
+cups-browsed
+BrowseRemoteProtocols
+cups-browsed
+cups-browsed
+cups-browsed
+cups-browsed
+libcupsfilters
+libppd
+cups-filters
+Get-Printer-Attributes
+Get-Printer-Attributes
+FoomaticRIPCommandLine
+FoomaticRIPCommandLine

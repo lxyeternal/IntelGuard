@@ -1,0 +1,103 @@
+
+Snyk Open Source supports C and C++ scanning for vendored open source dependencies via CLI — and we are happy to share that it is now available via our CI plugins as well. This guide will walk you through integrating C/C++ security scanning within pipelines to get vulnerability information and remediation advice directly to developers. Note that in the scope of this guide, we’ll refer to “C/C++” as just “C++”
+Option 1: Using CI plugins
+Snyk integrates with many CI/CD platforms, including Jenkins, Azure DevOps, or GitHub Actions. All of these plugins have one thing in common: they wrap the Snyk CLI and other tooling to make the configuration and usage easy. This also means their configuration is the same and that all of these plugins allow you to specify an additional command line argument to pass to the Snyk CLI.
+To scan a C++ project, all you need to do is to add --unmanaged as an additional argument. Here is an example configuration of the Snyk Security plugin for Jenkins:
+After the build, a Snyk Security Report item will be available in the build details page:
+The security report lists the detected vulnerabilities based on the identified open source dependencies. Each vulnerability contains the information about its severity, which dependency is affected, and which version of the open source project fixes the vulnerability.
+Option 2: Using a script
+The two CLI commands used to scan C++ projects are snyk test and snyk monitor, both with the --unmanaged command line option. They both scan the code for open source dependencies and their vulnerabilities, but they each have a different purpose.
+snyk test
+The snyk test --unmanaged command is the basic command to generate the list of vulnerabilities. It will identify open source dependencies in your code and then query the Snyk Vulnerability Database for any known vulnerabilities. It is designed to work in CI pipelines (supporting JSON output) and returns a non-zero exit code when an issue is detected. If you store your open source dependencies as archives, the Snyk CLI can introspect them too.
+snyk monitor
+Unlike the previous command, the snyk monitor --unmanaged command delegates the reporting of issues to the Snyk UI. It is designed to take a snapshot of the currently identified dependencies and their vulnerabilities, and import them in your Snyk dashboard. From there, the identified dependencies are monitored for new vulnerabilities and you will get an alert when a new vulnerability is added to the Snyk Vulnerability Database. This command does not return an exit code when an issue is detected.
+One thing that is worth mentioning here is that this command really does take a snapshot of the currently detected dependencies. Snyk only stores the signatures on the servers for a short time for troubleshooting purposes. As our database of open source evolves, Snyk may be able to detect new libraries and their vulnerabilities so it is a good idea to run the snyk monitor --unmanaged command regularly.
+snyk-to-html
+snyk-to-html is a standalone tool that converts the JSON output of the snyk test --json into a human readable HTML document. A typical usage with the unmanaged snyk test command looks like this:
+1snyk test --unmanaged --json | snyk-to-html -o snyk_results.html
+Putting it all together
+Regular monitoring is important for maintaining security posture. The best way to secure the code is to import the snapshot of identified dependencies to the Snyk dashboard and let the nightly monitoring process alert you about new vulnerabilities. Running snyk monitor --unmanaged regularly will ensure that the snapshot of dependencies is up to date with the latest vulnerability data and you will receive alerts about new vulns as soon as they appear in our vulnerability database.
+If you want to test individual commits or branches and fail the pipeline when there are vulnerabilities, only run the snyk test --unmanaged command. Chaining the test command with snyk monitor --unmanaged will also import the results in your dashboard immediately. The snapshot of the dependencies will be updated only if the test passes:
+1$ snyk test --unmanaged && snyk monitor --unmanaged
+This can also be used with other options, such as severity-threshold=high where Snyk will only break the build if you are introducing vulnerabilities that have a severity of high or greater. For the full list of supported command line options, see our Snyk for C/C++ documentation.
+Example Gitlab CI/CD pipeline definition
+1dependency_scanning:
+2  image: node:latest  # we need npm to install Snyk CLI and we don't need any C++ tooling to run the scan
+3  stage: test
+4  script:
+5    # Install npm, snyk, and snyk-to-html
+6    - npm install -g npm@latest
+7    - npm install -g snyk
+8    - npm install snyk-to-html -g
+9    # Run snyk help, snyk auth, snyk monitor, snyk test to break build and out report
+10    - snyk --help
+11    - snyk auth $SNYK_TOKEN
+12    - snyk monitor --unmanaged --project-name=cpp-goof-gitlab
+13    - snyk test --unmanaged --json | snyk-to-html -o snyk_results.html
+14
+15  # Save report to artifacts
+16  artifacts:
+17    when: always
+18    paths: 
+19      - snyk_results.html
+Fixing issues
+To fix an issue, the source code of the open source package with the detected vulnerability needs to be replaced with the newer recommended version. Follow the advice available at the issue URL to learn what version of your dependency the security issue is fixed in.
+1$ snyk test --unmanaged
+2Testing c-example...
+3
+4Issues:
+5
+6 ✗ [Low] Race Condition
+7    Introduced through: https://curl.se|curl@7.58.0
+8    URL: https://security.snyk.io/vuln/SNYK-UNMANAGED-CURL-2317489
+Two things may happen after you update the source code:
+
+The issue disappears and you are done.
+The issue is still detected because the open source dependency was not identified correctly.
+As for #2, the reason for this is that we update our open source database with new releases on a monthly basis, and it is possible that the latest version of the package you just put in your code has not been added yet. To verify whether the dependency and its version was identified correctly by Snyk, run the test command with the --print-deps option:
+1$ snyk test --unmanaged --print-deps
+2Testing c-example...
+3
+4Dependencies:
+5
+6  https://curl.se|curl@7.58.0
+7  confidence: 0.800
+8
+9Issues:
+10
+11 ✗ [Low] Race Condition
+12    Introduced through: https://curl.se|curl@7.58.0
+13    URL: https://security.snyk.io/vuln/SNYK-UNMANAGED-CURL-2317489
+Note that the confidence metric measures how confident Snyk is about the match.
+What is a good confidence level?
+The answer is: it depends. The confidence level is the ratio of local files matching an actual release of the open source project. For example, if a specific released version (the package with source code) of an open source project contains 1000 files and your local project contains 900 of those and the rest does not match because they have been modified, the confidence level is 900/1000 = 0.9. However, the confidence level is the same for an open source project with 10 files and 9 local files matching which is quite different from the previous example. It is up to you to decide which confidence level is good enough and which dependency identification you are going to skip.
+If the identification is not correct, you can use the snyk ignore command to ignore the dependency temporarily:
+1$ snyk ignore --file-path='./deps/curl-7.60.0/*' --expiry='2022-05-20' --reason='patched the release and waiting for Snyk OS database to update'
+The future of C/C++ security scanning
+We are working on improving our scanning accuracy by focusing more on the open source projects curation and improving our matching algorithms to account for projects with slightly modified code (or removed tests and documentation). This includes more frequent updates our source code database or adding projects that do not have releases.
+As an alternative to unmanaged (signature-based) detection of C++ components, we are building an API that will allow you to query our vulnerability database directly. Have feedback or interested in learning about the new API? Reach out to us at ccpp@snyk.io.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+--unmanaged
+snyk test
+snyk monitor
+--unmanaged
+snyk test --unmanaged
+snyk monitor --unmanaged
+snyk monitor --unmanaged
+snyk-to-html
+snyk test --json
+snyk test
+snyk monitor --unmanaged
+snyk test --unmanaged
+test
+snyk monitor --unmanaged
+severity-threshold=high
+high
+The issue disappears and you are done.
+The issue is still detected because the open source dependency was not identified correctly.
+test
+--print-deps
+confidence
+snyk ignore

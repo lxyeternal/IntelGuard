@@ -1,0 +1,109 @@
+
+In early November, a new authorization bypass vulnerability was found in Spring Security 5. Now, before we panic let’s look into this problem to see if you are vulnerable. Although the vulnerability is classified as high, there is only a specific set of use cases that are vulnerable. This means that not everyone is vulnerable, and I will show that in a second. Regardless, the advice is to upgrade to the newer version of the Spring Security. This would be version 5.6.9 or beyond or 5.7.5 and beyond.
+What is an authorization bypass
+Basically, the name very accurate. Say we have a webpage in our Spring Boot application that should only be accessible for users that are configured to have the admin role. An authorization bypass means that a non-admin user could access that page in certain use cases without having this admin role (or better). Obviously, this is unwanted and can lead to a number of things including data leaks and unauthorized changing, creating, or deleting data.
+How does this Spring Security authorization bypass work?
+With Spring Security, it is possible to create a SecurityFilterChain to set permission for specific endpoints. In newer versions of Spring, it looks something like this:
+1@Bean
+2  public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+3  http
+4     .authorizeHttpRequests((authorize) -> authorize
+5        .antMatchers("/").permitAll()
+6        .antMatchers("/forward").permitAll()
+7        .antMatchers("/admin").hasAuthority("ROLE_ADMIN")
+8        .shouldFilterAllDispatcherTypes(true)
+9     )
+10     .httpBasic().and()
+11     .userDetailsService(userDetailsService());
+12      return http.build();
+13  }
+In this example above, I used the antMatchers to set the permissions of the URL patterns irrespective of the HTTP method. Everyone has access to / and /forward. Only users with the admin role have access to /admin URL.
+So far, so good. Nothing fancy going in and it works like a charm. Now let's take a look at the implementation of the forward endpoint in my controller.
+1@GetMapping("/forward")
+2public String redirect() {
+3  return "forward:/admin";
+4}
+In the implementation above, the forward endpoint forwards the request to the admin endpoint. Next to this, I added all dispatcher types to my Spring Security configuration, as only request, async, and error are covered by default. I added the following line in the application.properties of my Spring Boot application.
+1spring.security.filter.dispatcher-types = request, error, async, forward, include
+While you might assume that this is fine and that the admin endpoint is covered in the filters, it turns out that I now can access the admin endpoint via /forward without having the admin role or logging in at all. Even though we explicitly added forward to our configuration and enable shouldFilterAllDispatcherTypes(), we can still access the admin page. By using forward and including all dispatch types, it is possible to bypass authorization and get access to a higher privilege-secured endpoint.
+The reason this is possible in Spring Security 5, the default behavior is to not apply the filters more than once to a request. Therefore, users have to configure Spring Security to do that explicitly. In addition, the FilterChainProxy is also not configured to be invoked on forward and include dispatcher types.
+The problem also occurs in older versions of Spring Security 5
+If you are running an older version of a Spring application, you most likely have an older version of Spring Security as well. An old Spring Boot application I maintain for workshops is based on version 2.2.0-RELEASE, which ships with Spring Security 5.2.0-RELEASE.In these older versions, we had to configure security a bit differently. We had to create a configuration class that extends the WebSecurityConfigurerAdapter interface and overwrite the configure() method to implement similar filters as mentioned previously.
+1@Configuration
+2public class SecurityConfig extends WebSecurityConfigurerAdapter {
+3
+4   @Override
+5   protected void configure(HttpSecurity http) throws Exception {
+6       http
+7               .authorizeRequests()
+8               .antMatchers("/").permitAll()
+9               .antMatchers("/forward").permitAll()
+10               .antMatchers("/admin").hasAuthority("ROLE_ADMIN");
+11   }
+12}
+In the example above we recreated a similar vulnerability as before. Basically, we are using the same filter chain where the problem occurs.
+How problematic is this issue in Spring Security
+As always, it depends on how you use it. Although CVE-2022-31692 has a 9.8 (critical) score according to the National Vulnerability Database (NVD), at Snyk we score it a bit lower at 7.4 which makes it a high-severity vulnerability.
+Although the vulnerability is pretty easy to exploit and widely available, only a specific set of use cases are actually vulnerable. If you are depending on the forward and include dispatch types and you are using the AuthorizationFilters like in the examples above, you could have an issue. If in these dispatch types you call an endpoint that has a higher privilege level and you use the AuthorizationFilter to specify privileges, this might indeed end up in authorization bypass.
+So this means there are a lot of prerequisites before you are actually impacted by this vulnerability. For a full list please check our advisory on this security issue in the Snyk Vulnerability Database.
+What you can do to mitigate this security problem
+The best and easiest way to fix this is to update your Spring Security version to 5.7.5 or beyond. If you are still on the 5.6.x branch, this problem is fixed in 5.6.9. If you are working with a Spring Boot application, the best thing you can do is update to Spring Boot version 2.7.6 (or beyond) which automatically includes the correct Spring Security version if you are using that.
+If you cannot update, you can change your filter definition from authorizeHttpRequests().shouldFilterAllDispatcherTypes(true) to .authorizeRequests().filterSecurityInterceptorOncePerRequest(false). This will ensure that the forward dispatch-type is filtered as expected.
+When rewriting the first example in this blog post, the fix looks like this:
+1@Configuration
+2public class SecurityConfig {
+3
+4   @Bean
+5   public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+6       http
+7               .authorizeRequests()
+8               .filterSecurityInterceptorOncePerRequest(false)
+9               .antMatchers("/").permitAll()
+10               .antMatchers("/forward").permitAll()
+11               .antMatchers("/admin").hasAuthority("ROLE_ADMIN")
+12               .and()
+13               .httpBasic().and()
+14               .userDetailsService(userDetailsService());
+15       return http.build();
+16   }
+17}
+In a similar way, we can add the .filterSecurityInterceptorOncePerRequest(false) in the old way of defining a filter where we had to extend WebSecurityConfigurerAdapter.
+Update your dependencies to stay secure
+This shows again that keeping your dependencies up to date is crucial. When a security issue like this hits your application and your dependencies are outdated, it will cause you significantly more effort to mitigate the situation. When using SCA scanning capabilities — like from Snyk Open Source — you will have this information and remediation advice as soon as it is available. You can use Snyk for free, and specifically for Java development, I wrote an easy article on how to get started.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+5.6.9
+5.7.5
+antMatchers
+/
+/forward
+/admin
+forward
+admin
+request
+async
+error
+application.properties
+admin
+admin
+/forward
+forward
+shouldFilterAllDispatcherTypes()
+FilterChainProxy
+2.2.0-RELEASE
+5.2.0-RELEASE
+WebSecurityConfigurerAdapter
+configure()
+forward
+include
+AuthorizationFilters
+AuthorizationFilter
+5.7.5
+5.6.x
+5.6.9
+2.7.6
+authorizeHttpRequests().shouldFilterAllDispatcherTypes(true)
+.authorizeRequests().filterSecurityInterceptorOncePerRequest(false)
+.filterSecurityInterceptorOncePerRequest(false)
+WebSecurityConfigurerAdapter

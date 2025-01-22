@@ -1,0 +1,309 @@
+
+What are the best practices when it comes to connecting your SaaS to your customers's AWS accounts? Where are the easy wins? Where are the sharp edges? The most commonly discussed best practice in this area is that you should use ExternalIDs when assuming a role in your customers’ environments, as this solves what's known as the confused deputy problem. However, when thinking about defense in depth, we can do even better than that.
+This post offers an opinionated guide on best practices that these vendors should follow to ensure an appropriate level of security when integrating with customers’ AWS environments.
+Introduction
+Many SaaS vendors now offer features that integrate with customers' AWS accounts. This is a common pattern for a number of product categories, including cloud cost management, cloud security posture management, and infrastructure monitoring.
+For this post, we’ll assume that you're a SaaS vendor using a multi-tenant architecture—that is, your backend services process data from multiple customers. Consequently, a typical architecture might look like this:
+In the next sections, we'll dive into some recommendations and best practices that you can follow when integrating with customers' AWS accounts, improving your security posture and lowering your liability in the event that your application is compromised.
+Each recommendation aims to achieve one or more of the following goals:
+
+Protect the customer's environment: How can you make sure that you're accessing your customers' AWS accounts in a secure way, with proper tenant isolation?
+Minimize customer impact in case you are (as a provider) compromised: How can you minimize customer impact in case one of your own applications or cloud environments is compromised?
+Secure your own cloud environment: What are some best practices to follow to secure the cloud environment that integrates with customers' AWS accounts?
+Although all of these will increase your security posture and be beneficial to your customers, some are more complex to implement than others or add a deeper layer of precaution. How you prioritize these recommendations depends on your risk profile: If your integration processes confidential data from S3, you'll likely want to implement more hardening mechanisms than if it's only accessing non-sensitive EC2 instance configuration metadata.
+Getting the basics right
+To begin, let’s cover the basic security precautions that should be implemented by any SaaS provider who integrates with their customers’ AWS environments.
+Leverage IAM roles, not IAM users
+As a vendor, don't ask your customers to create IAM users. Instead, have them create an IAM role, and set its trust policy to allow cross-account access from your own AWS account. IAM users have long-lived credentials that never expire. It's been repeatedly demonstrated that leaked IAM user access keys are the most common cause for incidents in AWS environments. Consequently, one of the most critical recommendations is to not use IAM users for either human or machine access, and instead to leverage short-lived credentials.
+Leveraging IAM roles for your integration ensures that:
+
+You're not weakening the security posture of your customers by asking them to follow bad IAM practices;
+You don't have to store cloud credentials, which would be a large liability in itself;
+If your backend application leaks customer cloud credentials, they are only valid for a maximum of 12 hours.
+Generate a random ExternalId and have your customers enforce it in their role's trust policy
+When used in the context of a multi-tenant SaaS application, IAM roles can be vulnerable to the "confused deputy" attack. This occurs when a customer of the SaaS provider manipulates the service into performing actions on their behalf, potentially leading to unauthorized access to another customer's data by exploiting the permissions of the IAM role.
+While it may seem like an obscure attack at first, it's actually easy for an attacker to exploit this vulnerability, and the impact on your customers can be significant. Protecting against this threat is therefore a critical component of proper tenant isolation, which is a key foundation to multi-tenant architectures.
+To prevent confused deputy attacks, your service needs to generate an "external ID" that's unique to each customer. Customers must then configure their IAM role to ensure that the proper external ID is passed when your service performs the sts:AssumeRole call. Here's what an appropriate IAM role trust policy looks like:
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Principal": {
+        "AWS": "111111111111"
+      },
+      "Condition": {
+        "StringEquals": {
+          "sts:ExternalId": "randomly-generated UUID, unique for each customer"
+        }
+      }
+    }
+  ]
+}
+Note that from your side, this external ID does not need to be considered a secret, as per AWS guidance.
+Minimize and document permissions that your integration requires
+After successfully integrating with your customer's AWS account, your service will start making calls to the AWS API, typically using one of the AWS SDKs. It's critical that you accurately document the permissions your integration role requires and ensure these are as minimal as possible. Minimizing permissions will not only make security reviews easier and less scrutinized, it will also limit your liability. In the event of a compromise, the impact would be much greater if your service has administrator access over your customers’ AWS accounts than if you're only allowed non-sensitive and necessary API calls.
+Provide customers with the exact IAM policy they need to attach to their integration role. Projects such as iamlive, Policy Sentry, and IAM Zero can help you better understand what specific permissions your application needs. If these permissions are dependent on product features that your customers can selectively turn on or off, you can provide them with a configuration wizard that will generate the appropriate IAM policy.
+Avoid the use of AWS managed policies. While policies like ReadOnlyAccess might seem like an easy way to grant limited permissions, AWS managed policies are typically over-privileged and allow overly-sensitive, unnecessary actions. For example:
+
+ReadOnlyAccess allows full read access to all data in S3 buckets and DynamoDB tables in the account, as well as read access to all SSM parameters, which typically (and rightly) contain secrets.
+SecurityAudit contains the ec2:DescribeInstanceAttribute permission, which grants privileges to retrieve user data configuration from all EC2 instances, often containing sensitive data or configuration secrets. It also grants  lambda:ListFunctions, which permits retrieval of the value of all environment variables for all Lambda functions in the account.
+In addition, AWS can add or remove permissions from these policies at any time without notice, and they do so on a daily basis, granting you no control over its lifecycle.
+Implement paved roads and guardrails for your customers
+The recommendations in the previous section represent the essential first steps of security for SaaS providers looking to integrate with customer AWS accounts. If your service has a high risk profile—e.g., it accesses sensitive data or performs remediation actions—it's typically a good idea to implement additional "paved roads" and "guardrails." Paved roads make it easy for your customers to do the right thing; guardrails ensure they stay within safe boundaries even if something goes wrong.
+Provide configurable infrastructure as code modules for setting up integrations
+If your service integrates with AWS, it's likely your customers are engineers, developers, or system administrators. In this case, you will be asked to support integrating with their AWS accounts through infrastructure as code. For instance, a team managing their AWS accounts' setup process through Terraform will likely want their Terraform provider to set up your service as part of their standard account inflation process.
+Provide an easy, one-click way to set up your integration. At initial set up time, you should provide customers with a way to automatically and easily deploy the configuration they need. This is typically done through a CloudFormation template hosted on a public S3 bucket, which takes care of creating the IAM role with the appropriate configuration. Your setup wizard can then use a CloudFormation stack "quick link" that will automatically allow the user to deploy the role in their AWS account:
+https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate
+?templateURL=https://yoursaas-prod-artifacts.s3.us-east-1.amazonaws.com/integration-role-cf-readonly.yml
+&stackName=yoursaas-integration
+&param_ExternalID=68a357f7-560d-4702-acfd-cf710d1cd4c7
+The CloudFormation template will typically look like the following:
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Deploys an integration role for YourSaas"
+
+Parameters:
+  ExternalID:
+    Description: >-
+      ExternalID
+    Type: String
+    MinLength: "36"
+    MaxLength: "36"
+    AllowedPattern: '[\w+=,.@:\/-]*'
+    ConstraintDescription: 'Invalid ExternalID value.  Must match pattern [\w+=,.@:\/-]*'
+
+
+Resources:
+  IntegrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: yoursaas-integration-role
+      Description: yoursaas-integration-role
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - arn:aws:iam::111111111111:root
+            Action: "sts:AssumeRole"
+            Condition:
+              StringEquals:
+                "sts:ExternalId": !Ref ExternalID
+      Policies:
+        - PolicyName: unusd-cloud-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  # Required permissions here
+                  - ec2:DescribeInstances
+                Resource: "*"
+Enable automation by publishing a Terraform provider with a resource to configure your AWS integration. This resource should ease the overall setup process, allow your customers to configure the appropriate IAM role, and let them selectively enable product features. For instance, they might want to turn on a monitoring feature but keep the remediation functionality turned off. The resource should also return attributes that will help users properly set up the role and its associated policy, such as the external ID and required IAM policy. Here's an example of an optimal Terraform integration from a customer point of view:
+locals {
+  role-name = "yoursaas-aws-integration-role"
+}
+
+resource "yoursaas_aws_integration" "dev" {
+  account_id         = "1234567890"
+  role_name          = local.role-name
+  enable_feature_foo = true
+  enable_feature_bar = false
+  enable_feature_xyz = false
+
+  excluded_regions = ["us-east-1", "us-west-2"]
+}
+
+
+data "aws_iam_policy_document" "role-trust-policy" {
+  statement {
+    sid     = "AllowAssumeRoleFromSaasProvider"
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["111111111111"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "sts:ExternalId"
+
+      # The external ID to use is automatically generated when setting up the integration
+      values = [yoursaas_aws_integration.dev.external_id]
+    }
+  }
+}
+
+resource "aws_iam_role" "yoursaas-role" {
+  name               = local.role-name
+  assume_role_policy = data.aws_iam_policy_document.role-trust-policy.json
+
+
+  inline_policy {
+    name   = "inline-policy"
+    # The necessary IAM policy is automatically generated when setting up the integration, 
+    # depending on features that have been enabled
+    policy = yoursaas_aws_integration.dev.iam_policy
+  }
+}
+Providing such constructs not only simplifies the initial setup but also makes it easier for your customers to turn on new features, without having to worry about manually granting additional permissions.
+Refuse to assume the integration role when external IDs are not enforced
+Customers might incorrectly configure their IAM role and forget to enforce the presence of an external ID. As an additional guardrail to ensure you don't accept a risky configuration, you should refuse such a vulnerable role.
+When a customer sets up their IAM role, you can attempt to assume it without specifying an external ID. If the call succeeds, it means that the role is vulnerable. If it fails, it means the role was properly configured with a condition on sts:ExternalId. This is one of the solutions that AWS recommends to mitigate customers misconfiguring their IAM roles.
+import boto3
+
+class CredentialsRetriever:
+  sts_client = boto3.client('sts')
+
+  def assume_customer_role(self, config: CustomerConfiguration) -> boto3.Session | None:
+    if self.__assume_role(config.role_arn, external_id=None) is not None:
+      raise ValueError("please enforce external IDs on your integration role")
+
+    return self.__assume_role(config.role_arn, external_id=config.external_id)
+
+  def __assume_role(self, role_arn, external_id) -> boto3.Session | None:
+    try:
+      params = {
+        'RoleArn': role_arn,
+        'RoleSessionName': 'MyIntegration'
+      }
+      if external_id is not None:
+        params['ExternalId'] = external_id
+      assumed_role = self.sts_client.assume_role(**params)
+    except botocore.exceptions.ClientError as e:
+      return None
+
+    credentials = assumed_role['Credentials']
+
+    return boto3.Session(
+      aws_access_key_id=credentials['AccessKeyId'],
+      aws_secret_access_key=credentials['SecretAccessKey'],
+      aws_session_token=credentials['SessionToken']
+    )
+To go one step further, you can repeat this check on a schedule to identify when a properly-configured IAM role drifts into an insecure state.
+Refuse to assume the integration role when it's dangerously over-permissive
+No matter how good your documentation and setup process is, it's possible that some customers attach dangerously overprivileged policies to their integration role. After an integration role has been successfully set up and you're able to assume it, it can be valuable to list IAM policies attached to the role. If the role is attached to an obviously overprivileged policy such as AdministratorAccess or EC2FullAccess, you should instruct the user to assign appropriate permissions before allowing them to continue using your service.
+While this will not (and does not intend to) catch all cases of excessive privileges, it will limit your risk and liability when a customer grants too much access to your service, whether by mistake or for convenience.
+def validate_role_is_not_obviously_overprivileged(session: boto3.Session):
+    sts_client = session.client('sts')
+    iam_client = session.client('iam')
+
+    current_role_name = sts_client.get_caller_identity()['Arn'].split('/')[-2]
+    policies = iam_client.list_attached_role_policies(RoleName=current_role_name)
+    for policy in policies['AttachedPolicies']:
+        if policy['PolicyName'] in ["AdministratorAccess", "ReadOnlyAccess"]:
+            raise ValueError("Role is too risky")
+Repeating this check on a regular basis and alerting the customer to any findings as appropriate can help identify integration roles that were originally minimally scoped but have drifted into an insecure state—for instance, an engineer assigning AdministratorAccess permissions to troubleshoot a non-working integration feature.
+Make your customers more resilient to your potential compromise
+In this section, we cover mechanisms that help make your customers more resilient in case your application or AWS account is compromised. While this is a critical situation, implementing a few patterns can go a long way in reducing impact and the number of affected customers.
+Treat your outbound integration role as a crown jewel
+Anyone with access to your outbound integration role can access your customer's AWS accounts, provided they have access to external IDs as well. Consequently, it's critical to make sure that the AWS account where your outbound integration role lives is secure and properly monitored, and that the least possible number of workloads run inside it. The usual best practices apply here, but we'll list a few ones that are specific to our use case.
+Monitor usage of your outbound integration role through CloudTrail AssumeRole events. It's likely that in the normal course of operation, one of your backend applications will assume the role and retrieve customer AWS credentials. Here are some anomalies to look for:
+
+The role is assumed by a human operator: This could indicate an operator attempting to compromise customer credentials.
+The role is assumed by a non-AWS IP address: This could indicate that someone outside of your infrastructure has attempted to compromise the role.
+A specific session of the role is used in different locations: This could indicate that your backend application was compromised, and that an 1attacker has exfiltrated its credentials outside of your environment.
+An unusual number of AssumeRole calls are performed: If you have 100 customer environments you're scanning once a day, you should be concerned if your outbound integration role starts mass-assuming customer roles within a short time window.
+Unusual role session names: If your backend application assumes integration roles with a specific session name, you want to know when something looks off.
+Consider using a dedicated bastion AWS account to assume roles into your customers' environments. In this situation, the outbound integration role lives in a dedicated AWS account that's used as a "proxy" when assuming roles into customer accounts. This makes the role less likely to be compromised.
+Make judicious use of STS Session Policies
+When assuming an IAM role, you can choose to restrict the effective permissions of the returned credentials by using Session Policies. This can be useful when you know that the operations you're about to perform don't require as many privileges as the ones granted to the role.
+In the context of a SaaS application, it's common practice to use microservices that handle distinct parts of an integration. For instance, you might have a microservice handling the monitoring of customers' cloud costs, another one scanning S3 buckets for PII, and another one handling specific remediation actions requiring write privileges. In that case, session policies are valuable to make sure that each microservice has access to minimally scoped credentials, independently of the privileges that are granted to the assumed IAM role.
+This can greatly reduce the impact when a microservice is compromised. Since each microservice would need to specify a session policy, it also fosters a culture of continuously documenting permissions as close to the application code as possible.
+Schematically, the situation would look like this:
+Publish a dynamic list of your application's IP ranges
+If you're running the cloud, it's likely you don't have fixed IP ranges that your customers can allow-list. Publishing a dynamic list of IP ranges can help your customers identify when things go wrong.
+As an example, your customers can regularly import your IP ranges as an enrichment, and alert if an AssumeRole CloudTrail event corresponds to an unexpected IP address, which could be the sign of a compromise from your side. This may allow them to respond quickly, not be affected, and notify you in a timely manner.
+Use regional outbound integration roles
+If you have a global customer base with data residency or regulatory requirements, it's likely that your service operates in multiple regions—say eu-west-3 for EU-based customers and us-east-1 for others. In this situation, you may have several instances of your service running in parallel in different regions.
+When that's the case, consider using a dedicated outbound integration role per region, and instruct customers in each region to trust the appropriate role. If your backend application is compromised in a single region, an attacker would not be able to access customer accounts in other regions.
+Consider allowing your customers to trust a single IAM role instead of a whole account
+Most providers require their customers to trust a whole AWS account, through policies similar to:
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Principal": {
+        "AWS": "arn:aws:iam::111111111111:root"
+      },
+      "Condition": {
+        "StringEquals": {
+          "sts:ExternalId": "randomly-generated UUID, unique for each customer"
+        }
+      }
+    }
+  ]
+}
+This means that if any principal with sts:AssumeRole permissions in your AWS account 111111111111 is compromised, an attacker may be able to assume roles into your customers' accounts. To prevent this situation, you can ask your customers to trust a specific IAM role in your account instead:
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Principal": {
+        "AWS": "arn:aws:iam::111111111111:role/outbound-aws-integration-role"
+      },
+      "Condition": {
+        "StringEquals": {
+          "sts:ExternalId": "randomly-generated UUID, unique for each customer"
+        }
+      }
+    }
+  ]
+}
+That said, it's important to note that this method can have major operational implications. First, you'll never be able to change the role name, as all your customers will be using it. Second, you won't be able to assume any of your integration roles if you happen to delete and recreate the role (even with the same name), due to some intricacies in how AWS translates role ARNs into unique identifiers.
+Additional considerations
+Running your applications in an AWS Organizations management account can have unintended consequences
+When using AWS Organizations, the management account is highly privileged and can assume a default administrator role, OrganizationAccountAccessRole, in all child accounts of the organizations. As a general rule, you should not run any workload in this account and should tightly restrict access to it.
+This is even more critical when running applications that integrate with customers' AWS accounts. If you run backend applications assuming roles into customer accounts within your organization management account, anyone with knowledge of an account ID in your own AWS organization can perform a confused deputy attack on your very own accounts, because OrganizationAccountAccessRole roles trust the management account and do not—by design—enforce external IDs.
+Consider allowing a specific AWS account to only be provisioned in one tenant
+Depending on the nature of your application, you may want to allow different tenants to integrate with the same AWS account. If this is not possible, blocking new integrations for AWS accounts already in use by another tenant is the most efficient way to prevent confused deputy attacks.
+How we secure our AWS integrations at Datadog
+At Datadog, we serve over 28,000 customers. Because AWS is the most popular cloud provider, making sure our AWS integrations are secure and provide solid building blocks for our users is top of mind.
+When you set up a new AWS integration, we generate a random, customer-specific external ID. We also provide a one-click CloudFormation option and a Terraform resource to allow you to securely and easily provision integration roles in your AWS accounts. External IDs are stored in a secret management solution with strong access control, separated from metadata about the integration such as account ID or role name.
+We also provide a granular and minimal list of permissions that our integrations need. Each individual integration defines the permissions it needs, and does so as close as possible to the actual code calling the AWS APIs; the policy listed in our documentation is regularly auto-generated as the union of all these permissions. When you set up a new integration, you can select which features to enable. This allows us to suggest a minimal IAM policy.
+In addition, each of our backend services using AWS APIs in customer accounts defines a session policy. This makes sure that independently of the permissions assigned to the customer's IAM role, each service has access to minimally privileged credentials. As an example, one of our services is in charge of validating that an AWS integration has been properly set up by calling sts:GetCallerIdentity. As this API call is automatically granted and does not require any other permission, its session policy is set to:
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "*",
+      "Effect": "Deny",
+      "Resource": "*"
+    }
+  ]
+}
+Even though that service has access to temporary customer AWS credentials, these credentials cannot perform any action other than sts:GetCallerIdentity.
+Additional resources
+
+The confused deputy problem (AWS official guidance)
+Advanced Techniques for Defending AWS ExternalID and Cross-Account AssumeRole Access (FireMon)
+Demystifying the confused deputy problem (Dimos Raptis)
+Ten recommendations for when you access customer AWS accounts (Michael Kirchner)
+Holding Cloud Vendors to a Higher Security Bar (Matthew Fuller)
+Conclusion
+In this post, we reviewed some best practices to secure and harden SaaS applications that assume roles in customers' AWS accounts. It should be interpreted as an iterative maturity model that you can follow over time. Unless you process highly sensitive data or require by design to have privileged roles in your customers' accounts, it's likely you don't need to implement everything—you can begin with the basics, and progress from there as needed based your requirements.
+We're eager to hear from you! If you have any questions, thoughts or suggestions, shoot us a message at securitylabs@datadoghq.com or open an issue. You can also subscribe to our monthly newsletter to receive our latest research in your inbox, or use our RSS feed.
+Updates made to this entry
+ExternalId
+sts:AssumeRole
+ReadOnlyAccess
+ReadOnlyAccess
+SecurityAudit
+ec2:DescribeInstanceAttribute
+lambda:ListFunctions
+sts:ExternalId
+AdministratorAccess
+EC2FullAccess
+AdministratorAccess
+AssumeRole
+AssumeRole
+eu-west-3
+us-east-1
+sts:AssumeRole
+111111111111
+OrganizationAccountAccessRole
+OrganizationAccountAccessRole
+sts:GetCallerIdentity
+sts:GetCallerIdentity

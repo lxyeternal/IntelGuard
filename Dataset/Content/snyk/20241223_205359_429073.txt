@@ -1,0 +1,155 @@
+
+On March 26th, 2019, almost three years after the last jQuery security vulnerability was disclosed, we recently learned about a new security vulnerability affecting the same popular jQuery frontend library.
+This security vulnerability referred to and manifests as prototype pollution, enables attackers to overwrite a JavaScript application object prototype. When that happens, properties that are controlled by the attacker can be injected into objects and then either lead to denial of service by triggering JavaScript exceptions, or tamper with the application source code to force the code path that the attacker injects.
+Following is a proof-of-concept example from the original report I triaged on HackerOne as part of the Node.js Security work group (WG):
+1let a = $.extend(true, {}, JSON.parse('{"__proto__": {"devMode": true}}'))
+2console.log({}.devMode); // true
+As the code shows, the jQuery extended API is used for a recursive merge of several objects.
+While not a very straight-forward vulnerability to exploit, it can potentially affect a large amount of projects and users due to the popularity of jQuery in the JavaScript ecosystem. On top of that, we’ve already witnessed real-world cases of prototype pollution attacks such as the one affecting mongoose from December 2018.
+The jQuery team has recently released a fix for this security issue in version 3.4.0 which we highly encourage you upgrade to.
+Reconstructing a vulnerable application
+Given that jQuery is a library that is mostly used in the frontend let’s see how a prototype pollution vulnerability manifests in a client-side application.
+The attack begins with user input, which allows a malicious attacker to inject an object that the developer might not have sanitized or referenced for any special treatment.
+Let’s say you are building an application in which a user is authorized to send JSON payloads that are saved as is. Perhaps you’d like to give the user this ability in order to allow the user control of the content structure, which you don’t wish to be responsible for.
+An example of a payload that would be sent in such a case follows:
+1{
+2  “myProperty” : “a”,
+3  "__proto__" : { "isAdmin" : true }
+4}
+Let’s assume you are tasked with cloning an object in a recursive manner, but you’re not entirely sure about how to go about it. If you search Google for "deep clone an object in javascript", this answer appears as the top stackoverflow search result:
+Seeing it has more than four thousand upvotes and was chosen as the correct answer, you might be very much inclined to copy and paste the deep copy example and get the work done.
+1var myObject = ‘{ “myProperty” : “a”, "__proto__" : { "isAdmin" : true } }’
+2var newObject = jQuery.extend(true, {}, JSON.parse(myObject))
+Based on the stackoverflow advice, what would you expect to happen with this code example?
+
+A myObject shows an example for a stringified format, possibly fetched from a database field.
+A JSON.parse() and the jQuery extend() function are used in order to clone a copy of myObject.
+The new cloned version is called newObject.
+When JSON.parse() handles a property with the name of __proto__ such as the one we have in our example, you might have expected that it would assign the property isAdmin to true in the object’s parent property. However, it actually creates an object with that property name, which overrides the property chain capability.
+When this behavior of JSON.parse() is put together with an unsafe deep cloning capability, otherwise referred to as object merging, it leaks the value assigned to the __proto__ property into the global JavaScript object.
+With that in mind, let’s imagine the following code snippet and it’s impact to realize how prototype pollution attacks work:
+1var myObject = ‘{ “myProperty” : “a”, "__proto__" : { "isAdmin" : true } }’
+2var newObject = jQuery.extend(true, {}, JSON.parse(myObject))
+3// if you do console.log({}.isAdmin) you’ll get true returned
+4// later down the application source code we may try to detect if the user is an admin or not
+5If (user.isAdmin === true) {
+6  // do something like load the relevant interface, run an Ajax call, access localStorage, etc
+7}
+If the user object that was fetched from the database didn’t have any value set to its isAdmin property, then the user object is essentially undefined, In such a case, accessing the isAdmin property in the if clause would require accessing the parent object in the prototype chain of the user object. That would be Object, which now have been polluted and which includes that isAdmin property—set to a true value. Ultimately, resulting from no intent on the part of the developer, the user is now set as an administrator and can wreak havoc on the application.
+Exploring other attack vectors
+As we just saw in the previous example, an unsafe recursive merge operation, combined with how the JSON.parse works would result in potential pollution of the prototype chain.
+This is, however, not the only way to alter the prototype. Consider the following code:
+1let myObj = {}
+2myObj[‘__proto__’][‘a’] = ‘a’
+3console.log(myObj.a)
+4let newObj = {}
+5console.log(newObj.a)
+In this example:
+
+A new myObj is created.
+The prototype chain is accessed via __proto__ and that object is modified to include a new string property.
+Because the myObj prototype is actually a JavaScript Object that we modified, any new objects created from now on will include this property as well. This happens because of how JavaScript works: If there’s no property in the a object’s property (on newObj) then JavaScript accesses the newObj prototype to find it, and does so recursively until it has exhausted the entire prototype chain. In our case, that property does exist and this is why accessing it returns the string value.
+You might ask yourself how someone could inject __proto__ object access in the way we just described.
+Let’s consider building an application that lists packages on npm and does something with them, such as listing them in a nice user interface.
+We’d probably need an API that sends a list of npm packages and their package.json file contents:
+1[
+2  {
+3    "cool-package": {
+4      "license": "MIT",
+5      "github": "https://github.com/someuser/cool-package"
+6    }
+7  },
+8  {
+9    "__proto__": {
+10      "license": "MIT",
+11      "github": "https://github.com/",
+12      “toString”: “april fools”
+13    }
+14  }
+15]
+While you might think that this API is secure because it arrives directly from npmjs itself and the APIs that they provide, or from some other trusted website for this data where the attacker doesn’t own the API service itself, that would be a mistake. As you have probably noticed, the package details such as its name and the package.json content are ultimately in the user’s control.
+To build on this sample application scenario, let’s say that the developer would like to build a map out of the array so they can access packages very easily without having to iterate through the array to pull the data.
+In essence, that developer might try to access the data like this:
+1const pkgLicense = packageList[‘jquery’][‘license’]
+Here is a working example of such code:
+1let list_of_npm_packages = JSON.parse(`
+2[
+3  {
+4    "cool-package": {
+5      "license": "MIT",
+6      "github": "https://github.com/someuser/cool-package"
+7    }
+8  },
+9  {
+10    "__proto__": {
+11      "toString": "april fools"
+12    }
+13  }
+14]
+15`);
+16
+17list_of_npm_packages.forEach((package) => {
+18     for (const [propertyKey, objectValue] of Object.entries(package)) {
+19          for (const [name, value] of Object.entries(objectValue)) {            
+20            if (!packagesMap[propertyKey]) {
+21            packagesMap[propertyKey] = {}
+22            }
+23            packagesMap[propertyKey][name] = value 
+24          }
+25     }
+26})
+If we were to create totally new objects at this point and try to access their toString property we’d unveil the prototype pollution attack.
+1const a = {}
+2console.log(a.toString)  // prints ‘april fools’
+3console.log({}.toString) // prints ‘april fools’
+Prototype pollution vulnerabilities in the wild
+jQuery isn’t the sole victim of this type of vulnerability. In the last year alone, we recorded more than 20 prototype pollution vulnerabilities spanning across browser and Node.js ecosystems. These vulnerabilities appear in both JavaScript libraries such as lodash, potentially affecting many frontend projects due to the popularity of lodash, as well as Node.js backend libraries that deal with JavaScript object cloning such as node.extend, and deep-extend.
+On February 21st, Eran Hammer also shared his story about how a similar attack, prototype poisoning vulnerability can impact a library by leaking data through joi, a popular validation package that powers many projects in the ecosystem. This vulnerability also affected hoek which is a utility library from the same group of developers under the roof of the hapi web application framework.
+Many of these prototype pollution vulnerabilities have been reported by Olivier Arteau, also known as HoLyVieR, via a responsible security disclosure for the HackerOne program that the Node.js Security WG runs in order to provide incident response and to handle security issues that affect the larger JavaScript ecosystem. Oliver has also released a detailed vulnerability report on the impact of prototype pollution and presented a real-world case of this vulnerability affecting the Ghost CMS Node.js project in the NorthSec conference.
+Summary
+In closing, several mitigations and security best practices should be followed in order to avoid prototype pollution:
+
+Ensure you are using safe recursive merge implementations.
+Consider creating objects without a prototype, such as Object.create(null) to avoid them being susceptible to prototype pollution attacks.
+Avoid using square bracket notation when working with user-controlled data, and at all if possible. Consider using the Map language primitive for map-based structures.
+We at Snyk value the security community and believe that responsible disclosure of security vulnerabilities in open source packages helps us ensure the security and privacy of the users. If you believe you found a vulnerability within an Open Source package, you can contact us through https://snyk.io/vulnerability-disclosure. Our responsible disclosure program aims to protect both the developer and the reported researcher, while allowing developers to safely benefit from vulnerabilities discovered by researchers.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+A myObject shows an example for a stringified format, possibly fetched from a database field.
+myObject
+A JSON.parse() and the jQuery extend() function are used in order to clone a copy of myObject.
+JSON.parse()
+extend()
+myObject
+The new cloned version is called newObject.
+newObject
+JSON.parse()
+__proto__
+isAdmin
+true
+JSON.parse()
+__proto__
+isAdmin
+isAdmin
+user
+isAdmin
+true
+JSON.parse
+A new myObj is created.
+myObj
+The prototype chain is accessed via __proto__ and that object is modified to include a new string property.
+__proto__
+myObj
+Object
+a
+newObj
+newObj
+__proto__
+package.json
+toString
+Ensure you are using safe recursive merge implementations.
+Consider creating objects without a prototype, such as Object.create(null) to avoid them being susceptible to prototype pollution attacks.
+Object.create(null)
+Avoid using square bracket notation when working with user-controlled data, and at all if possible. Consider using the Map language primitive for map-based structures.
+Map

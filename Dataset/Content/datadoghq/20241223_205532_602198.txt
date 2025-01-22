@@ -1,0 +1,98 @@
+
+In the previous post in this series, we took a look at Kubernetes API security. In this post, we'll focus on authentication, a key aspect of Kubernetes security.
+Kubernetes has a number of APIs that can require authentication, but the most important one is the main Kubernetes API, so we'll focus on it throughout the bulk of this post.
+Authentication is the first of three stages that any request to the main Kubernetes API needs to go through before it is applied to the cluster. We'll discuss the other two (authorization and admission control) in future blog posts in this series.
+
+
+Kubernetes authentication principles
+A couple of key design decisions are important to consider when thinking about how Kubernetes handles authentication. The first one is that Kubernetes does not generally make authentication decisions for standard users (as opposed to service accounts). Instead, it relies on an external system to carry out authentication and then uses information provided by that system to identify the user making requests to the cluster. This has some notable implications for managing user access to a cluster. For example, because the cluster does not maintain a user database, any audit of user access needs to be done on the external authentication provider(s).
+Another aspect of authentication that's important to understand is that it's possible to define multiple authentication methods in a cluster. If this is the case, you will need to track all of the methods you've configured, because a credential that's valid with any one of those methods will allow access to the cluster.
+For access to the cluster by processes running in pods, Kubernetes uses service account tokens. These JSON web tokens (JWTs) are created by the cluster and provided to system services and pods running in the cluster. An important note for these tokens is that, while they're designed for service account use, they can be used by any cluster user, so stolen tokens can be abused by attackers.
+Internal Kubernetes authentication methods
+While most production clusters will rely on a purely external authentication source, Kubernetes provides a couple of built-in options to think about when looking at cluster security, and some are more popular than others (i.e., client certificates are more commonly used than static tokens and bootstrap tokens). We will cover these options in more detail throughout this section.
+Static token authentication
+Kubernetes supports the use of a static token file for authentication. This file stores usernames and credentials in cleartext on control plane nodes in the cluster. This method is generally considered to be unsuitable for production environments for a couple of reasons:
+
+Adding, modifying, or removing users requires direct editing of a file on a control plane node.
+Any change to the file requires the kube-apiserver component to be restarted before it will take effect.
+In high-availability clusters with multiple control plane nodes, the file needs to be manually synchronized across the cluster.
+This mechanism isn't available on managed Kubernetes instances, as they do not allow direct access to the control plane nodes.
+There are some cases where Kubernetes distributions might use this file for system user purposes, but it generally is not used.
+Bootstrap tokens
+Bootstrap tokens have a very limited and specific purpose in Kubernetes. They are meant to assist in the process of setting up a cluster or adding a node to a cluster.
+A bootstrap token works via a token value provided in a Kubernetes secret in the kube-system namespace. Bootstrap tokens have usernames that start with system:bootstrap: and belong to the system:bootstrappers group.
+From a security point of view, access to these tokens should be restricted to the system components needed to add a node to the cluster—and they definitely should not be used for general user authentication. An attacker with access to a leaked bootstrap token will have rights that are in line with rights assigned to the token's associated user and the system:bootstrap group; the exact rights will vary depending on the Kubernetes distribution in use, and some distributions do not use bootstrap tokens at all (e.g., GKE uses client certificates instead).
+X.509 client certificates
+X.509 client certificates can also be used for authentication in Kubernetes. They're typically used whenever the kubelet authenticates to the API server. They can also be used for user authentication. However, you should generally avoid using them because they are difficult to manage securely.
+The main problem with client certificate authentication is that Kubernetes does not offer support for easily revoking certificates. Let's say that a user has a client certificate for the cluster. If they then leave the company, move teams, or their private key is compromised, there's no easy way to revoke that user's access. You'll need to rotate the entire Certificate Authority, which is a disruptive operation and not something you'd want to do regularly. There is an open issue related to this, but at the time of writing, it has already been open for over eight years, so it's unclear when it will be resolved.
+Another challenge with using client certificate authentication in Kubernetes is that the cluster does not maintain a persistent record of user credentials created in this way. This means that it does not check that a given user only has one certificate, so multiple certificates can be created for a single user. Furthermore, the audit logs do not record which certificate was used to make a given request.
+Now that we've covered why client certificates are not suitable for user authentication, there are a couple of other important points to note. The first is that many Kubernetes distributions provide a "first user" as part of the installation process. This user uses a client certificate that generally has a long (over a year) expiry value. As this user will have cluster admin-level rights and a generic username, it's important to ensure that this credential is stored securely and that it is not used for general cluster administration.
+Another point to note is that Kubernetes's CertificateSigningRequest (CSR) API can be used to generate and approve new certificates for client authentication to Kubernetes or for other purposes, such as application encryption. The kubelet uses this API to renew its certificate when it's rotated. However, anyone with the correct rights can also use this API to create client certificates for authentication purposes.
+An attacker who has rights to create and approve a certificate can, fairly easily, create a new credential for the cluster with any username or group they like (apart from the special system:masters group, which is blocked from this API). These credentials can last for as long as the lifetime of the Certificate Authority key, so they represent a useful way for attackers to persist access to a cluster.
+From a cluster operator perspective, it's very important to log any use of this API, ensure that those logs are regularly reviewed, and investigate any inappropriate usage.
+Next, we'll look at the three major managed Kubernetes distributions and see how they implement different approaches to client certificate authentication.
+If you follow the standard getting started guide for AKS, the initial user provided with the cluster uses client certificate authentication with a generic name (masterclient) and a two-year expiration date. This user is also a member of the system:masters group, meaning that it will always have cluster admin access.
+
+
+When using AKS, it's important to ensure that the cluster uses Entra ID to ensure that this standard user is not created.
+Additionally, AKS supports the CSR API, so any user with rights to issue and approve certificates can create new users with one-year lifetimes. In the example below, a certificate for the clusterAdmin user has been created. This certificate provides full rights to the cluster.
+
+
+GKE supports the use of the CSR API to create new client certificate users. It also allows you to use this API to issue new credentials for system users, as shown in the screenshot below.
+
+
+The default lifetime for a certificate issued in GKE is five years, so any credential created using this approach will be valid for a long time. Whenever it is necessary to use client certificates, cluster operators should ensure that the expiry value is changed to a shorter value than this default.
+The CSR API is not supported for client authentication in EKS clusters, and as such, it can't be used to generate new client certificates for authentication to the Kubernetes API server.
+Service account tokens
+Service account tokens are designed to allow applications running inside the cluster to authenticate to the Kubernetes API. In older versions of Kubernetes, these credentials existed as secrets inside the cluster and they did not expire, making them an attractive target for attackers looking to get persistent access to the cluster.
+In modern Kubernetes clusters (v1.22+), the credentials are dynamically generated using the TokenRequest API. These tokens have a variable lifespan, depending on the Kubernetes distribution in use. The default in kubeadm is one hour, which presents a much smaller window for compromised credentials to be used, when compared to the original tokens that never expired.
+From a security perspective, service account tokens are interesting in that they're the one case where Kubernetes does have a user database (the service accounts) and credentials (the tokens), but it's only intended for use by applications, not users of the cluster.
+From an attacker's perspective, the TokenRequest API may still be a good option for persistence; see our other blog post for further details.
+External authentication methods
+In addition to the built-in authentication mechanisms in Kubernetes, there are a number of options for leveraging external providers. In production, a combination of built-in and external options is often used.
+OpenID Connect (OIDC)
+OIDC authentication is one of the main external authentication approaches used by unmanaged Kubernetes clusters. It allows Kubernetes to rely on any external authentication provider that uses the OIDC protocol.
+Typically an additional piece of software, such as Dex, Keycloak, or OpenUnison, is used to provide an interface between the cluster and identity store.
+Notably, configuring OIDC authentication for a cluster requires modification of several startup flags on the Kubernetes API server. This means that it is often not available in managed Kubernetes services, although it is supported in EKS and GKE.
+Webhook token authentication
+With webhook token authentication, you can have the Kubernetes API server send all authentication requests to an external URL, which then responds with a allow/deny response depending on its own internal logic.
+This approach to authentication gives cluster operators a relatively easier way to create their own authentication servers, which can be used by Kubernetes. However, as with OIDC, configuring this option requires setting API server startup flags, so it is generally not available in managed Kubernetes services outside of being used by the cloud service provider themselves (e.g. AWS use this as part of EKS).
+Authenticating proxy
+The authenticating proxy option allows the API server to rely on values set in the headers that have been passed to it by a proxy server. The proxy server has to authenticate to the API server using a known client certificate; this helps mitigate the risk of an attacker setting header values that could allow them to execute a spoofing attack.
+As with other external authentication options, this relies on the cluster operator configuring API server flags, so it is generally not an option for managed Kubernetes distributions.
+Impersonating proxy
+Using an impersonating proxy to authenticate to Kubernetes clusters shares some similarities with the authenticating proxy we just discussed. However, it differs in that it takes advantage of the Kubernetes impersonation feature, which provides some more flexibility on implementation.
+When using this approach, the proxy is provided with credentials that allow it to impersonate other users in the cluster. It then provides functionality to authenticate the user, determines the correct Kubernetes user and group(s) to use, and passes their request to the API server while setting headers to ensure that the correct privileges are given to the request.
+An example of this approach is kube-oidc-proxy, which is designed to allow users to authenticate against an OIDC source and get rights to Kubernetes clusters.
+Authentication for other Kubernetes components
+Up to this point, we've been focusing on authentication to the main Kubernetes API, as that's where most users and services will authenticate. However, as we noted in our previous post, other Kubernetes APIs also have authentication requirements for some types of access. When securing a cluster, it's important to understand how these operate.
+Kubelet
+As the kubelet API has several sensitive endpoints, it's important to ensure that it implements authentication. By default, anonymous access is allowed to the API but most distributions will disable this and require authentication for all requests.
+There are two options for authentication to the kubelet API: webhook and x.509. Webhook authentication configures the kubelet to use the API server's TokenRequest API to check the validity of service account tokens to authentication users. This means that workloads within the cluster can authenticate to the kubelet API.
+When the kubelet uses x.509 authentication, it can validate certificates signed by the cluster's Certificate Authority, meaning that users with valid client certificates can authenticate to the kubelet API.
+From a security perspective, this means that attackers with valid cluster credentials may try to directly access the kubelet API in order to bypass controls like audit logging. However, they need specific rights to be able to do that. We will discuss this
+
+further in an upcoming post in this series.
+Controller manager and scheduler
+The controller manager and scheduler both have sensitive API endpoints that should be restricted, and therefore require authentication. Both services make use of the API server's TokenRequest API to manage this process, so users need a valid service account token to access these APIs.
+Kube-proxy
+The kube-proxy component takes a slightly different approach to security and its API, where sensitive endpoints (for example, /configz) should only be exposed to the localhost interface on the nodes they're running on.
+This isn't quite as strong a control as requiring authentication, because if an attacker is able to get access to the host's network namespace, they can access the API endpoints without any credentials.
+Etcd
+The etcd API is very important from a security perspective, as the database stores all the information about the cluster, including sensitive data like secrets. Authentication is handled by client certificates and there are no unauthenticated paths on the main port (2379/TCP). Instead, a separate port is provided for metrics, which is available without authentication.
+An important point about etcd client certificate authentication is that etcd essentially trusts any certificate issued by a Certificate Authority that has been specified by the command line flag --cert-file, and it gives those certificates full access to the database.
+This means that a dedicated Certificate Authority is required in order to secure communications between the API server and etcd. This ensures that other certificates don't get unauthorized access to the database. In general, Kubernetes distributions automatically implement this for you, but it's still possible that a cluster could be configured incorrectly and end up providing unintended access to users.
+Conclusion
+In this post, we've explored how Kubernetes manages authentication and explained how you can use that information to secure your clusters and user access to the various Kubernetes APIs.
+Although the main Kubernetes API will be your primary focus, you shouldn't forget about securing the other APIs that make up a cluster, as they could also be useful to attackers.
+In the next post, we'll move on to the topic of authorization and look at how Kubernetes restricts rights given to users who have successfully passed the authentication check. Also, if you'd like to learn more about how EKS handles authentication, you can read our post Attacking and securing cloud identities in managed Kubernetes part 1: Amazon EKS
+kube-system
+system:bootstrap:
+system:bootstrappers
+system:bootstrap
+system:masters
+masterclient
+system:masters
+clusterAdmin
+/configz
+--cert-file

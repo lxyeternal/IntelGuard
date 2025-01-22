@@ -1,0 +1,90 @@
+
+Welcome to Misconfiguration Spotlight, a regular look at common misconfigurations across cloud environments and how to fix them. Today, we’ll be taking a look at the AWS EC2 Instance Metadata Service (IMDS) and why you should be using version 2.
+What is the Instance Metadata Service?
+The EC2 Instance Metadata Service provides important information about each individual EC2 instance. This includes several categories of information, such as the AMI ID, hostname, associated security groups, and more.
+Instance metadata is accessible to any application running on an EC2 instance via a link-local address (169.254.169.254). It is also accessible over IPv6 for EC2 instances built on the Nitro System.
+In a security context, if an identity and access management (IAM) role is associated with the EC2 instance, then IAM credentials for that role are available in the instance metadata. This serves as a target for attackers, who often want to move into the control plane as quickly as possible. Here’s an example of what IAM credentials might look like when retrieved from the EC2 instance metadata:
+$ curl http://169.254.169.254/latest/meta-data/iam/security-credentials/example-role
+{
+  "Code" : "Success",
+  "LastUpdated" : "2022-08-17T14:29:46Z",
+  "Type" : "AWS-HMAC",
+  "AccessKeyId" : "ASIAEXAMPLEEXAMPLEEX",
+  "SecretAccessKey" : "example123EXAMPLE123example123EXAMPLE12",
+  "Token" : "IQoJb3JpZ2luX2VjEIf//////////wEaCXVzLWVhc3QtMSJGMEQCIAoIQgdV5TFOETu83FtGMkt705VZliM7mnbXcbZRsYXyAiBZ”
+  [...snip…]
+Server-side request forgery and the Instance Metadata Service
+A common technique for cloud attackers is to steal IAM credentials from instance metadata via server-side request forgery. Server-side request forgery (SSRF) is a common web application vulnerability in which an adversary can cause a web application to make a request to a remote service. In this situation, an adversary may be able to convince a web application running on an EC2 instance to request IAM credentials from the instance metadata and return those credentials to the attacker.
+
+
+An adversary skilled in AWS exploitation will look for SSRF vulnerabilities in web applications running on EC2 instances and, when found, access the instance metadata and steal IAM credentials.
+Last year, Mandiant identified a threat actor using a known vulnerability, CVE-2021-21311, to steal IAM credentials from EC2 instances using the metadata service post-compromise.
+IMDSv1 and IMDSv2
+There are two versions of the Instance Metadata Service: IMDSv1 and IMDSv2.
+IMDSv1 is a simple request and response protocol. When you make a request to the IMDS from the EC2 instance, you receive the result of your request. There are no additional parameters to be passed. Because of this, IMDSv1 is a perfect candidate for SSRF attacks. IMDSv1 is enabled by default when creating an EC2 instance with the metadata service enabled.
+IMDSv2, on the other hand, is session-oriented. This means that, before making a request to the IMDS, you must first create a session token with a PUT request and pass it along in subsequent requests inside a header. This provides an additional security benefit, as an adversary is unlikely to be able to set a request header via SSRF.
+$ TOKEN=`curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"`
+$ curl -H "X-aws-ec2-metadata-token: $TOKEN" -v http://169.254.169.254/latest/meta-data/
+In addition to mitigating the risk of SSRF attacks, IMDSv2 has other security benefits. For example, it will block requests to fetch a token that includes the X-Forwarded-For header. This is to prevent a misconfigured reverse proxy from being able to access it.
+Additionally, IMDSv2 in its default configuration sets the time to live (TTL) of the TCP packet containing the session token to "1." This ensures that misconfigured network appliances (firewalls, NAT devices, routers, etc.) will not forward the packet on, protecting the EC2 instance from abuse.
+Despite the security advantages of IMDSv2, teams have been unfortunately slow to adopt the updated service. Research from Datadog Security Labs suggests that as many as 93 percent of all EC2 instances don’t enforce usage of IMDSv2 as of September 2022.
+Remediation
+Because of the risk that IMDSv1 poses, we recommend enforcing IMDSv2 across all EC2 instances. In addition, instances with IMDSv1 should be configured to enforce IMDSv2, and new instances should be prevented from starting with IMDSv1 enabled. This can be accomplished by creating AWS service control policies (SCPs) and attaching them to the AWS accounts you wish to protect.
+To force the usage of IMDSv2, you can set an SCP such as the following:
+{
+    "Version": "2012-10-17",
+    "Statement": [
+               {
+            "Sid": "RequireImdsV2",
+            "Effect": "Deny",
+            "Action": "ec2:RunInstances",
+            "Resource": "arn:aws:ec2:*:*:instance/*",
+            "Condition": {
+                "StringNotEquals": {
+                    "ec2:MetadataHttpTokens": "required"
+                }
+            }
+        }
+    ]
+}
+This policy will prevent the creation of an EC2 instance without IMDSv2—ensuring you cannot create one with IMDSv1. Additionally, you can create an SCP that prevents someone from modifying an existing EC2 instance to use IMDSv1, as in the following example:
+{
+    "Version": "2012-10-17",
+    "Statement": [
+               {
+            "Sid": "PreventModifyInstanceMetadata",
+            "Effect": "Deny",
+            "Action": "ec2:ModifyInstanceMetadataOptions",
+            "Resource": "*"
+        }
+    ]
+}
+Finally, you can create a policy that uses the NumericLessThan and ec2:RoleDelivery IAM condition keys to deny any action performed with credentials returned from IMDSv1. This ensures that credentials returned from version 1 of the instance metadata service cannot be used.
+{
+    "Version": "2012-10-17",
+    "Statement": [
+               {
+            "Sid": "RequireAllEc2RolesToUseV2",
+            "Effect": "Deny",
+            "Action": "*",
+            "Resource": "*",
+            "Condition": {
+                "NumericLessThan": {
+                    "ec2:RoleDelivery": "2.0"
+                }
+            }
+        }
+    ]
+}
+For more information on setting up SCPs and additional control policies you can use, see the AWS documentation.
+There are also two new global condition keys which can be used; aws:EC2InstanceSourceVPC and aws:EC2InstanceSourcePrivateIPv4. By using these condition keys with SCPs you can ensure that IAM credentials from an EC2 instance can only be used from the EC2 instance they were issued to.
+As an alternative, AMI's can be configured to use a default version of the IMDS. This is included by default in some newer AMIs such as Amazon Linux 2023. It is important to check the hop limit and if it is a good fit for the workload being used, as that particular AMI has a hop limit of 2, allowing containers to access the IMDS.
+How Datadog can help
+Datadog Cloud Security Management customers can use the out-of-the-box rules to quickly identify EC2 instances running IMDSv1 and limit the risk of SSRF attacks in their environment.
+To test your organization’s controls and detections for EC2 instance credential theft, you can use the Steal EC2 Instance Credentials technique from Stratus Red Team to simulate this in your own AWS account.
+Additionally, Datadog Application Security Monitoring customers can instrument their applications to detect SSRF attacks.
+Updates made to this entry
+NumericLessThan
+ec2:RoleDelivery
+aws:EC2InstanceSourceVPC
+aws:EC2InstanceSourcePrivateIPv4

@@ -1,0 +1,142 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_434989\863x30051.png
+
+On Sunday, June 2nd 2024, a fix commit was pushed for a vulnerability in GNU’s popular Wget tool. Two weeks later, the vulnerability was assigned the ID CVE-2024-38428 and later was classified as a critical vulnerability – with a CVSS score of 9.1.
+In this blog, we take a dive deep into this threat by seeing what caused it, what consequences it might have, and how it can be mitigated. Due to the reasonable prerequisites for exploiting this vulnerability and the  large number of vulnerable versions, we believe that there is a strong likelihood that this vulnerability will be exploited in practice and therefore strongly recommend mitigating this issue as soon as possible.
+In this blog we demonstrate how attackers can exploit this vulnerability, and it might lead to common attacks such as phishing, SSRF and MiTM. These attacks can have severe consequences such as resource restriction bypass, sensitive information exposure and even installation of malware on the victim’s machine.
+Which versions of Wget are affected?
+CVE-2024-38428 is a critical severity vulnerability that affects any Wget version up to and including 1.24.5. A fixed version of Wget was still not available at the time of the publishing of this blog post. However, some Linux distributions did provide a fix in their systems, see “How to resolve CVE-2024-38428” below for more details.
+CVE-2024-38428 Overview
+Wget is a popular program that is used to download content from servers and is part of the GNU project. It primarily supports the HTTP and FTP protocols.
+RFC-2396 is an outdated standard from 1998 that defines the syntax and format of a URL. In general, a URL is of the form scheme://[userinfo@]host[:port]/path[?query][#fragment]. The userinfo part consists of information about the user, like a username. Although the standard is outdated, it is the standard that is used in Wget’s url.c file which is responsible for parsing URLs.
+It was discovered that Wget doesn’t parse userinfo correctly. According to the standard, a URI can include a semicolon in its userinfo. However, Wget parses URIs in a way that causes userinfo to be considered part of the host if it contains a semicolon. This means that the host part of the URI could be interpreted incorrectly and be abused by attackers that control the userinfo.
+Misinterpretation of the host segment might lead to DNS queries being sent to incorrect and potentially malicious domains. This can have severe consequences, like resource restriction bypass, sensitive information leakage, and remote code execution.
+Are you affected by CVE-2024-38428?
+The CVE is only exploitable when a vulnerable Wget version is used in specific conditions:
+
+The attacker needs to be able to control the credentials in the URL that is supplied to Wget.
+When Wget is used to connect to an FTP or FTPS URLs the attacker can utilize the CVE to completely replace the hostname that Wget connects to – this is the most severe outcome of exploiting this vulnerability which we demonstrate in the examples section below. If the HTTP protocol is used, the attacker can control the hostname but the hostname will contain invalid characters (like semicolon) that will limit the attack surface and the options to carry out an attack with a severe outcome (like SSRF).
+CVE-2024-38428 In-Depth Details and Exploitation
+The function url_skip_credentials() is used in Wget while parsing a URL. The function receives a pointer to the URI, and returns a pointer to the part of the URI where the host segment begins. The function scans the URI for the @ character, and for any “terminating characters” found in userinfo.
+static const char *
+url_skip_credentials (const char *url)
+{
+  /* Look for '@' that comes before terminators, such as '/', '?',
+     '#', or ';'.  */
+  const char *p = (const char *)strpbrk (url, "@/?#;");
+  if (!p || *p != '@')
+    return url;
+  return p + 1;
+}
+If the function finds a @ character, it returns a pointer to the character that follows it. But if it finds a terminating character before the @ character, it returns a pointer to the full URI. As can be seen in the code snippet, the string defining the terminating characters includes a semicolon. This causes the code to behave differently than what the standard demands, because a semicolon is a character that is actually allowed to be part of userinfo.
+So when a semicolon is used in the userinfo segment, Wget interprets that the host segment begins where the userinfo segment actually begins. For example, the URL http://us;er@host will result in a request for the hostname us;er@host. But there is a problem – as a domain name can only contain a specific set of characters, which does not include ; and @. So, theoretically, this vulnerability will always lead to failed DNS requests – unless we find some way to discard the rest of the URL.
+After some research, we discovered a way to take advantage of this vulnerability and send the request to a hostname of our choice. In order to understand it, let’s take a look at the function init_seps(). This function, located in url.c, is responsible for providing a string specifying the hostname terminators based on the URL scheme.
+static const char *
+init_seps (enum url_scheme scheme)
+{
+  static char seps[8] = ":/";
+  char *p = seps + 2;
+  int flags = supported_schemes[scheme].flags;
+
+  if (flags & scm_has_params)
+    *p++ = ';';
+  if (flags & scm_has_query)
+    *p++ = '?';
+  if (flags & scm_has_fragment)
+    *p++ = '#';
+  *p = '\0';
+  return seps;
+}
+The characters provided by this function are later used to find the end of the host segment in the URL:
+seps = init_seps (scheme);
+...
+p = strpbrk_or_eos (p, seps);
+host_e = p;
+For HTTP and HTTPS, init_seps() returns the string “?#”. Both ? and # are characters that are not allowed to be included as part of userinfo, so they can’t be used by an attacker to discard the rest of the URL.
+This is where the FTP and FTPS protocols come into play. These protocols can also be used in Wget, but work a little differently than HTTP. Notably, it has different hostname terminators – ; and #. According to the RFC it is permissible to use a semicolon in userinfo, but an attacker can take advantage of this by using a URL like ftp://attackerhost;@host. This URL would result in a request being sent to attackerhost – an unintended and potentially malicious domain.
+CVE-2024-38428 Examples
+Let’s take a look at a few examples and see how this vulnerability can be exploited.
+SSRF
+First, let’s see how this issue can lead to an SSRF (server-side request forgery) attack. Consider an app which connects to an external web server using a user’s username. So, for a user named myuser, the server would issue a request for ftp://myuser@myserver.
+In addition, the app should apply escaping protection to make sure that characters such as # cannot be present in a username. According to the RFC, however, a semicolon is allowed to be part of userinfo – so the app should allow it.
+Notice how the user cannot and should not have any control over the domain name (myserver). Still, by utilizing this issue, an attacker could actually change it. For example, the attacker could buy the domain maliciousdomain, and then register as the user maliciousdomain;. The URL in this case would be ftp://maliciousdomain;@reliableserver. Note that the semicolon would cause Wget to interpret the beginning of host as the beginning of userinfo, and it also serves as a hostname terminator. This would cause the request to be sent to maliciousdomain – the attacker’s domain.
+The attacker could then easily perform an SSRF attack, and provide a malicious file to the app. For example, the app might store information about users’ permissions (i.e. admin or not) on an external server, and by exploiting this vulnerability, the attacker could simply return a file that classifies his user as having admin permissions.
+The attack can be seen in the image below, where the request for the file should be sent to reliableserver, but gets sent to maliciousdomain instead.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214131_434989\image11e1723481870186.png
+
+Phishing
+Another example of where this vulnerability can be exploited is in a phishing attack. In this scenario, the attacker could have the victim make a request for a file from ftp://maliciousdomain;@reliableserver. The victim, seeing the reliable hostname reliableserver, might trust this link. But as we have seen before, the link would actually turn the user to the attacker’s domain – maliciousdomain. The attacker could then provide the user with a malicious file that looks like it is reliable, but in fact executes malicious code when opened.
+Man In The Middle
+This vulnerability can also be used to initiate a MiTM attack. The attacker could supply a user with the link ftp://maliciousdomain;@reliableserver. The user, seeing the hostname reliableserver, might trust this link and use it. In reality however, the link would bring the user to maliciousdomain. Up until now, everything is the same as the phishing attack described before. In this scenario, however, the attacker could take it a step further by acting as a proxy between the user and reliableserver, effectively committing a man-in-the-middle attack.
+Data Leakage
+Finally, the vulnerability could also lead to data leakage. The app might provide the user with error logs if something fails. If this is the case, an attacker can cause the request to fail by supplying crafted userinfo credentials and leak the original hostname. Sensitive data can also be leaked by other forms of attacks like SSRF or MiTM.
+How to resolve CVE-2024-38428?
+As of the time of this writing, there is still no fixed version available upstream. At this stage, it is important to identify any versions that might be at risk and update them immediately to the fixed version as soon as they become available.
+In spite of the upstream version being unpatched, several Linux vendors have already published fixed versions of Wget, most notably Red Hat, Ubuntu, Debian and SUSE.
+Fixes are still pending for Alpine.
+Is it possible to mitigate CVE-2024-38428 without upgrading?
+It is possible to mitigate CVE-2024-38428 without hurting Wget functionality, by not allowing for a semicolon to be present in the userinfo part of a URI or if possible, by disallowing user-provided data in the userinfo.
+Is the JFrog Platform Vulnerable to CVE-2024-38428?
+After conducting internal research, we can confirm that the JFrog DevOps Platform is not vulnerable to Wget’s CVE-2024-38428.
+Stay up-to-date with JFrog Security Research
+The security research team’s findings and research play an important role in improving the JFrog Software Supply Chain Platform’s application software security capabilities.
+Follow the latest discoveries and technical updates from the JFrog Security Research team on our research website, and on X @JFrogSecurity.
+scheme://[userinfo@]host[:port]/path[?query][#fragment]
+userinfo
+url.c
+userinfo
+userinfo
+userinfo
+host
+host
+userinfo
+host
+url_skip_credentials()
+host
+@
+userinfo
+@
+@
+userinfo
+userinfo
+host
+userinfo
+http://us;er@host
+us;er@host
+;
+@
+init_seps()
+url.c
+host
+init_seps()
+“?#”
+?
+#
+userinfo
+;
+#
+userinfo
+ftp://attackerhost;@host
+attackerhost
+myuser
+ftp://myuser@myserver
+#
+userinfo
+myserver
+maliciousdomain
+maliciousdomain;
+ftp://maliciousdomain;@reliableserver
+host
+userinfo
+maliciousdomain
+reliableserver
+maliciousdomain
+ftp://maliciousdomain;@reliableserver
+reliableserver
+maliciousdomain
+ftp://maliciousdomain;@reliableserver
+reliableserver
+maliciousdomain
+reliableserver
+userinfo
+userinfo

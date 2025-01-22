@@ -1,0 +1,134 @@
+
+Editor's Note: January 16, 2024
+A code example in this blog has been updated to increase the security of the fix.
+On December 20, 2023, NIST updated a CVE to reflect a new path traversal vulnerability in struts-core. This is CVE-2023-50164, also listed on the Snyk Vulnerability database, with 9.8 critical severity CVSS. If you’ve been doing cybersecurity long enough, you remember the 2017 Equifax breach, which also took place due to an unpatched Struts vulnerability.
+In this post, I outline the issue, discuss its severity, walk you through a proof-of-concept exploit, and provide remediation advice. And, if you use Snyk (sign up for free here), you can easily get notified of this and other vulnerabilities and get advice on how to fix the bad code!
+Let’s start with the remediation advice. Simply upgrade your version of Struts to 2.5.33 or 6.3.0.2 (or greater), depending on which base version you’re currently using.
+How serious is this Struts CVE-2023-50164 path traversal vulnerability?
+We’ve seen the most extreme example of a vulnerability in Struts that can lead to arbitrary code execution. That vulnerability in 2017 led to the infamous Equifax breach. The exploit was accomplished by passing in a malformed Content-Type header and exploiting the resulting exception. It was the worst kind of vulnerability because an exploit could be accomplished remotely, and there was no code guard against it at the time.
+This new vulnerability is serious — you should make sure you update your Struts version. Still, it is less serious than the 2017 vulnerability as it requires both insecure code and the vulnerable version of Struts.
+This vulnerability allows for a path traversal on a file upload. That is, you can upload a file and “break out” of the designated upload folder by giving a relative path. This can lead to remote code execution as the relative path can be within the folders served by the application.
+Proof of concept path traversal exploit for Struts CVE-2023-50164
+All the code found in this post is on GitHub.
+This is a Java project using Maven for builds. There are two profiles in the project: one is called vuln (which is the default), and the other is called no-vuln. If you’re not familiar with Maven or Maven profiles, don’t worry! It’s super easy to run, and the vulnerable version is the default profile. The only requirement is a Java runtime, version 17 or later.
+Navigate to the folder for the project you cloned and run the following:
+1./mvnw clean jetty:run
+You can navigate to the server at http://localhost:9999/struts-vuln-poc. There, you see a very sparse interface for uploading files. That’s not where we’re going to spend our time, though. To satisfy the “nothing up my sleeves” part of this demo, navigate to http://localhost:9999/struts-vuln-poc/rogue.jsp. You should see a 404 page like this:
+We want to exploit this vulnerability, so open a terminal window, navigate to the project folder, and get ready to use the HTTP client of your choice. In my example, I use curl, but you can use any HTTP client that supports file uploads. Execute the following command:
+1curl \
+2http://localhost:9999/struts-vuln-poc/upload.action \
+3-F "Upload=@./payload/rogue.jsp" \
+4-F "uploadFileName=../src/main/webapp/rogue.jsp"
+Now, navigate to http://localhost:9999/struts-vuln-poc/rogue.jsp. You should now see the message: Ya been PWNED!.
+Now that we’ve exploited the vulnerability by dropping off a rogue file into a folder served by our app, let’s examine how we got here.
+I wrote earlier that for this exploit to work, it required both the vulnerable version of the Struts library and insecure code.
+Let’s take a look at the insecure code part first. The Upload action has three properties:
+1private File upload;
+2private String uploadFileName;
+3private String uploadContentType;
+By the nature of how Struts works, these properties will be populated by the request that’s made from an HTTP client (whether that’s your browser or a command line utility, like curl).
+The execute method handles the request after the properties have been set.
+Here’s the core of the execute method:
+1String uploadDirectory = System.getProperty("user.dir") + "/uploads/";
+2File destFile = new File(uploadDirectory, uploadFileName);
+3FileUtils.copyFile(upload, destFile);
+Can you spot the issue here? Rather than rely on our bug-spotting skills, we can use Snyk to tell us the problem with this code. Snyk has a command line interface (CLI), IDE integrations, and a web interface, so you can use it wherever you work.
+Here are the results of running snyk code test from the CLI to use Snyk’s static application security testing (SAST) capabilities:
+This result shows me the specific line number where there’s a security vulnerability as well as the type: Path Traversal. I can also see the severity of this issue, which is High.
+Here are the results of running snyk test from the CLI to use Snyk’s software composition analysis (SCA) capabilities:
+This result shows me that I have a dependency with a known vulnerability — namely, my version of struts-core, version 6.3.0.1. It also recommends that I update it to 6.3.0.2.
+Both of these results are super useful and actionable. But, you get an even more helpful (and holistic) view from the IDE integration.
+I have the project loaded in IntelliJ IDEA, which is what I use for Java development. Running the Snyk scan on the project produces the following results:
+In the left pane, I see both the SAST and SCA results. In the right pane, I see the specific remediation advice.
+Even more useful, when I click on the issue with the code, I get a pane that shows me the code fix from three other open source projects that had the same issue my code has:
+Let’s focus on the google/j2objc example. Scrolling down, I can see the lines of code that were altered to address this vulnerability presented in diff style:
+This gives me a huge leg-up in fixing the code, especially if it’s a vulnerability I’m not intimately familiar with.
+Path traversal vulnerability fix
+Using the information from Snyk’s scanning tools, I can now fix both my custom code and my dependencies.
+Let’s focus first on the code. Execute the following with curl or another HTTP client:
+1curl \
+2http://localhost:9999/struts-vuln-poc/upload-no-vuln.action \
+3-F "Upload=@./payload/rogue.jsp" \
+4-F "uploadFileName=../src/main/webapp/rogue.jsp"
+You’ll now see an error message in the output: Attempted path traversal attack. Using the hints I got from the Snyk code scan, I updated the code to this:
+1File uploadDirectory = new File(USER_DIR + "/uploads/");
+2File destFile = new File(uploadDirectory, uploadFileName);
+3
+4if (
+5  !destFile.getCanonicalPath().startsWith(uploadDirectory.getCanonicalPath() + File.separator)
+6  !upload.getCanonicalPath().startsWith(USER_DIR)
+7) {
+8  throw new SecurityException("Attempted path traversal attack");
+9}
+10
+11FileUtils.copyFile(upload, destFile);
+The if statement does a check to make sure that the destFile is using the canonical path for our defined uploads directory. It also checks to make sure that the uploaded file is within the app’s defined folders and not from some rogue location. When the file is uploaded, struts automatically parks it in a temp folder within its classpath. If these checks fail, a SecurityException is thrown.
+This is a big improvement over the original code to guard against path traversal.
+There’s a subtlety here that’s worth mentioning. Notice that the check has a trailing slash (/) via the File.separator call. This is very important as, without that, a malicious user could still potentially break out of the uploads folder using a partial path exploit. This is because getCanonicalPath() always returns a value without the trailing slash. This is explained very well in the DefCon talk by Jonathan Leitschuh. An even more robust fix uses getCanonicalFile().toPath(), which is included in the repo for this post.
+The overarching point here is that updating to the latest version of struts is the best and most robust way to address the path traversal issue. You won’t have to rely on your manual checks in code as relative paths are automatically stripped.
+We can improve on this and have an even better security posture by addressing the other recommended changes from the Snyk scan. That is, we can upgrade from version 6.3.0.1 to 6.3.0.2 of struts-core.
+The project in the repo you cloned earlier has a profile that uses the updated version of struts-core. Kill the running app and delete the src/main/webapp/rogue.jsp file uploaded earlier. Relaunch it with the following command:
+1./mvnw clean jetty:run -P no-vuln
+Now, execute the original curl command from earlier:
+1curl \
+2http://localhost:9999/struts-vuln-poc/upload.action \
+3-F "Upload=@./payload/rogue.jsp" \
+4-F "uploadFileName=../src/main/webapp/rogue.jsp"
+This time, you get a success message like: File uploaded successfully to /CVE-2023-50164-POC/uploads/rogue.jsp
+Notice that the relative path we supplied was ignored. And you may be wondering why we didn’t get the error message we saw before. It’s because the updated version of struts-core automatically sanitizes paths provided as input.
+If you set a breakpoint in the Upload.java class on line 23, you see the following when you make the curl request:
+The uploadFileName has had the relative path I supplied stripped off it.
+Stay ahead of vulnerabilities with Snyk
+I hope you found this demo of the path traversal vulnerability in older versions of struts-core useful. All the code found in this post is on GitHub.
+The Snyk scanning tools caught the issue both in the dependency definition for the project and in the custom code.
+You can get an even better productivity boost by using Snyk to actively monitor your project so that you are automatically notified when new vulnerabilities are discovered. Snyk can even automatically create a pull request (PR) on your behalf when a new vulnerability is found. You just have to review and merge it!
+Rather than sifting through CVEs and manually checking to see if your code has an issue, you can focus on what you do best: slinging that code! Give Snyk a try for free at: https://app.snyk.io
+More resources for dealing with Apache Struts:
+
+What is CVE-2023-50164?
+How critical is CVE-2023-50164?
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+Content-Type
+vuln
+no-vuln
+http://localhost:9999/struts-vuln-poc
+http://localhost:9999/struts-vuln-poc/rogue.jsp
+curl
+http://localhost:9999/struts-vuln-poc/rogue.jsp
+Ya been PWNED!
+Upload
+curl
+execute
+execute
+snyk code test
+Path Traversal
+High
+snyk test
+struts-core
+6.3.0.1
+6.3.0.2
+google/j2objc
+diff
+curl
+Attempted path traversal attack
+if
+destFile
+uploads
+SecurityException
+File.separator
+getCanonicalPath()
+getCanonicalFile().toPath()
+6.3.0.1
+6.3.0.2
+struts-core
+struts-core
+src/main/webapp/rogue.jsp
+File uploaded successfully to /CVE-2023-50164-POC/uploads/rogue.jsp
+struts-core
+Upload.java
+uploadFileName
+struts-core
+What is CVE-2023-50164?
+How critical is CVE-2023-50164?

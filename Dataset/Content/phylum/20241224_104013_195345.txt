@@ -1,0 +1,139 @@
+
+Phylum’s automated platform recently onyxproxy ⚠️ Check Package on PyPI, a malicious package that harvests and exfiltrates credentials and other sensitive data. In many ways, this package typifies other token stealers that we have found prevalent in PyPI. However, one feature of this particular package caught our eye: an obfuscation technique that was foreseen in 2007 during a discussion about Python’s support for Unicode, documented in PEP-3131:
+Should identifiers be allowed to contain any Unicode letter?
+Drawbacks of allowing non-ASCII identifiers wholesale:
+
+Python will lose the ability to make a reliable round trip to a human-readable display on screen or on paper.
+Python will become vulnerable to a new class of security exploits; code and submitted patches will be much harder to inspect.
+Code inspection that defends a developer from malicious code in open-source software requires automation. Bad actors are continuously evolving and adapting their code to evade this automation, and it is our job to keep pace as attackers evolve tactics. The Phylum Research Team unravels this interesting misuse of Unicode support in Python below.
+Hiding in plain sight
+Here is a small, sample code snippet from the setup.py file that first caught our attention:
+class Browsers:
+
+    def __init__(self, webhook):
+        𝘀𝙚𝘵𝘢𝘵𝘵𝙧(𝘀𝘦𝘭𝘧, 'webhook', 𝗦𝘺𝙣𝘤𝙒𝘦𝘣𝙝𝘰𝘰𝙠.from_url(𝘸𝘦𝗯𝘩𝙤𝙤𝗸))
+        𝘊𝗵𝗿𝙤𝘮𝘪𝘶𝘮()
+        𝘖𝘱𝙚𝗿𝗮()
+        𝘜𝗽𝘭𝘰𝗮𝙙(𝘴𝙚𝘭𝗳.webhook)
+There is nothing wrong with your resolution — the strange, non-monospaced, sans-serif font with mixed bold and italics is exactly how the code is written, and setup.py contains thousands of similar code strings. An obvious and immediate benefit of this strange scheme is readability. We can still easily reason about this code, because our eyes and brains can still read the words, despite the intermixed fonts. Moreover, these visible differences do not prevent the code from running, which it does.
+One might dismiss this as a developer trying to show how clever they can be, except that this package is trying to steal and exfiltrate things immediately upon installation. The most plausible remaining explanation for this behavior is that this will evade defenses designed around string matching, which we will discuss later. For now, we want to understand what Python does with this code.
+Inside the Python Interpreter
+Strictly speaking, though the strings self and 𝘀𝘦𝘭𝘧 have little difference to the human eye, they are not the same strings in Python.
+>>> "self" == "𝘀𝘦𝘭𝘧"
+False
+This is evident when we ask Python to produce either the numerical values of each character (i.e., the Unicode code points)
+>>> [ord(c) for c in "self"]
+[115, 101, 108, 102]
+>>> [ord(c) for c in "𝘀𝘦𝘭𝘧"]
+[120320, 120358, 120365, 120359]
+or the Unicode name for each character in both strings.
+>>> import unicodedata
+>>> [unicodedata.name(c) for c in "self"]
+['LATIN SMALL LETTER S', 
+ 'LATIN SMALL LETTER E', 
+ 'LATIN SMALL LETTER L', 
+ 'LATIN SMALL LETTER F']
+>>> [unicodedata.name(c) for c in "𝘀𝘦𝘭𝘧"]
+['MATHEMATICAL SANS-SERIF BOLD SMALL S', 
+ 'MATHEMATICAL SANS-SERIF ITALIC SMALL E', 
+ 'MATHEMATICAL SANS-SERIF ITALIC SMALL L', 
+ 'MATHEMATICAL SANS-SERIF ITALIC SMALL F']
+It is not unreasonable to expect that the Python interpreter would raise a NameError when executing the first line of __init__, because it was defined with self and not 𝘀𝘦𝘭𝘧. This, however, is not the case - Python interprets both of these strings as self. But why?
+Lexical Analysis
+Section 2 of Python language reference describes the initial process of how the parser converts text into code.
+Section 2.2 gives the complete list of categories that Python’s lexical analyzer (also referred to as a lexer) generates:
+Our present discussion concerns identifiers, also known as names in Python. From our above example, the crux of the matter is that since self and 𝘀𝘦𝘭𝘧 are different as strings, the lexer distinguishes these as different tokens. Where this finally gets resolved:
+We will say more about NFKC in a moment, but the situation is that the lexer creates the stream of tokens from the text, three of which are self, 𝘀𝘦𝘭𝘧 and a later variant 𝘴𝙚𝘭𝗳 (see the last line of our sample code). When the parser receives these tokens, it normalizes all of them with the NFKC normal form into the the same identifier self. Thus, these tokens are all different representations of the same name, and thus there is no NameError.
+>>> unicodedata.normalize("NFKC", "𝘀𝘦𝘭𝘧") == "self"
+True
+From the perspective of the parser within the Python interpreter, this attempt at obfuscation has no impact at all on running the code. This is no accident. Rather, it is a deliberate design decision in Python.
+PEP-672
+The security implications for this Unicode support have been discussed and documented at length in PEP-672: Unicode-related Security Considerations for Python (dated 1 Nov 2021), an informational discussion around the potential for Unicode misuse in Python identifiers. The author acknowledges:
+The Normalizing Identifiers section of PEP-672 explains how the Unicode standard treats variants of what appear to be the same character:
+n
+
+n (LATIN SMALL LETTER N)
+𝐧 (MATHEMATICAL BOLD SMALL N)
+𝘯 (MATHEMATICAL SANS-SERIF ITALIC SMALL N)
+ｎ (FULLWIDTH LATIN SMALL LETTER N)
+ⁿ (SUPERSCRIPT LATIN SMALL LETTER N)
+NFKC
+Unicode Standard Annex #15 contains the details of NFKC and other normalization forms. It suffices to understand that there are many representations of a string that the Python parser will normalize to the same identifier, and it is useful to know exactly how many equivalent strings there are for a given string.
+“How can I evade thee? Let me count the ways.”
+How many different ways could the attacker present a different Unicode string that the interpreter would normalize to self? We first observe that there are 19 Unicode characters that normalize to s:
+>>> s_variants = [chr(n) for n in range(0x10FFFF) if unicodedata.normalize('NFKC', chr(n)) == 's']
+>>> s_variants
+['s', 'ſ', 'ˢ', 'ₛ', 'ⓢ', 'ｓ', '𝐬', '𝑠', '𝒔', '𝓈', '𝓼', '𝔰', '𝕤', '𝖘', '𝗌', '𝘀', '𝘴', '𝙨', '𝚜']
+>>> len(s_variants)
+19
+Proceeding through the rest of the string self:
+>>> e_variants = [chr(n) for n in range(0x10FFFF) if unicodedata.normalize('NFKC', chr(n)) == 'e']
+>>> len(e_variants)
+19
+>>> l_variants = [chr(n) for n in range(0x10FFFF) if unicodedata.normalize('NFKC', chr(n)) == 'l']
+>>> len(l_variants)
+20
+>>> f_variants = [chr(n) for n in range(0x10FFFF) if unicodedata.normalize('NFKC', chr(n)) == 'f']
+>>> len(f_variants)
+17
+Thus, there are 19 * 19 * 20 * 17 variants of the string self that the Python interpreter recognizes as the identifier self. In summary,
+>>> def count_chr_variants(c):
+...     return len([chr(n) for n in range(0x10FFFF) if unicodedata.normalize('NFKC', chr(n)) == c])
+...
+>>> def count_variants(identifier):
+...     counts = 1
+...     for c in identifier:
+...             counts *= count_chr_variants(c)
+...     return counts
+...
+>>> count_variants('self')
+122740
+Any automated system looking for an exact Unicode string match on self would fail if any of these over hundred thousand variants were used in the code instead.
+Of course, the string self is too common in Python to be useful to find potentially suspicious code. We chose it for simplicity as a minimal example of the obfuscation behavior that we observed. The onyxproxy author gave us thousands of other examples in setup.py to choose from, and there are several that are indicative of suspicious activity such as: __import__, subprocess, and CryptUnprotectData. Counts of potential variants for those:
+>>> count_variants('__import__')
+106153953192
+>>> count_variants('subprocess')
+4418826466608
+>>> count_variants('CryptUnprotectData')
+54105881615783933829120
+So, there are an astronomical number of identifier variants that a malicious actor could create for the same code that would evade string-matching based defenses.
+Conclusions
+In many ways the author of onyxproxy demonstrates a real lack of sophistication. It is clear that they have merely cut-and-paste code from various places and stitched them together. Not only is this obfuscation technique wholly absent from other parts of the code in setup.py, but many Python modules are imported multiple times, e.g., import os nine times.
+But, whomever this author copied this obfuscated code from is clever enough to know how to use the internals of the Python interpreter to generate a novel kind of obfuscated code, a kind that is somewhat readable without divulging too much of exactly what the code is trying to steal. This novelty is something that we will be keeping an eye on at Phylum, because now that this technique has proven viable in the wild, we fully anticipate others to copy and improve their attempts to attack developers.
+onyxproxy
+setup.py
+setup.py
+self
+𝘀𝘦𝘭𝘧
+NameError
+__init__
+self
+𝘀𝘦𝘭𝘧
+self
+self
+𝘀𝘦𝘭𝘧
+self
+𝘀𝘦𝘭𝘧
+𝘴𝙚𝘭𝗳
+self
+NameError
+n
+𝐧
+𝘯
+ｎ
+ⁿ
+self
+s
+self
+self
+self
+self
+self
+onyxproxy
+setup.py
+__import__
+subprocess
+CryptUnprotectData
+onyxproxy
+setup.py
+import os

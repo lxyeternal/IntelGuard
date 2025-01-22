@@ -1,0 +1,174 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_174633\MLBugBpnanza_863x300.png
+
+JFrog’s security research team continuously monitors open-source software registries, proactively identifying and addressing potential malware and vulnerability threats to foster a secure and reliable ecosystem for open-source software development and deployment.
+In our previous research on MLOps we noted the immaturity of the Machine Learning (ML) field often results in a higher amount of discovered security vulnerabilities in ML-related projects as compared to more established software categories such as DevOps, Web Servers, etc. For example, in the past two years, 15 critical CVEs were published in mlflow vs. just two critical CVEs in Jenkins, which was documented by both public research and our own investigation.
+For the past few months, the JFrog Security Research team has been focusing on finding and disclosing bugs in ML-related open source projects and we’ve managed to disclose 22 unique software vulnerabilities from 15 different ML-related software projects to-date.
+Due to the large number of vulnerabilities discovered, we’re going to explore them in detail across a two-part blog series and present ML-unique techniques that can be used by attackers to exploit each vulnerability:
+
+Part 1: Server-side ML vulnerabilities
+Part 2: Client-side ML vulnerabilities & vulnerabilities in safe(1) ML formats
+(1) ML model types that don’t inherently allow for code-execution-on-load (ex. Safetensors)
+Server-side ML Vulnerabilities: Remotely hijacking (Model) Artifact Storage / Model Registries
+In this section, we showcase vulnerabilities in ML frameworks that deal with model artifacts either directly or by credentials to an artifact storage or model registry. Exploitation of such vulnerabilities gives the attacker very strong lateral movement inside enterprise systems, allowing them to hijack ML models from the exploited model registry.
+WANDB Weave Directory Traversal – CVE-2024-7340
+Weave is a toolkit for evaluating and tracking large language model (LLMs) applications, built by Weights & Biases (WANDB).
+Weave allows fetching files from a specific directory, but due to a lack of input validation, it’s also possible to read files across the whole filesystem using directory traversal. This vulnerability has been fixed in version 0.50.8 of Weave.
+While Weave is running as part of WANDB Server – by reading a specific file, the vulnerability allows a low-privileged authenticated user to escalate their privileges to an admin role.
+The Weave Server API path __weave/file/<path:path> allows low-privileged authenticated users to fetch files from a specific directory on the filesystem. The server’s code intends to check whether the user-supplied path resides in a specific directory, but its logic can be easily bypassed to access any file in the filesystem:
+
+@blueprint.route("/__weave/file/<path:path>")
+def send_local_file(path):
+    # path is given relative to the FS root. check to see that path is a subdirectory of the
+    # local artifacts path. if not, return 403. then if there is a cache scope function defined
+    # call it to make sure we have access to the path
+    abspath = "/" / pathlib.Path(
+        path
+    )  # add preceding slash as werkzeug strips this by default and it is reappended below in send_from_directory
+    try:
+        local_artifacts_path = pathlib.Path(filesystem.get_filesystem_dir()).absolute()
+    except errors.WeaveAccessDeniedError:
+        abort(403)
+    if local_artifacts_path not in list(abspath.parents):
+        abort(403)
+    return send_from_directory("/", path)
+
+The user-supplied path parameter is appended to / and stored in a variable named abspath. The code then checks whether abspath starts with local_artifacts_path (by comparing it to any of the parent directories of abspath).
+Due to the fact that the code never normalizes the abspath variable, abspath can include ../ sequences for directory traversal.
+Thus, in case the local_artifacts_path directory is /some/authorized/path, an attacker can supply the following path: some/authorized/path/../../../../evil/path for bypassing the check, with a path that points to /evil/path file.
+In the last line of the function, the path is given to the send_from_directory function, which is a secure function to avoid directory traversal as described here. It does not allow serving files outside of the directory specified in the first parameter. However, when the specified directory is the filesystem’s root folder (/) – it will allow fetching files across the entire filesystem – which defeats the purpose of this directory traversal prevention. In short – This allows an attacker to download (leak) any file from the filesystem.
+A low-privileged authenticated user could leverage this vulnerability to escalate their privileges to an admin role by leaking a file named “api_keys.ibd” from the Weave server. This file contains MySQL data that holds plaintext API Keys. In case there are current active admin API keys, they could be extracted from the file and used for gaining admin role privileges to the WANDB Server.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_174633\MLCVEsimage3.png
+Dumped “api_keys.ibd” file
+ZenML Cloud Improper Access Control
+ZenML is an MLOps framework for creating end-to-end production-ready ML pipelines. Its basic product – ZenML Server – helps with creating ML pipelines, tracking pipelines, models and artifacts. ZenML Server is mostly open-source, but its full functionality is offered as part of ZenML Cloud – a subscription-based platform that enables deployment of managed ZenML servers.
+The vulnerability we found in the ZenML Cloud allowed a user with access to a managed ZenML server to elevate their privileges from a viewer to full admin privileges. This vulnerability in the ZenML Cloud platform was fixed promptly after our responsible disclosure. Being a vulnerability in a cloud application, it was not assigned a CVE ID.
+The ZenML cloud’s environment architecture grants each user the ability to create one organization object that contains a group of users and is where the ZenML server instances, known as tenants, will be stored. Every user in an organization has a role. The role configures what the user can view or modify.
+Organization owners can invite other users into their organization without granting them permissions on the tenants, or only granting low permissions for specific tenants.
+To create a new role, the /roles POST API endpoint exists. A request to this endpoint consists of a JSON structure that includes tenant_id and organization_id fields, along a list of permissions – each containing a “scope” field with a UUID that refers to the tenant’s ID.
+Imagine the following scenario: there is a victim user that has its own organization and tenant. There is also an attacker who starts with low-privileged (viewer) access to the victim’s tenant, and plans to gain admin privileges over the victim’s tenant.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_174633\MLCVEsimage10.png
+Privilege Escalation Attack Scenario in ZenML Cloud
+To do so, the attacker creates a new admin role by sending a POST request to /roles API endpoint – specifying the (legitimate) attacker’s organization as the organization_id, and supplying the victim’s tenant in the tenant_id and scope fields of the permissions.
+POST /roles HTTP/2
+Host: cloudapi.zenml.io
+...
+{
+  "permissions": [
+    {
+      "resource": {
+        "scopes": [
+          "victim_tenant_uid@server"
+        ],
+        "type": "secret",
+        "id": null
+     },
+     "action": "read"
+    }
+ ],
+ "system_managed": false,
+ "organization_id": "attacker_controlled_organization_uid",
+ "tenant_id": "victim_tenant_uid",
+ "name": "Tenant_Takeover",
+ "description": "Become the admin you deserve to be"
+}
+Illustration of an HTTP request to the /roles API
+Due to the fact that the organization permissions are separated from the tenant permissions, and the logic missed the scenario of adding permissions to tenants of others’ organizations, the above request is accepted and the new role is successfully created. The attacker then proceeds to assign this new role to their user.
+Now, when accessing the victim’s tenant, the attacker has tenant admin permissions – granting the attacker the ability to modify/read unauthorized components including secrets from its Secret Store and stored ML models.
+Post Exploitation – Infecting ML Model Clients
+As discussed in our BlackHat USA 2024 talk, ML model registries (as well as artifact stores holding models) are an extremely high-value target for bad actors. By hijacking ML model registries, attackers gain lateral movement within enterprise systems and can easily create backdoors to ML models that enable malicious code execution when pulled and loaded by any client (Data Scientists, MLOps CI/CD machines, etc.).
+Since many ML model formats (including the most popular ML model formats today) support code-execution-on-load, loading such an ML model immediately causes code execution, similar to installing a package from npm or PyPI that contains a post-installation script –
+Model formats that support code-execution-on-load are in the top row, while those without support it are at the bottom
+In the scenario of acquiring admin privileges over the Weave Server described above, an attacker will be able to infect ML models stored in the WANDB registry and add a malicious code layer to them. These models may later be consumed by downstream teams and stakeholders, such as Data Scientists or MLOps CI/CD machines, which will run the attacker’s “attached” malicious code as soon as the ML model is loaded.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_174633\MLCVEsimage8.png
+Attacker infecting multiple ML clients through an ML registry breach
+In the case of the ZenML vulnerability – acquiring admin privileges over the ZenML tenant grants access to its Secret Store – which could hold credentials for the Remote Artifact Storage it uses. Such credentials may be used for infecting the organization’s ML models or other ZenML pickled artifacts that will later be loaded by clients.
+Remotely hijacking ML Database Frameworks
+In this section we will present two vulnerabilities – one in a database optimized for AI and another in a framework used for generating SQL queries based on natural language using LLM.
+Deep Lake Database Command Injection – CVE-2024-6507
+Deep Lake is a database optimized for AI. It can be used for storing data and vectors while building LLM applications or to manage datasets while training deep learning models.
+
+Kaggle is a public repository that hosts ML Datasets, Models and Snippets. This vulnerability allows attackers to inject system commands when uploading a remote Kaggle dataset
+due to the use of a potentially dangerous function for running OS commands without proper input sanitization. This vulnerability has been fixed in version 3.9.11.
+Datasets can be loaded from various external sources, such as the Kaggle platform. In order to load an external Kaggle dataset a user will utilize the exported ingest_kaggle method:
+
+@staticmethod
+def ingest_kaggle(
+    tag: str,
+    ...
+) -> Dataset:
+    # ...
+    download_kaggle_dataset(
+        tag,
+        local_path=src,
+        kaggle_credentials=kaggle_credentials,
+        exist_ok=exist_ok,
+)
+# ...
+The method receives the tag parameter which indicates the Kaggle dataset tag name.
+
+The tag parameter propagates into the download_kaggle_dataset method:
+def download_kaggle_dataset(
+     tag: str,
+     ...
+):
+     # ...
+     _exec_command("kaggle datasets download -d %s" % (tag))
+     # ...
+Here we can see the tag parameter propagates into the _exec_command method without any form of input filtering:
+def _exec_command(command):
+    out = os.system(command)
+    # ...
+The unsafe os.system function executes its command in a subshell, allowing execution of chained OS commands like command1 || command2, which can cause code execution on the operating system.
+In short, any attacker that can supply an arbitrary tag to the ingest_kaggle API can trigger an arbitrary shell command. The worst case scenario is remote code execution such as in a web application that allows its users to ingest arbitrary Kaggle datasets to the Deep Lake DB by specifying their tags.
+Vanna.AI Prompt Injection Code Execution – CVE-2024-5565
+Vanna AI is a Python-based library designed to simplify generation of SQL queries from natural language inputs using LLMs. The primary purpose of Vanna AI is to facilitate accurate text-to-SQL conversion, making it easier for users to interact with databases without needing extensive knowledge of SQL. Vanna AI supports multiple delivery mechanisms, including Jupyter notebooks, Streamlit applications, Flask web servers, and Slack bots, providing flexibility in how users can deploy and interact with the tool.
+The vulnerability we found is a remote code execution vulnerability using prompt injection techniques that allowed us to execute code. This is an example of a “Prompt Injection” attack that affects LLMs, and its harsh consequences when it leads to code execution.
+Developers use hard-coded instructions that will be added to each user-supplied prompt (the chat query to the LLM) and give the LLM more context on how to treat the query in order to avoid negative opinions, foul language, and anything unwanted in general.
+LLMs do not have a distinction between control plane and data plane, and “everything is an input”, meaning even the pre-defined prompt instructions are considered the same as the user input prompt. Thus, it is a “by-design weakness” that every user input can manipulate the prompt’s context in a way that bends or breaks all predefined prompt instructions.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_174633\MLCVEsimage4e1730655342598.png
+Using pre-prompting instructions to control LLM output
+
+While prompt injections can lead to the generation of harmful, misleading, or forbidden content, if the LLM is not connected to any actionable system or process, the risk posed by the injection to the system is somewhat limited. Without a direct way to execute commands, make decisions, or influence real-world actions, the potential damage remains confined to the generated text itself. But, in cases where the LLM is directly linked to command execution or decision-making – it can result in a severe security issue.
+The vulnerability we found in Vanna.AI is a type of Integrated Prompt Injection and involves a feature for visualization of query results. After executing the SQL query (based on natural language from the user), the Vanna library can graphically present the results as charts using Plotly, a Python-based graphical library.
+The Python code that uses Plotly is not static but is generated dynamically via LLM prompting and code evaluation. This eventually allowed us to achieve arbitrary python code execution using a smart prompt that maneuvers the Vanna.AI’s pre-defined constraints.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_174633\MLCVEsimage1e1730655411138.png
+The flow of a prompt while using Vanna.AI’s visualize feature
+In short, an attacker that can post an arbitrary query through Vanna.AI can also achieve remote code execution on the host that uses the Vanna.AI library –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_174633\MLCVEsimage7.png
+Using Prompt Injection to achieve RCE in Vanna.AI
+For further details on the Vanna.AI vulnerability, read our blog.
+Post Exploitation – Database exfiltration and manipulation
+In both of the above scenarios, attackers can hijack machines that have direct access to databases. In the case of Deep Lake, the database holds data that powers LLM applications or helps train ML models. Exfiltrating this data can constitute a major IP loss or some companies (ex. OpenAI, with their GPT models generating billions of dollars in revenue each year) and modifying this data can lead to an ML poisoning attack in which the LLM application can return unwanted or malicious information.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_174633\MLCVEsimage9.png
+
+Poisoning an ML model via its Dataset
+In the case of Vanna.AI, the library is connected to a general-purpose SQL database, meaning the impact of exfiltrating it or poisoning it depends on what exactly is stored in the database.
+Remotely hijacking ML Pipelines
+Mage AI Multiple Vulnerabilities
+Mage is an open-source data pipeline tool for transforming and integrating data. For example, it allows users to build pipelines that transform data received from standard APIs and import them to well-known databases, or pipelines that load a dataset and train a new ML model. We have discovered several vulnerabilities in the Mage platform.
+The Mage Web UI serves many functionalities. One of them is a terminal that allows shell access to the machine on which Mage is running. The communication with the shell is done via websockets.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_174633\MLCVEsimage2.png
+
+In the function on message in terminal_server.py, the code receives messages from the terminal client. The code is then in charge of checking the user authentication token and sending the received command to the terminal.
+The code first checks the API key, which is always the same:
+zkWlN0PkIKSN0C11CfUHUj84OT5XOJ6tDZ6bDRO2.
+Even if it is different, it’s very easy to retrieve even without logging in, since the web server’s frontend uses it all the time. Then, the code checks the validity of the token sent by the client. If the token is valid, the valid variable is set to True. Then, if there is a user associated with the token, the code checks the role of the user and sets the valid variable accordingly. Afterwards, if the valid variable is True, the message is sent to the terminal.
+Since the valid variable is set to True before checking if there is a user associated with the token, there could be situations where a valid token is not associated with any user, allowing the commands to go through to the terminal. This is most likely to happen when a user is deleted.
+For example, if a low-privileged user (that doesn’t initially have shell access) is deleted, the user’s authentication token is still cached in the database, with a default expiration of 30 days from creation. If the user then re-uses their authentication token, they will be granted access the Mage Web Terminal and can run arbitrary commands on the server hosting Mage.AI.
+Some of Mage.AI’s server APIs contain path traversal vulnerabilities. The function ensure_file_is_in_project in file.py is in charge of checking whether a file is inside the project folder or not. When the platform is configured as a Multi-project platform, the function returns without checking the path.
+This function is in use in several places, but most interestingly this function is called by the member function, which can be accessed by low-privileged (Viewer) users.
+This usage is in the FileContentResource.py file. This can allow authenticated low-privileged users to read any text file on the system by sending a GET request to the path /api/file_contents/<PATH_TO_LEAK> on a mage platform configured as a Multi-project platform.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_174633\MLCVEsimage11.png
+
+Additionally, the member function in GitFileResource.py receives a file path to read from a git repository. The function does not check for path traversals, thus allowing any user with a Viewer role to read text files on the system by sending a GET request to the path /api/git_file/<PATH_TO_LEAK>. Since the files are opened with the utf-8 encoding, it is not possible to read binary files.
+Lastly, the member function in InteractionResource.py receives an interactive Universally Unique Identifier (or uuid). The code uses the uuid to create a new Interaction object. The uuid eventually ends up in a filename that is read and returned to the client. The code does not check for path traversals, thus allowing any user with a Viewer role to read text files on the system by sending a GET request to the path /api/pipelines/example_pipeline/interaction/<PATH_TO_LEAK>.
+Post Exploitation – ML Pipeline Manipulation
+All of the above vulnerabilities can lead to remote code execution on a Mage.AI server. The unauthorized shell access vulnerability will provide root RCE directly, since the attacker is given remote shell access with root permission. The arbitrary file leak vulnerabilities can lead to remote code execution as well, but require the attacker to perform per-target research on the Mage.AI server. For example, leaking (and cracking) passwords of users that have remote SSH access can lead to RCE.
+Once code execution is achieved, the attacker will be able to control the ML pipelines that are governed by these frameworks.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214121_174633\MLCVEsimage6e1730655529353.png
+Steps of a common MLOps Pipeline
+Since MLOps pipelines may have access to the organization’s ML Datasets, ML Model Training and ML Model Publishing, exploiting an ML pipeline can lead to an extremely severe breach. Each of the attacks mentioned in this blog (ML Model backdooring, ML data poisoning, etc.) may be performed by the attacker, depending on the MLOps pipeline’s access to these resources.
+Summary
+In this blog post we’ve analyzed some of the server-side vulnerabilities that were uncovered in our research, and the impact of exploiting these vulnerabilities. These vulnerabilities allow attackers to hijack important servers in the organization such as ML model registries, ML databases and ML pipelines. Exploitation of some of these vulnerabilities can have a big impact on the organization – especially given the inherent post-exploitation vectors present in ML such as backdooring models to be consumed by multiple clients.
+Stay tuned for Part II of this blog series where we analyze the most interesting client-side ML vulnerabilities uncovered in our research – vulnerabilities that can be used by attackers to target Data Scientists and other clients that use ML services and libraries. It will also detail newly discovered vulnerabilities that can be triggered when working with crafted ML models in “usually safe” formats  such as Safetensors – so stay tuned.

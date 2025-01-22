@@ -1,0 +1,108 @@
+
+We're back at it, thinking like attackers that find ways to trick unsuspecting developers into running malware. Previous methods explored creating trojan functions and imports, which work well when the attack vector relies on victims running the infected code, but it isn't always that easy. Wouldn't it be great if we could shift left even earlier in the software development lifecycle to have a better chance at capturing those juicy developer secrets?
+Package installation with setup.py source distributions
+Behold, the powers of Python package installation! Arbitrary code execution is possible, and even common, during package installation. Thanks to backwards compatibility, a package offered only as a source distribution and with the legacy setup.py file for configuration and metadata specification will run the code in setup.py as part of the installation. In fact, code in that file will run when the package is built, installed, or even downloaded with pip. The same is true for other package installers.
+Source distributions (sdists) are packages that historically (prior to PEP 517/518 and pyproject.toml, but still common today) defined their metadata in a setup.py file. That file is executed during build and install time and can contain anything, including malware. Here is an example using our spoofed certify package where we add a file to the temporary directory to serve as a flag indicating when the code runs:
+❯ git diff setup.py
+diff --git a/setup.py b/setup.py
+index 4313c16..cfdba7b 100755
+--- a/setup.py
++++ b/setup.py
+@@ -12,6 +12,8 @@ try:
+ except ImportError:
+     from distutils.core import setup
+
++with open("/private/tmp/flag.txt", mode="w", encoding="utf-8") as f:
++    f.write("Malware could have run here")
+
+ version_regex = r'__version__ = ["\']([^"\']*)["\']'
+ with open("certifi/__init__.py") as f:
+@@ -24,7 +26,7 @@ with open("certifi/__init__.py") as f:
+         raise RuntimeError("No version number found!")
+
+ setup(
+-    name="certifi",
++    name="certify",
+     version=VERSION,
+     description="Python package for providing Mozilla's CA Bundle.",
+     long_description=open("README.rst").read(),
+Building the source distribution with this change and using it to install the package shows that the newly added code does indeed run:
+# No flag present
+❯ ls -alh /private/tmp/flag.txt
+ls: /private/tmp/flag.txt: No such file or directory
+
+# Installing the package does not indicate anything bad happened...
+❯ python -m pip install dist/certify-2024.2.2.tar.gz
+Processing ./dist/certify-2024.2.2.tar.gz
+  Installing build dependencies ... done
+  Getting requirements to build wheel ... done
+  Installing backend dependencies ... done
+  Preparing metadata (pyproject.toml) ... done
+Building wheels for collected packages: certify
+  Building wheel for certify (pyproject.toml) ... done
+  Created wheel for certify: filename=certify-2024.2.2-py3-none-any.whl size=163779 sha256=acc242db9669da75b66a70e5b9bb3fe613ce26c2a5ce44992acc6ba7cf870458
+  Stored in directory: /Users/maxrake/Library/Caches/pip/wheels/43/8d/c9/91f4cd154b7df7fbc77d07b6d2012a4f0b9a289da49d46706d
+Successfully built certify
+Installing collected packages: certify
+Successfully installed certify-2024.2.2
+
+# ...but now there is a "flag.txt" file...
+❯ ls -alh /private/tmp/flag.txt
+-rw-r--r--  1 maxrake  wheel    27B Apr 10 18:29 /private/tmp/flag.txt
+
+# ...which proves that any arbitrary code can run in "setup.py"
+❯ cat /private/tmp/flag.txt
+Malware could have run here
+That's right, pip install (and even pip download!) execute arbitrary code from source distributions anywhere in the dependency tree. The reason goes back to a Catch-22 captured in this issue which has been open for just under ten years now. Basically, in order for the dependency resolver to know which packages are needed during install/download, pip needs to get the package metadata for each package in the dependency tree.
+The rub is that package metadata is not available statically for source distributions and so pip has to build those packages just to get the canonical metadata for the environment where the request was made. Jackpot! Arbitrary code execution was gained and it didn’t require any trickery beyond including that code in the setup.py file.
+Building packages is a heavy handed approach just to get some basic information but it is necessary because the input isn't reliably deterministic. There are PEPs to improve on this: PEP 643 to define metadata for package source distributions and PEP 658 to expose that metadata through the repository API so it isn't necessary to build the package. However, legacy packages exist, ensuring breaking backwards compatibility is not going to be possible for a very long time. Plus, the specification for Dynamic metadata entries outlined in PEP 643 provides the following exceptions:
+
+Metadata-Version value is older than version 2.2
+Requires-Dist is present in a line starting with Dynamic:
+An attacker needs only a single source distribution, anywhere in the dependency graph, meeting one of these exceptions to enable the undesired behavior of building a wheel from that source distribution and therefore executing arbitrary code.
+Package installation with pyproject.toml source distributions
+If installing a source distribution with setup.py is bad, maybe using pyproject.toml instead is a better idea. After all, TOML files are for configuration data and can’t possibly run arbitrary code, right? Well, yes, but with one big asterisk. The direct project dependencies specified in pyproject.toml are just the tip of the iceberg.
+Source distributions built with PEP 517 compliant build backends do so with the build_sdist mandatory hook, which states:
+{name}-{version}
+foo-1.0
+pyproject.toml
+That PKG-INFO metadata is then used by package installers to know which other distributions are required by looking up the Requires-Dist entries. As already mentioned, it only takes one of those entries to be offered with the setup.py file in order to revert to the legacy behavior that allows for arbitrary code execution.
+Threat actors can attempt to modify the dependencies in pyproject.toml directly with pull requests. However, they may have more luck with an indirect route, like taking over one of the transitive dependencies through an expired author or maintainer domain takeover or compromised account attack. They may move down the food chain and attempt to introduce a new malicious package as a downstream dependency of an existing one.
+Package installation with built distributions
+It’s starting to seem like source distributions are the problem here. Why not avoid them altogether? After all, built distributions are easy to install (but ironically not with easy_install): wheels are just renamed zip files that are "installed" by unpacking the contents and spreading them on the file system. No code from the specified wheel is run when installing it. Transitive dependencies of that wheel are another story.
+It is possible for the wheel to depend on a package that is only offered as a source distribution. Really, all it takes is one dependency somewhere in the fully resolved tree to fit that bill. Installing a single source distribution will cause a reversion to the legacy way of building packages, and crucially, allow for arbitrary code execution. This is known as the transitive dependency problem and is likely why the pip documentation provides a guide for secure installs that includes advice to disallow source distributions and not use setuptools directly.
+Following that advice can prove difficult for projects of any significant size as it requires all direct and transitive dependencies to be provided as built distributions. It may even be impossible for some use cases where the target system/platform is not represented amongst the available wheels.
+Playing nice in the sandbox
+One countermeasure to this class of attack is to run all package installation actions through an application sandbox. This restricts the actions available to only those filesystem and network operations deemed legitimate and effectively neuters malicious code. Phylum offers this protection in the form of the open-source Birdcage sandbox, which is baked into the Phylum CLI and can be used for Python developers using pip or Poetry with the matching official extensions.
+
+
+setup.py
+setup.py
+setup.py
+pip
+pyproject.toml
+setup.py
+certify
+pip install
+pip download
+pip
+pip
+setup.py
+Dynamic
+Metadata-Version
+Requires-Dist
+Dynamic:
+pyproject.toml
+setup.py
+pyproject.toml
+pyproject.toml
+build_sdist
+PKG-INFO
+Requires-Dist
+setup.py
+pyproject.toml
+easy_install
+pip
+setuptools
+pip
+Poetry

@@ -1,0 +1,67 @@
+
+A few weeks ago we added to our DB a Cross-Site Scripting (XSS) vulnerability in the popular marked package. This post explains the vulnerability, shows how to exploit it on a sample app, and explains how to fix the issue in your application.
+marked parses Markdown and converts it into HTML, making it easy to turn rendered user input - user comments, product reviews, support calls - into rich(ish) text, supporting links, bold, italic and more. Since Markdown doesn’t support JavaScript, it’s often considered immune to Cross-Site Scripting, and thus safe to use for rendering user input.
+However, in reality Markdown only reduces - but doesn’t completely eliminate - the risk of XSS. This easily exploited XSS vulnerability in marked is a sobering example of this difference.
+As shown in our State of Open Source Security 2019, XSS vulnerabilities continue to grow with most vulnerability disclosures reported to the PHP Packagist ecosystem, followed by npm and Maven Central.
+The vulnerability
+While Markdown doesn’t support scripts, marked (like other Markdown clients) does support inline HTML. Inline HTML can include  tags, which can be used by attackers to inject malicious scripts. Since marked is often used to render user input back to the page, its authors added a security option to overcome this case. The package supports a sanitize option, which detects HTML and dangerous input and encodes or removes it.
+While sanitize is (unfortunately) turned off by default, you can turn it on in your app. This example shows the sanitize option in action:
+var marked = require('marked');
+console.log(marked('<script>alert(1)</script>'));
+// Outputs: <script>alert(1)</script>
+
+marked.setOptions({sanitize: true});
+console.log(marked('<script>alert(1)</script>'));
+// Outputs: <p><script>alert(1)</script></p>
+Catching HTML is important, but sanitization doesn’t end there. While Markdown doesn’t support scripts, it does support links, which creates the potential for javascript links (e.g. javascript:alert(1)), which can cause damage when a user clicks them. The sanitize functionality is aware of this, and removes links that look like javascript:. It even removes links using the colon HTML entity, : (e.g. javascript&58;alert(1)). Unfortunately, even with this awareness, it misses one case…
+HTML is a very loose format, and browsers are very tolerant when processing it. An example of this tolerance is that, when processing HTML entities, browsers do not enforce the trailing colon, accepting both : and :. The sanitization in marked, on the other hand, requires the colon, and treats the text as simple text if it doesn’t find it. This means : will be removed, but &58this; will simply be passed along to the output. An attacker can use this technique to evade marked but have browsers still execute a script.
+Here’s a code illustration of where sanitize does and doesn’t work:
+var marked = require('marked');
+marked.setOptions({sanitize: true});
+
+// Naive attempt - fails.
+console.log(marked('[Gotcha](javascript:alert(1))'));
+// Outputs: <p>)</p>
+
+// Evasion attempt using '&#58;' instead of ':' - fails.
+console.log(marked('[Gotcha](javascript:alert(1))'));
+// Outputs: <p></p>
+
+// Evasion attempt using '&#58;' (note the 'this') instead of ':' - SUCCEEDS
+console.log(marked('[Gotcha](javascript:alert(1))'));
+// Outputs: <p><a href="javascript&#58this;alert(1&#41;)">Gotcha</a></p>
+// Same as: <p><a href="javascript:this;alert(1);">Gotcha</a></p>
+The browser will interpret : the same as :, invoking the script on click. Of course, the script we included is quite pointless, but an attacker could inject a much more sophisticated payload, breaking the browser’s Same-Origin Policy and triggering the full damage XSS can cause.
+Live exploit on Goof
+Like we did when discussing mongoose’s Buffer related vulnerability, we added this vulnerability to our vulnerable application, Goof. We find exploiting a vulnerability and seeing the vulnerable code improves the understanding of the issue. You can clone Goof and get it running through the instructions on GitHub.
+Goof is a TODO application, and uses marked to support Markdown in its notes. Goof is a best-in-class TODO app, and such an app simply MUST support links, bold and italics!
+For instance, entering the TODO items Buy **beer** and [snyk](https://snyk.io/) would result in the expected bold and hyperlink like so:
+Next, let’s try to enter a malicious payload.The next screenshot shows the visual and DOM state after entering each of the three attack payloads above. Note that since this is a TODO list, the first one entered is the last (third) one on the list.
+As you can see, the two lower items, showing the first two attempted attacks, were reduced to <p></p> and <p>)</p> by the sanitizer. The topmost payload, however, successfully created a hyperlink which will invoke javascript:this;alert(1). Executing this does nothing (simply references an existing variable), while the alert shows a popup.
+After making our exploit alert a bit clearer and clicking the link, we get this:
+You can go through this attack flow yourself by installing Goof locally and going through the exploit payloads under the exploits directory.
+How to remediate
+Somewhat unusually, there is no official version of marked that fixes the issue. The marked repository has been inactive since last summer, and the vulnerability was only disclosed later on.
+However, you can fix the issue easily by applying a patch using Snyk’s Wizard. This patch was created by our security research team, and is based on Matt Austin’s original pull request to the repository.
+Like all other Snyk patches, you can see the detailed patch files in our open source vulnerability database. There are actually 3 different patches for different versions of marked, the simplest of which being no more than this:
+
+Update: The maintainers marked did eventually publish a new version of marked (v0.3.6) on July 30, 2016, which addresses this issue.
+Alternatively, you can consider using an alternate markdown package, such as markdown-it or remarkable. There’s no guarantee those are free of vulnerabilities, but have no unfixed known vulnerabilities at the moment.
+New publication, old vulnerability
+One last interesting aspect of this vulnerability is that it is, in fact, quite old. The issue was reported in May of 2015, but was only logged by vulnerability databases last month. Such delays are not that rare, as the volume of issues on GitHub is incredibly high, and is hard to keep up with.
+If you come across a security issue reported on an npm package, whether fixed or not, please let us know at security@snyk.io, and we’ll review and add it to our DB. The sheer size of the npm ecosystem requires us all to work together to keep us aware of these issues, and help us stay secure.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+
+javascript:alert(1)
+javascript:
+javascript&58;alert(1)
+marked
+Buy **beer**
+[snyk](https://snyk.io/)
+<p></p>
+<p>)</p>
+javascript:this;alert(1)
+this
+Update: The maintainers marked did eventually publish a new version of marked (v0.3.6) on July 30, 2016, which addresses this issue.

@@ -1,0 +1,305 @@
+
+On February 9, 2021, Alex Birsan disclosed his aptly named security research, dependency confusion. In his disclosure, he describes how a novel supply chain attack that exploits misconfiguration by developers, as well as design flaws of numerous package managers in the open source language-based software ecosystems, allowed him to gain access and exfiltrate data from companies such as Yelp, Tesla, Apple, Microsoft, and others.
+This security research sparked attention, and with it, a new breadth of tools to help organizations detect if they are vulnerable or susceptible to potential dependency confusion attacks.
+In this article, I will introduce you, step-by-step, to the dependency confusion attack and how it manifests for JavaScript and Node.js developers working in the npm ecosystem. We will also take a look at a new, open source tool from Snyk that allows you to detect potential dangerous dependency confusion implications in your own source code repositories: snync.
+Pop quiz! Can you guess what snync stands for? Answer at the end...
+In this article, we will learn about each of the ways this supply chain attack manifests, and detail how to mitigate each of them:
+
+Private npm registry misconfiguration
+Private npm registry fetches latest versions
+Manual package updates may introduce malicious versions
+Do dependency confusion attacks impact you?
+The dependency confusion attack only works on organizations that rely on internal source code libraries. Managing private packages due to the need to maintain intellectual property is very common, and as such, many organizations find themselves using internal proxies, caches, or private package hosting registry services to do just that.
+If an organization is managing an internal private package, then this package will (by definition) not exist on public registries and their mirrors. And since the private package is not listed on a public registry, anyone else is free to reserve that package name and potentially launch a dependency confusion attack against you. The fact that a private package can have the same name as a public package is what lies at the heart of this attack.
+For the JavaScript and Node.js ecosystems, the dependency confusion attack surface is greatly diminished if you are relying on scoped packages as a reserved namespace. But please note that, regardless of whether you are using npm or yarn, you are vulnerable to this supply chain attack.
+Replaying dependency confusion attacks
+To practically explore supply chain security attacks in the form of dependency confusion, we will experiment with a hands-on tutorial that will demonstrate the vulnerability and how to mitigate against it.
+The following is the package manifest for a project known internally as the Death Star. It’s a great name, I know!
+1{
+2  "name": "the-death-star",
+3  "version": "1.0.0",
+4  "main": "index.js",
+5  "scripts": {
+6    "start": "node server.js",
+7  },
+8  "license": "ISC",
+9  "dependencies": {
+10    "debug": "^4.3.2",
+11    "death-star-secret-hyper-matter-reactor": "^1.0.0",
+12    “superlaser”: “^1.0.0”
+13  }
+14}
+15
+This code is located in the package.json, and it also shows the dependencies of this project. As you can see, superlaser is a dependent package. Of course, this is a very secret weapon that the empire possesses, so it is only published internally. The Death Star needs to be mobile in space, and as such, it also relies on the private package death-star-secret-hyper-matter-reactor.
+How to set up private npm registry
+If you want to follow along at home, we have to take a quick detour from the primary article focus to set up a private npm registry. With a private registry, you can experiment on your own and replicate this dependency confusion supply chain attack end-to-end.
+To do that, we will set up an internal private npm registry and proxy server using Verdaccio, an open source project for those needs. If you have Docker installed, we can spin it up rather easily as follows:
+1docker run -it --rm --name verdaccio -p 4873:4873 verdaccio/verdaccio\
+If everything is successful, Verdaccio will then greet us:
+Congratulations. You now have your own dedicated private hosting of npm packages running locally at port 4873.
+Let’s go ahead with publishing our secret internal npm packages superlaser and death-star-secret-hyper-matter-reactor. We will start first with adding a user to this new Verdaccio private registry:
+1npm adduser --registry https://localhost:4873
+Next is our superlaser package manifest file package.json:
+1{
+2  "name": "superlaser",
+3  "version": "1.0.0",
+4  "description": "Our secrets weapon",
+5  "main": "index.js",
+6  "scripts": {
+7    "start": "node index.js",
+8  },
+9  "license": "ISC"
+10}
+The death-star-secret-hyper-matter-reactor package manifest is similar, just with a different package name. Let’s go ahead with publishing it to our private npm registry:
+1npm publish  --registry https://localhost:4873
+Why does dependency confusion exist?
+There are primarily three cases that could lead to this class of software supply chain attacks:
+
+Misconfiguration on a developer or test server
+Newer versions of packages published in the public npm registry
+Arguably, design flaws in package managers
+Let’s revisit each of these cases.
+Private npm registry misconfiguration
+When a developer or a continuous integration (CI) system clones the source code of the the-death-star project — which has the internal superlaser dependency — how does it obtain this dependency?
+It likely needs to satisfy the following criteria when an npm install command is invoked:
+
+It needs the URL of the private npm registry where this internal package exists.
+It needs a token or credentials of some sort to access that private registry.
+The very first step outlined above is where things can go wrong. To specify a particular private npm registry, one needs to explicitly provide configuration information for the npm package manager.
+Now let’s revisit some scenarios:
+
+What happens if the continuous integration system doesn’t have the private registry set?
+What happens if you are a new developer onboarding to an existing project and you did not undergo prior steps such as running the command npm config set registry ?
+What happens if you mistakenly removed or changed your .npmrc configuration to not include the internal private npm registry?
+In any of these cases, where the custom setting for an internal registry was omitted, the npm package manager will default to the public registry (registry.npmjs.org) and will download packages from that.
+Anyone can publish packages on the public npm registry, and so, if a malicious user were to publish a package named superlaser, then it would’ve been downloaded and installed instead of your own internal package.
+How to protect against npm dependency confusion
+The core issue resides with the concern of not having the proper private npm proxy configuration. If a developer, or a CI system, misses on having this configuration, then you’re potentially vulnerable.
+So the first step is: Always ensure that a .npmrc file is made available, or another form of the private npm proxy configuration.
+Secondly, you can take a proactive approach that detects cases in which you are using private packages that have their namespace unreserved on the public npmjs registry. We built snync to help you with that. You can run it in a CI server as part of the steps, before you actively install dependencies. This way, it can protect you from mistakenly installing a malicious package.
+In the following screenshot, I am running snync vianpx and providing it with the current directory to scan for dependencies, as well as specifying that the package named superlaser is indeed a private package:
+As you can see in the results, snync confirmed for me two particular cases of potential issues of dependency confusion:
+
+The death-star-secret-hyper-matter-reactorpackage is vulnerable because there’s no package of this name that is registered at the moment on the public npmjs registry. It means that  anyone can register it and then a dependency confusion attack can take place.
+The superlaser package is suspicious. This means, that the tool detected one of two cases:This package name was first introduced to the Git source code, and only later in time, a package of the same name was published to the public npmjs registry. This doesn’t mean that the public package on the npmjs registry is malicious, but warrants a review.The package name already exists on the public npmjs registry, even before you created a package of the same name as a private one.
+
+This package name was first introduced to the Git source code, and only later in time, a package of the same name was published to the public npmjs registry. This doesn’t mean that the public package on the npmjs registry is malicious, but warrants a review.
+The package name already exists on the public npmjs registry, even before you created a package of the same name as a private one.
+snync is an open source Node.js-based command line project, and we invite you to use it for your DevSecOps security pipeline.
+Private npm registry fetches latest versions
+What happens if there’s a package of the same name of ours (superlaser) that is published and available in the public npm registry, but has a higher semver version?
+To illustrate, the situation is as follows:
+
+superlaser@1.0.0 exists in private npm registry https://localhost:4783
+superlaser@1.99.999 published by anonymous user to public npm registry at https://www.npmjs.com/package/superlaser
+Now the question is, what happens if a new project is scaffolded and requests to install the superlaser package? There’s no package.json yet, there’s no lock file yet (package-lock.json). A developer simply starts off with:
+1npm install superlaser
+This install potentially ends with a malicious version of superlaser which a remote attacker controls. But why? The developer has the local npm registry configured.
+As testing shows, even if an internal npm private proxy is configured, it has been observed that the behavior of many of these proxies is to first check the newest version available in the npm public registry. If such a newer version exists, these proxies fetch the newest semver version of the package from the public registry and install that.
+Let’s replicate this scenario with Verdaccio. As you can see below, I have pushed the harmless superlaser npm package to Verdaccio, which serves my purposes as an internal hosting of private npm packages:
+Next, I’ll show you how in a new project directory that only has the.npmrc file pointing to the local Verdaccio registry, an npm install command for the superlaser package fetches the latest version from the public npm registry, even though I was expecting that I will just get superlaser@1.0.0 which is what I have published internally:
+This creates an unexpected result and may potentially put end-users at risk.
+Note, there is a public discussion in the open source Verdaccio project at GitHub about this behavior if you wish to participate and follow-up on this topic.
+Technically, this process taken by Verdaccio and other private npm proxies, takes into account several variables, such as:
+
+The latest semver release
+The time the package was published
+So, for example, if a high semver version exists on the public npmjs registry, yet a package of the same name with a lower semver version (of the same range as the public one) is created after the publish date of the high version, then Verdaccio will not fetch the public registry package.
+How to protect against fetching the wrong package
+Configure your private npm proxy to never proxy requests upstream to the public registries. If a package or version is not available locally, it should be resolved in a way that doesn’t blindly fetch packages from untrusted and unvetted sources.
+If you are using Verdaccio, like in our examples here, you can do it like so with the following configuration that resides in /verdaccio/conf/config.yaml:
+1#
+2# This is the config file used for the docker images.
+3# It allows all users to do anything, so don't use it on production systems.
+4#
+5# Do not configure host and port under `listen` in this file
+6# as it will be ignored when using docker.
+7# see https://verdaccio.org/docs/en/docker#docker-and-custom-port-configuration
+8#
+9# Look here for more config file examples:
+10# https://github.com/verdaccio/verdaccio/tree/master/conf
+11#
+12
+13# path to a directory with all packages
+14storage: /verdaccio/storage/data
+15# path to a directory with plugins to include
+16plugins: /verdaccio/plugins
+17
+18web:
+19  # WebUI is enabled as default, if you want disable it, just uncomment this line
+20  #enable: false
+21  title: Verdaccio
+22  # comment out to disable gravatar support
+23  # gravatar: false
+24  # by default packages are ordercer ascendant (asc|desc)
+25  # sort_packages: asc
+26  # darkMode: true
+27
+28# translate your registry, api i18n not available yet
+29# i18n:
+30# list of the available translations https://github.com/verdaccio/ui/tree/master/i18n/translations
+31#   web: en-US
+32
+33auth:
+34  htpasswd:
+35    file: /verdaccio/storage/htpasswd
+36    # Maximum amount of users allowed to register, defaults to "+infinity".
+37    # You can set this to -1 to disable registration.
+38    # max_users: 1000
+39
+40# a list of other known repositories we can talk to
+41uplinks:
+42  npmjs:
+43    url: https://registry.npmjs.org/
+44
+45packages:
+46  '@*/*':
+47    # scoped packages
+48    access: $all
+49    publish: $authenticated
+50    unpublish: $authenticated
+51    # DO NOT FETCH PACKAGES FROM NPMJS
+52    #proxy: npmjs
+53
+54  '**':
+55    # allow all users (including non-authenticated users) to read and
+56    # publish all packages
+57    #
+58    # you can specify usernames/groupnames (depending on your auth plugin)
+59    # and three keywords: "$all", "$anonymous", "$authenticated"
+60    access: $all
+61
+62    # allow all known users to publish/publish packages
+63    # (anyone can register by default, remember?)
+64    publish: $authenticated
+65    unpublish: $authenticated
+66
+67    # if package is not available locally, proxy requests to 'npmjs' registry
+68    # DO NOT FETCH PACKAGES FROM NPMJS
+69    #proxy: npmjs
+70
+71middlewares:
+72  audit:
+73    enabled: true
+74
+75# log settings
+76logs:
+77  - { type: stdout, format: pretty, level: http }
+78  #- {type: file, path: verdaccio.log, level: info}
+79#experiments:
+80#  # support for npm token command
+81#  token: false
+82#  # support for the new v1 search endpoint, functional by incomplete read more on ticket 1732
+83#  search: false
+84
+85# This affect the web and api (not developed yet)
+86#i18n:
+87#web: en-US
+The above is the stock Verdaccio configuration file for the Docker container version of it, except that you can locate the # DO NOT FETCH PACKAGES FROM NPMJS comment which on the next line comments the proxy: npmjs option. This blocks Verdaccio from fetching anything from npmjs for the packages set by the matching pattern.
+Manual package updates may introduce malicious versions
+In this scenario, you are manually updating your npm packages by running npm update ornpm install <packages>@latest to bring your dependencies versions up to date.
+When you invoke these update procedures, then the same behavior that we witnessed before takes place here too. The npm update command asks the private npm proxy to fetch the latest version, which in turn, the proxy checks for the most up-to-date version on the public npm registry.
+Note, if you’re a yarn user, then issuing a yarn upgrade will yield the same result of pulling in the potentially malicious packages from the public npmjs registry.
+We can demonstrate it in the following scenario, where we start off with the internal superlaser@1.0.0 version:
+1{
+2  "name": "new-project",
+3  "version": "1.0.0",
+4  "description": "",
+5  "main": "index.js",
+6  "scripts": {
+7    "test": "echo \"Error: no test specified\" && exit 1"
+8  },
+9  "keywords": [],
+10  "author": "",
+11  "license": "ISC",
+12  "dependencies": {
+13    "superlaser": "^1.0.0"
+14  }
+15}
+Now, I do have a .npmrc file which defines the local registry and is pointing to the Verdaccio server I have running. Yet, if I simply run npm update to bring all of my dependencies up to date, you can see it pulls in the latest semver matching version from the public npmjs registry:
+How to protect against it?
+Instead of manual and blind npm package updates, opt-in for automated package updates in the form of pull requests raised to your open source project repositories, which will also take care of syncing the package manifest (such as package-lock.json or yarn.lock).
+Snyk is one way you can freely automate npm package updates, as the following screenshot of a merged pull request shows:
+You can further fine-tune the automated update settings, such as limiting the number of pull requests that Snyk will open, or to completely ignore updating specific packages. There’s more on that in Snyk’s documentation on upgrading dependencies with automatic PRs.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+Concluding with application security resources
+If you made it this far along, you’ve earned the answer to the quiz we presented at the beginning of the article. We named the open source tool snync as an abbreviation for So Now You’re Not Confused. Did you get it?
+Practicing secure methodologies, whether as writing code, or day to day developer security hygiene, can’t be stressed enough these days with supply chain security incidents. If you or your team are doing JavaScript or Node.js regularly then you’ll find these reference resources useful:
+
+10 GitHub Security Best Practices
+10 npm Security Best Practices
+10 best practices to containerize Node.js web applications with Docker
+
+Private npm registry misconfiguration
+Private npm registry fetches latest versions
+Manual package updates may introduce malicious versions
+package.json
+superlaser
+death-star-secret-hyper-matter-reactor
+superlaser
+death-star-secret-hyper-matter-reactor
+superlaser
+package.json
+death-star-secret-hyper-matter-reactor
+Misconfiguration on a developer or test server
+Newer versions of packages published in the public npm registry
+Arguably, design flaws in package managers
+the-death-star project
+superlaser
+npm install
+It needs the URL of the private npm registry where this internal package exists.
+It needs a token or credentials of some sort to access that private registry.
+What happens if the continuous integration system doesn’t have the private registry set?
+What happens if you are a new developer onboarding to an existing project and you did not undergo prior steps such as running the command npm config set registry ?
+npm config set registry
+What happens if you mistakenly removed or changed your .npmrc configuration to not include the internal private npm registry?
+.npmrc
+superlaser
+.npmrc
+snync
+npx
+superlaser
+snync
+The death-star-secret-hyper-matter-reactorpackage is vulnerable because there’s no package of this name that is registered at the moment on the public npmjs registry. It means that  anyone can register it and then a dependency confusion attack can take place.
+death-star-secret-hyper-matter-reactor
+vulnerable
+The superlaser package is suspicious. This means, that the tool detected one of two cases:
+
+This package name was first introduced to the Git source code, and only later in time, a package of the same name was published to the public npmjs registry. This doesn’t mean that the public package on the npmjs registry is malicious, but warrants a review.
+The package name already exists on the public npmjs registry, even before you created a package of the same name as a private one.
+superlaser
+suspicious
+This package name was first introduced to the Git source code, and only later in time, a package of the same name was published to the public npmjs registry. This doesn’t mean that the public package on the npmjs registry is malicious, but warrants a review.
+The package name already exists on the public npmjs registry, even before you created a package of the same name as a private one.
+superlaser
+superlaser@1.0.0 exists in private npm registry https://localhost:4783
+superlaser@1.0.0
+superlaser@1.99.999 published by anonymous user to public npm registry at https://www.npmjs.com/package/superlaser
+superlaser@1.99.999
+superlaser
+package.json
+package-lock.json
+superlaser
+superlaser
+.npmrc
+npm install
+superlaser
+superlaser@1.0.0
+The latest semver release
+The time the package was published
+/verdaccio/conf/config.yaml
+# DO NOT FETCH PACKAGES FROM NPMJS
+proxy: npmjs
+npm update
+npm install <packages>@latest
+npm update
+yarn upgrade
+superlaser@1.0.0
+.npmrc
+npm update
+package-lock.json
+yarn.lock
+10 GitHub Security Best Practices
+10 npm Security Best Practices
+10 best practices to containerize Node.js web applications with Docker

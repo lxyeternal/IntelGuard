@@ -1,0 +1,347 @@
+
+The previous installment of this series demonstrated the weakness in allowing source distributions as dependencies. They lead to executing arbitrary code from setup.py files tucked away in the dependency hierarchy. A best practice is to enumerate the complete set of dependencies, in the form of a lockfile, and monitor for malicious entries. What if there was a way to rely on packages as dependencies but ensure they don’t show up in lockfiles? This is precisely what Python build requirements are and they represent a dark spot in the fabric of dependency management.
+
+
+Build requirements in pyproject.toml
+Installable source distributions of projects that make use of the modern pyproject.toml file can specify the build system to use with a build-system table and the requires key. This key holds a list of PEP 508 requirement specifiers.
+It is a surprising side effect that the entries from this key will be installed in an isolated build environment. Arbitrary code execution is possible if any of the fully resolved set of build requirements are installed as source distributions. Let’s see an example of this in action with the popular cryptography package, which currently has a pyproject.toml file that starts like this:
+[build-system]
+# These requirements must be kept sync with the requirements in
+# ./github/requirements/build-requirements.{in,txt}
+requires = [
+    # First version of setuptools to support pyproject.toml configuration
+    "setuptools>=61.0.0",
+    "wheel",
+    # Must be kept in sync with `project.dependencies`
+    "cffi>=1.12; platform_python_implementation != 'PyPy'",
+    "setuptools-rust>=1.7.0",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cryptography"
+
+---TRIMMED---
+Build requirements for the popular cryptography package
+Notice the list of build requirements. We’ll see them again during package installation. This package is offered on PyPI with a source distribution and built distributions:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_822621\pypi_cryptography_dl_files.png
+cryptography
+This is not uncommon, as only one of the top 360 most-downloaded packages on PyPI is not offered as a wheel, according to the "Python Wheels" site at the time of writing:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\phylum\20241224_104012_822621\python_wheels.png
+This is great news for the health of the Python ecosystem! It means it is more likely source distributions are disallowed by package installers to eliminate an entire class of arbitrary code execution attacks. However, there are still less popular and older, unmaintained, packages that are only offered as source distributions. It is this subclass of packages and developers’ ongoing reliance on them where threat actors can operate.
+They can modify existing packages with expired author or maintainer domain takeovers and compromised accounts. They can slip their own malicious packages into the dependency chain as build requirements through typosquatting, starjacking, dependency confusion, and lockfile injection attacks.
+To understand what happens next, we continue with the cryptography example, coercing pip into using the source distribution by specifying the --no-binary option when installing the package:
+## Start with a clean slate by purging cached packages
+❯ python -m pip cache purge
+Files removed: 41
+
+## Create a virtual environment
+❯ python -m venv .venv
+
+## Activate the virtual environment
+❯ source .venv/bin/activate
+
+## Verify the environment is empty
+❯ python -m pip list
+Package Version
+------- -------
+pip     24.0
+
+## Install the source distribution version of the `cryptography`
+## package with the `--no-binary` option so it will have to be built.
+❯ python -m pip install -v --no-binary cryptography cryptography
+Using pip 24.0 from /Users/maxrake/dev/phylum/cryptography/.venv/lib/python3.12/site-packages/pip (python 3.12)
+Collecting cryptography
+  Downloading cryptography-42.0.5.tar.gz (671 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 671.0/671.0 kB 5.9 MB/s eta 0:00:00
+  Running command pip subprocess to install build dependencies
+  Collecting setuptools>=61.0.0
+    Downloading setuptools-69.5.1-py3-none-any.whl.metadata (6.2 kB)
+  Collecting wheel
+    Downloading wheel-0.43.0-py3-none-any.whl.metadata (2.2 kB)
+  Collecting cffi>=1.12
+    Downloading cffi-1.16.0-cp312-cp312-macosx_11_0_arm64.whl.metadata (1.5 kB)
+  Collecting setuptools-rust>=1.7.0
+    Downloading setuptools_rust-1.9.0-py3-none-any.whl.metadata (9.3 kB)
+  Collecting pycparser (from cffi>=1.12)
+    Downloading pycparser-2.22-py3-none-any.whl.metadata (943 bytes)
+  Collecting semantic-version<3,>=2.8.2 (from setuptools-rust>=1.7.0)
+    Downloading semantic_version-2.10.0-py2.py3-none-any.whl.metadata (9.7 kB)
+  Downloading setuptools-69.5.1-py3-none-any.whl (894 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 894.6/894.6 kB 7.5 MB/s eta 0:00:00
+  Downloading wheel-0.43.0-py3-none-any.whl (65 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 65.8/65.8 kB 5.6 MB/s eta 0:00:00
+  Downloading cffi-1.16.0-cp312-cp312-macosx_11_0_arm64.whl (177 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 177.2/177.2 kB 13.7 MB/s eta 0:00:00
+  Downloading setuptools_rust-1.9.0-py3-none-any.whl (26 kB)
+  Downloading semantic_version-2.10.0-py2.py3-none-any.whl (15 kB)
+  Downloading pycparser-2.22-py3-none-any.whl (117 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 117.6/117.6 kB 10.6 MB/s eta 0:00:00
+  Installing collected packages: wheel, setuptools, semantic-version, pycparser, setuptools-rust, cffi
+  Successfully installed cffi-1.16.0 pycparser-2.22 semantic-version-2.10.0 setuptools-69.5.1 setuptools-rust-1.9.0 wheel-0.43.0
+  Installing build dependencies ... done
+  ---TRIMMED-FOR-BREVITY---
+  Building wheel for cryptography (pyproject.toml) ... done
+  Created wheel for cryptography: filename=cryptography-42.0.5-cp312-cp312-macosx_14_0_arm64.whl size=1206899 sha256=2073a004a24b11fc7650ec394889aba07aafb91b0cfb93a81ce6ac6ed0055a7e
+  Stored in directory: /Users/maxrake/Library/Caches/pip/wheels/5a/bf/5d/223912e51964394e3db254256e8ba38b5cff2c287737c1ebe6
+Successfully built cryptography
+Installing collected packages: pycparser, cffi, cryptography
+Successfully installed cffi-1.16.0 cryptography-42.0.5 pycparser-2.22
+
+## Show which packages were installed. Notice that the build requirements
+## are not there (except `cffi`, which is also a runtime dependency).
+❯ python -m pip list
+Package      Version
+------------ -------
+cffi         1.16.0
+cryptography 42.0.5
+pip          24.0
+pycparser    2.22
+Build requirements get installed when the source package is not available as a wheel
+There it is. Blink and you’d miss it. The build requirements were installed in an isolated environment, which itself was removed after use. That is a nice feature for malicious actors who want to cover their tracks. Arbitrary code execution would have been the result had any of those build requirements been offered as source distributions solely.
+Build requirements for setuptools
+The same behavior is possible with the legacy method of building packages using setuptools. Packages using a setup.py file will have a setup() call, which allows for a setup_requires keyword to list build-time dependency requirements. Similarly, the setup.cfg file has an [options] config section with a setup_requires key that serves the same purpose.
+Using setup.py is discouraged as it allows for arbitrary code execution and allowing source distributions opens the door to strangers on the internet. The pip documentation for secure and repeatable installs further drives home the point with this warning:
+setup_requires
+setup.py
+A survey of Python lockfiles
+It is perhaps more surprising that most Python lockfile generators do not account for these build requirements. We’ve previously written about the benefits of using a lockfile and covered the landscape of popular options in the Python ecosystem. The question now is which lockfiles fall victim to this attack?
+Pip
+The ability of pip to create a lockfile is limited to the pip freeze command. The output will only contain the packages from the environment in which the command was run. Since build requirements are installed in an ephemeral environment, they will not be included. Therefore, using pip as a lockfile generator is not recommended since it does not capture all requirements.
+The --no-build-isolation option can be specified when installing packages to indicate that an ephemeral environment will not be used. Instead, build requirements must already exist in the installation environment. Adherence is likely a manual process and so not a viable one for most developers.
+The pip documentation includes a “Secure installs” guide. It recommends disallowing source distributions entirely, by passing the --only-binary :all: option during install. Consider following this advice on your projects until proven it doesn’t work. Even then, attempt to modernize any requirements that depend on source distributions.
+Poetry
+The Poetry packaging and dependency management tool uses the pyproject.toml file for specifying metadata. It also offers a build backend in the form of the poetry-core package, which must be specified in the requires key of the build-system table. What is interesting is that Poetry does not have a mechanism for allowing the build requirements specified here to be included in the poetry.lock lockfile. This can be seen in our very own phylum-ci project, which makes use of Poetry and its build backend:
+## We are in a git-tracked checkout directory for `phylum-ci`
+❯ git remote -v
+origin	git@github.com:phylum-dev/phylum-ci.git (fetch)
+origin	git@github.com:phylum-dev/phylum-ci.git (push)
+
+## It specifies `poetry-core` as the build backend...
+❯ head -n 4 pyproject.toml
+[build-system]
+# NOTE: Changes to the build system values should be inspected closely!
+requires = ["poetry-core>=1.8.1"]
+build-backend = "poetry.core.masonry.api"
+
+## ...but doesn't include it in the generated lockfile
+❯ grep --count 'poetry-core' poetry.lock
+0
+
+## Meanwhile, explicit package dependencies like `requests`...
+❯ grep -A6 'tool.poetry.dependencies' pyproject.toml
+[tool.poetry.dependencies]
+python = ">=3.9,<3.13"
+requests = "*"
+cryptography = "*"
+packaging = "*"
+"ruamel.yaml" = "*"
+rich = "*"
+
+## ...do show up in the lockfile
+❯ grep --count 'requests' poetry.lock
+18
+Poetry lockfiles do not include build requirements
+Poetry has an open issue requesting the ability to include build requirements in the lockfile, but it has stalled due to concerns over performance.
+pip-tools
+The pip-compile command from the pip-tools suite is not a victim, at least when the --all-build-deps option is used. This option was added earlier this year, in the v7.4.0 release from 16 FEB 2024. However, there is a limitation in that build dependencies of build dependencies are not included in the output.
+Here is an example using the phylum-ci project again:
+## Ensure the `--all-build-deps` option is specified
+❯ pip-compile -o requirements.txt --all-build-deps --generate-hashes pyproject.toml
+---OUTPUT-SUPPRESSED---
+
+## ...and see that now `poetry-core` is included in the generated lockfile
+❯ grep -C4 'poetry-core' requirements.txt
+packaging==24.0 \
+    --hash=sha256:2ddfb553fdf02fb784c234c7ba6ccc288296ceabec964ad2eae3777778130bc5 \
+    --hash=sha256:eb82c5e3e56209074766e6885bb04b8c38a0c015d0a30036ebe7ece34c9989e9
+    # via phylum (pyproject.toml)
+poetry-core==1.9.0 \
+    --hash=sha256:4e0c9c6ad8cf89956f03b308736d84ea6ddb44089d16f2adc94050108ec1f5a1 \
+    --hash=sha256:fa7a4001eae8aa572ee84f35feb510b321bd652e5cf9293249d62853e1f935a2
+    # via phylum (pyproject.toml::build-system.requires)
+pycparser==2.22 \
+pip-tools does include build requirements in generated lockfiles
+The lockfile even includes comments showing where each requirement originates! This tool can also handle the input manifests setup.py and setup.cfg. Here is an example building off the spoofed certify project from an earlier post in this series:
+## Add the `packaging` package as a build requirement
+❯ git diff setup.py
+diff --git a/setup.py b/setup.py
+index 4313c16..c824247 100755
+--- a/setup.py
++++ b/setup.py
+@@ -24,7 +24,8 @@ with open("certifi/__init__.py") as f:
+         raise RuntimeError("No version number found!")
+
+ setup(
+-    name="certifi",
++    name="certify",
++    setup_requires=["packaging"],
+     version=VERSION,
+     description="Python package for providing Mozilla's CA Bundle.",
+     long_description=open("README.rst").read(),
+
+## ...and see that it is included in the lockfile
+❯ pip-compile -o requirements.txt --all-build-deps --generate-hashes setup.py
+WARNING: --strip-extras is becoming the default in version 8.0.0. To silence this warning, either use --strip-extras to opt into the new default or use --no-strip-extras to retain the existing behavior.
+#
+# This file is autogenerated by pip-compile with Python 3.12
+# by the following command:
+#
+#    pip-compile --all-build-deps --generate-hashes --output-file=requirements.txt setup.py
+#
+packaging==24.0 \
+    --hash=sha256:2ddfb553fdf02fb784c234c7ba6ccc288296ceabec964ad2eae3777778130bc5 \
+    --hash=sha256:eb82c5e3e56209074766e6885bb04b8c38a0c015d0a30036ebe7ece34c9989e9
+    # via
+    #   certify (pyproject.toml::build-system.backend::editable)
+    #   certify (pyproject.toml::build-system.backend::sdist)
+    #   certify (pyproject.toml::build-system.backend::wheel)
+wheel==0.43.0 \
+    --hash=sha256:465ef92c69fa5c5da2d1cf8ac40559a8c940886afcef87dcf14b9470862f1d85 \
+    --hash=sha256:55c570405f142630c6b9f72fe09d9b67cf1477fcf543ae5b8dcb1f5b7377da81
+    # via
+    #   certify (pyproject.toml::build-system.backend::editable)
+    #   certify (pyproject.toml::build-system.backend::wheel)
+    #   certify (pyproject.toml::build-system.requires)
+pip-compile will include build requirements from legacy setuptools projects
+Pipenv
+Pipenv falls victim to this class of lockfile omission, failing to account for build requirements specified in standard locations. It appears the tool is designed to make use of its own custom Pipfile manifest instead of using the existing options provided by pyproject.toml or setup.py. The documentation has this to say regarding the observation that Pipenv does not respect dependencies in setup.py:
+Pipenv has this open issue requesting the ability to specify build dependencies but it stalled out almost five years ago. Plus, it doesn’t quite get to the root of the issue discussed in this post.
+PDM
+The PDM package and dependency manager bills itself as supporting the latest PEP standards. Indeed, it is PEP 621 compliant for storing project metadata in pyproject.toml. However, it does not account for the build-system.requires key there when generating it’s pdm.lock lockfile. An open issue exists to add this feature but it was deferred by the project’s creator as too big to take on without additional support from the PyPI API (e.g., .metadata files a la PEP 658) and standardization in the form of PEPs (e.g., core metadata for source distributions a la PEP 643).
+Other languages do it right
+Including build dependencies in lockfiles is not an intractable problem. The Rust language ecosystem provides only one officially supported package management tool in Cargo, which generates the canonical Cargo.lock dependency lockfile.
+Rust projects may also need to run code before building their package. Cargo allows for this in the form of build scripts, which may have their own set of build dependencies. Critically, these build requirements show up in the lockfile, making it much easier for analysis tools like Phylum to warn of bad packages. Here is an example for the curious:
+## Start with a very basic Cargo project manifest
+❯ cat Cargo.toml
+[package]
+name = "cargo_project"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2.153"
+
+## ...which results in a very basic lockfile
+❯ cat Cargo.lock
+# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 3
+
+[[package]]
+name = "cargo_project"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "libc"
+version = "0.2.153"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c198f91728a82281a64e1f4f9eeb25d82cb32a5de251c6bd1b5154d63a8e7bd"
+
+## Add the `cc` dependency, needed for a build script
+❯ git diff Cargo.toml
+diff --git a/cargo_project/Cargo.toml b/cargo_project/Cargo.toml
+index 39a7fc2..2827e4c 100644
+--- a/cargo_project/Cargo.toml
++++ b/cargo_project/Cargo.toml
+@@ -7,3 +7,7 @@ edition = "2021"
+
+ [dependencies]
+ libc = "0.2.153"
++
++[build-dependencies]
++cc = "1.0.95"
+
+## Update the lockfile
+❯ cargo update
+    Updating crates.io index
+      Adding cc v1.0.95
+
+## ...and see that the build dependency is included
+❯ git diff Cargo.lock
+diff --git a/cargo_project/Cargo.lock b/cargo_project/Cargo.lock
+index 58a6178..2509196 100644
+--- a/cargo_project/Cargo.lock
++++ b/cargo_project/Cargo.lock
+@@ -6,9 +6,16 @@ version = 3
+ name = "cargo_project"
+ version = "0.1.0"
+ dependencies = [
++ "cc",
+  "libc",
+ ]
+
++[[package]]
++name = "cc"
++version = "1.0.95"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d32a725bc159af97c3e629873bb9f88fb8cf8a4867175f76dc987815ea07c83b"
++
+ [[package]]
+ name = "libc"
+ version = "0.2.153"
+The Cargo tool in the Rust language ecosystem accounts for build requirements in lockfiles
+Conclusion
+Allowing source distributions at any point in the package dependency chain opens the door for arbitrary code execution. Allowing them for build requirements is especially troublesome because the default behavior is to install those dependencies (i.e., execute arbitrary code from strangers on the internet) in an isolated build environment (away from prying eyes) that is automatically deleted after use (cover tracks).
+It would be one thing if these build requirements were included in lockfiles. That way, modifications and additions could go through the normal review process and be automatically scanned for malicious behavior by one of the integrations offered by Phylum.
+Unfortunately, most common Python lockfile generators do not support this feature due to the performance cost incurred by additional dependency resolver iterations. The one tool that does support it, pip-compile from the pip-tools suite, only resolves build time dependencies one level deep.
+Be wary of any packages that are only offered as a source distribution. If possible in your environment, disallow source distributions entirely. If not possible, at least guard against arbitrary changes to build requirements by pinning them to exact versions and analyzing new versions and new entries before use.
+setup.py
+pyproject.toml
+pyproject.toml
+build-system
+requires
+cryptography
+pyproject.toml
+cryptography
+pip
+--no-binary
+setuptools
+setuptools
+setup.py
+setup()
+setup_requires
+setup.cfg
+[options]
+setup_requires
+setup.py
+pip
+pip
+pip freeze
+pip
+--no-build-isolation
+pip
+--only-binary :all:
+pyproject.toml
+poetry-core
+requires
+build-system
+poetry.lock
+phylum-ci
+pip-compile
+pip-tools
+--all-build-deps
+phylum-ci
+pip-tools
+setup.py
+setup.cfg
+certify
+pip-compile
+setuptools
+Pipfile
+pyproject.toml
+setup.py
+setup.py
+pyproject.toml
+build-system.requires
+pdm.lock
+.metadata
+Cargo
+Cargo.lock
+Cargo
+Cargo
+pip-compile
+pip-tools

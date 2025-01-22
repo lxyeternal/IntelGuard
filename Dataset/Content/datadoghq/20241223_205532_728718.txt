@@ -1,0 +1,398 @@
+
+As part of our security research, we regularly perform threat hunting activities—i.e., proactively searching for, and possibly identifying, malicious activity—in cloud environments. Threat hunting helps us identify new threats and improve the content available in Datadog’s security products.
+Recently, our threat hunting sessions have focused primarily on AWS environments. In this post, we detail some of our methodology to proactively identify malicious activity by investigating logs in AWS Cloudtrail, which centralizes logs documenting user activity and API usage across an organization’s AWS infrastructure. We also share our findings on malicious activity we’ve observed in the wild, along with actionable queries and indicators of compromise for those who want to search their own environments for signs of the threat activity we’ve observed.
+While some of these attacks reflect patterns that have been observed before and are starting to be well-understood, we believe it's critical to continuously challenge hypotheses based on what's really happening in the wild.
+Goals of threat hunting in CloudTrail
+Threat hunting is generally expected to drive the following outcomes:
+
+Finding breaches and malicious activity
+Fueling the design and creation of new detection rules
+Building subject matter expertise on threat activity in a particular type of environment
+Documenting learnings to share with others
+Every hunt session starts with a hypothesis about attacker behavior and attempts to verify this idea in the real world using available data sources. The goal, much like the scientific method, is to reject or confirm the hypothesis. In an effort to better understand AWS threat actors, we performed several hunt sessions based on the following hypotheses:
+
+An attacker may attempt to create an IAM user in order to  persist in an environment they’ve breached
+An attacker may attempt to leverage Amazon SES for email spam purposes
+An attacker who has compromised an environment with private EC2 instances may attempt to access it by creating or importing EC2 key pairs and modifying security groups
+An attacker who has compromised AWS credentials may attempt to enumerate the permissions assigned to a stolen identity
+Findings
+Creating IAM users is a popular persistence vector
+We identified that shortly after compromising an AWS environment, attackers frequently attempt to create an IAM user. In particular, we assess with high confidence that the following IAM user names have been used to create "backdoor" IAM users:
+EmperorsToolsShops32
+one_piece
+Policy-role-16
+Policy-role-6
+s3.dev
+s3.simprosys
+flashx7860
+sesadministrator
+ses-admin
+ses_BackupUser
+sesadminsmtp
+roxaot
+devlops
+produc-sns-net-usr
+ampIify-dev
+root
+jSDSsajsnhjjjjjjwyyw
+ses_legion
+ses_master
+MailSES
+s3-ftp
+To identify suspicious identities, we looked at several elements such as:
+
+High volumes of access denied errors from a specific identity
+IAM user creation events from EC2 instances (where the role session name starts with i-)
+Access denied errors that occurred when creating an IAM user, especially when the same IAM user name was attempted to be created across multiple environments
+IAM user creation events from identities that had never created IAM users in the past
+IAM user names with grammatical errors or slight deviations of a common word
+Then, we analyzed the related activity to confirm maliciousness with a high level of confidence.
+As indicated in the list above, we've seen numerous cases of an attacker attempting to create an IAM user named "root".
+{
+  "awsRegion": "us-east-1",
+  "eventSource": "iam.amazonaws.com",
+  "readOnly": false,
+  "eventType": "AwsApiCall",
+  "error": {
+    "kind": "AccessDenied",
+    "message": "User: arn:aws:iam::REDACTED:user/REDACTED is not authorized to perform: iam:CreateUser on resource: arn:aws:iam::REDACTED:user/root because no identity-based policy allows the iam:CreateUser action"
+  },
+  "eventName": "CreateUser"
+}
+This strikes us as an attempt to stay under the radar, as people may think that this IAM user is the AWS default root user (which is, in reality, not an IAM user but a concept of its own).
+In one case, the malicious IAM user (EmperorsToolsShops32) is related to a toolkit, Emperors Tools, that's sold through an online shop.
+The threat actor selling this toolkit has several Telegram channels, including one where they provide "free samples" of compromised AWS and RDP credentials:
+It appears that the PHP script the actor uses to receive stolen files is available on GitHub. Using Shodan and Google, we were able to identify at least several compromised, legitimate websites that the actor is likely using as an intermediary.
+Funnily enough, the attacker's upload script is vulnerable to a straightforward arbitrary file upload vulnerability that would easily allow remote code execution.
+Persist, but check first
+In several cases, we witnessed the attacker checking for the presence of a specific malicious IAM user before attempting to create it.
+{
+  "eventName": "GetUser",
+  "errorCode": "AccessDenied",
+  "errorMessage": "User: arn:aws:iam::[redacted]:user/[redacted] is not authorized to perform: iam:GetUser on resource: user admindvelop because no identity-based policy allows the iam:GetUser action"
+}
+We witnessed the following IAM user names being checked:
+administrator
+adminprod
+adminprodz
+admindvelop
+Creating security groups
+We identified an actor who, after initial compromise, attempted to create a security group called Java_Ghost. We noticed this activity in several independent environments:
+{
+  "awsRegion": "us-east-1",
+  "eventName": "CreateSecurityGroup",
+  "eventCategory": "Management",
+  "eventSource": "ec2.amazonaws.com",
+  "requestParameters": {
+    "groupName": "Java_Ghost",
+    "groupDescription": "TEST"
+  }
+}
+A similar activity was also noticed by a Reddit user in May 2022, whose account was compromised.
+Considering that all attempts to create this security group failed due to a lack of permissions, we can't know for sure the intent of the attacker. However, it seems reasonable to assume that they were creating a security group before attempting to run EC2 instances.
+Creating EC2 key pairs
+The creation of a EC2 key pair is a known technique to maintain access to an AWS environment via EC2 instances. During our research, we witnessed one attacker attempt a DescribeInstances API call with a filter for a specific key-name before attempting to create a key pair. We inferred that this was likely an automated function to determine if the AWS account had been compromised previously.
+{
+  "eventName": "DescribeInstances",
+  "requestParameters": {
+    "filterSet": {
+      "items": [{
+        "valueSet": {
+          "name": "key-name",
+          "items": [{
+              "value": "xg1"
+          }]
+        }
+      }]
+    }
+  }
+}
+{
+  "eventName": "CreateKeyPair",
+  "requestParameters": { 
+    "keyFormat": "pem", 
+    "keyName": "xg1" 
+  }
+}
+temp_key_pair
+xg1
+Most common enumeration techniques
+In the table below, we’ve compiled the most common enumeration API calls discovered throughout our hunting activity. At this stage, the attacker has compromised credentials, but they don't know where they’ve landed in the breached environment. Their goal is to gain situational awareness and understand the value and potential of the compromised account.
+
+Enumeration API call	Comment	Attacker's question being answered
+sts:GetCallerIdentity	Returns the identity of the authenticated user	"What are the credentials I compromised?"
+ses:GetAccount	Returns information about the SES account, including sending limits and past usage	"What's the volume of emails I can send through this account?"
+ses:GetSendQuota	Returns SES sending limits	"What's the volume of emails I can send through this account?"
+ses:ListIdentities	Lists verified SES senders	"Who can I impersonate?"
+sns:GetSMSAttributes	Returns SMS sending settings	"What's the SMS monthly spend limit?"
+iam:ListUsers	Returns IAM users in the account	"How many people are using this account?"
+ec2:DescribeRegions	Describes the Regions that are enabled for your account, or all Regions.	"What regions are enabled that infrastructure could be set up in?"
+ec2:DescribeInstances	Describes the specified instances or all instances	"What type of EC2 infrastructure is present in this account?"
+ec2:DescribeVpcs	Describes one or more of your VPCs	"How is the network infrastructure set up in this account?"
+lightsail:GetRegions	Returns a list of all valid regions for Amazon Lightsail	"What regions are enabled that infrastructure could be set up in?"
+lightsail:GetInstances	Returns information about all Amazon Lightsail instances	"What type of Lightsail infrastructure is present in this account?"
+route53:ListDomains	Returns domain names registered in the account	"What's the name and domain names of the organization I have compromised?"
+route53:GetHostedZoneCount	Returns the number of hosted zones in the account	"How large is this company?"
+s3:ListBuckets	Returns S3 buckets	"Is there sensitive data available?"
+servicequotas:ListServiceQuotas	Returns service quotas in use for a specific service (e.g. EC2)	"How many resources can I spin up in that account?"
+The usage pattern of these API calls leads us to believe that the discovery is automated, and not performed by a human—at least not at first. For instance, in several cases in which the compromised IAM user had the word s3 in it, the attacker did not attempt to list or access S3 buckets. These events are also logged within a very short period of time, reinforcing our assumption that their discovery is automated.
+Detection Opportunities
+As an outcome of our threat hunt, we used our findings to create several high-confidence detections. These are presented in a CloudTrail SQL format, allowing any team to search their CloudTrail logs for potential threats through AWS CloudTrail Lake.
+Atomic indicator IAM user creation
+SELECT
+  eventTime,
+  sourceIPAddress,
+  userIdentity.arn as user,
+  requestParameters['userName'],
+  eventName
+FROM
+  <event-data-store-id>
+WHERE
+  eventSource = 'iam.amazonaws.com' AND eventName = 'CreateUser' 
+  AND requestParameters['userName'] IN ('EmperorsToolsShops32', 'one_piece', 'Policy-role-16', 'Policy-role-6', 's3.dev', 's3.simprosys', 'flashx7860', 'sesadministrator', 'ses-admin', 'ses_BackupUser', 'sesadminsmtp', 'roxaot', 'devlops', 'produc-sns-net-usr', 'ampIify-dev', 'root', 'jSDSsajsnhjjjjjjwyyw', 'ses_legion', 'ses_master', 'MailSES', 's3-ftp')
+SELECT 
+  eventTime,
+  sourceIPAddress,
+  userIdentity.arn AS user,
+  errorMessage,
+  eventName
+FROM 
+  <event-data-store-id>
+WHERE 
+  eventSource = 'iam.amazonaws.com' AND eventName = 'CreateUser' 
+  AND (errorMessage LIKE '%/EmperorsToolsShops32%' OR errorMessage LIKE '%/one_piece%' OR errorMessage LIKE '%/Policy-role-6%' OR errorMessage LIKE '%/Policy-role-16%' OR errorMessage LIKE '%/s3.dev%' OR errorMessage LIKE '%/flashx7860%' OR errorMessage LIKE '%/sesadministrator%' OR errorMessage LIKE '%/ses-admin%' OR errorMessage LIKE '%/ses_BackupUser%' OR errorMessage LIKE '%/sesadminsmtp%' OR errorMessage LIKE '%/roxaot%' OR errorMessage LIKE '%/devlops%' OR errorMessage LIKE '%/produc-sns-net-usr%' OR errorMessage LIKE '%/adminprod%' OR errorMessage LIKE '%/adminprodz%' OR errorMessage LIKE '%/admindvelop%' OR errorMessage LIKE '%/ampLify-dev%' OR errorMessage LIKE '%/root%' OR errorMessage LIKE '%/jSDSsajsnhjjjjjjwyyw%' OR errorMessage LIKE '%/ses_legion%' OR errorMessage LIKE '%/ses_master%' OR errorMessage LIKE '%/MailSES%' OR errorMessage LIKE '%/s3-ftp%')
+Atomic indicator Security Group creation
+SELECT 
+  eventTime,
+  sourceIPAddress,
+  userIdentity.arn AS user,
+  eventName
+FROM
+  <event-data-store-id>
+WHERE 
+  eventSource = 'ec2.amazonaws.com' 
+  AND eventName = 'CreateSecurityGroup'
+  AND requestParameters['groupName'] = 'Java_Ghost'
+Atomic indicator EC2 keypair creation
+SELECT 
+  eventTime,
+  sourceIPAddress,
+  userIdentity.arn AS user,
+  eventName,
+  requestParameters['keyName']
+FROM
+  <event-data-store-id>
+WHERE 
+  eventSource = 'ec2.amazonaws.com' 
+  AND eventName = 'CreateKeyPair'
+  AND requestParameters['keyName'] IN ('xg1', 'temp_key_pair')
+EC2 instances attempting to create IAM users
+SELECT 
+  eventTime, 
+  sourceIPAddress, 
+  userIdentity.sessioncontext.sessionissuer.arn as roleArn, 
+  split(userIdentity.arn, '/')[3] as instanceId, 
+  requestParameters['userName'], eventName 
+FROM 
+  <event-data-store-id>
+WHERE 
+  eventSource = 'iam.amazonaws.com' AND eventName = 'CreateUser' 
+  AND split(userIdentity.arn, '/')[3] LIKE 'i-%'
+Principals with a high number of access denied errors
+SELECT
+  useridentity.arn,
+  COUNT(*) AS "Total access denied errors",
+  COUNT(DISTINCT eventName) AS "Unique failed event names",
+  array_distinct(array_sort(zip_with(array_agg(eventSource), array_agg(eventName), (source, event) -> concat(split_part(source, '.', 1), ':', event))) AS "Event names with permission denied")
+FROM
+  <event-data-store-id>
+WHERE errorCode = 'AccessDenied'
+GROUP BY useridentity.arn
+HAVING COUNT(DISTINCT concat(eventSource, ':', eventName)) > 1
+ORDER BY "Unique failed event names" DESC
+How Datadog can help
+Datadog Cloud SIEM includes several detection rules that help teams detect some of the types of malicious activity we encountered in our AWS threat hunting. These include:
+
+Amazon SNS enumeration attempt by previously unseen user
+User travel was impossible in AWS CloudTrail IAM log
+Compromised AWS IAM user access key
+AWS security group created, modified, or deleted
+AWS IAM user created with AdministratorAccess policy attached
+Tor client IP address identified within AWS environment
+The AWS managed policy AWSCompromisedKeyQuarantineV2 has been attached
+AWS IAM AdministratorAccess policy was applied to a user
+In addition, you can use the following Datadog logs queries to identify activity matching one of the indicators of compromise described in this post.
+
+Potentially malicious IAM user creation (open in-app logs search):
+source:cloudtrail @evt.name:CreateUser (@requestParameters.userName:(EmperorsToolsShops32 OR one_piece OR Policy-role-6 OR Policy-role-16 OR s3.dev OR s3.simprosys OR flashx7860 OR sesadministrator OR ses-admin OR ses_BackupUser OR sesadminsmtp OR roxaot OR devlops OR produc-sns-net-usr OR adminprod OR adminprodz OR admindvelop OR ampLify-dev OR root OR jSDSsajsnhjjjjjjwyyw OR ses_legion OR ses_master OR MailSES OR s3-ftp) OR @error.message:(*/EmperorsToolsShops32* OR */one_piece* OR */Policy-role-6* OR */Policy-role-16* OR */s3.dev* OR */s3.simprosys* OR */flashx7860* OR */sesadministrator* OR */ses-admin* OR */ses_BackupUser* OR */sesadminsmtp* OR */roxaot* OR */devlops* OR */produc-sns-net-usr* OR */adminprod* OR */adminprodz* OR */admindvelop* OR */ampLify-dev* OR */root* OR */jSDSsajsnhjjjjjjwyyw* OR */ses_legion* OR */ses_master* OR */MailSES* OR */s3-ftp))
+
+Potentially malicious security group creation (open in-app logs search):
+source:cloudtrail @evt.name:CreateSecurityGroup @requestParameters.groupName:"Java_Ghost"
+
+Potentially malicious keypair creation (open in-app logs search):
+source:cloudtrail @evt.name:Create KeyPair @requestParameters.keyName:(xg1 OR temp_key_pair)
+Conclusion
+We are always trying to learn how the cloud threat landscape is evolving, and through the threat hunting activities described in this post, we identified some unique behaviors and validated some of the other amazing research out there, which we have referenced below. We hope you can use some of these indicators to find—or, hopefully, not find—badness in your own environment.
+References
+
+https://www.chrisfarris.com/post/public-access-key-2023/
+https://www.cadosecurity.com/legion-an-aws-credential-harvester-and-smtp-hijacker/
+https://permiso.io/blog/s/unmasking-guivil-new-cloud-threat-actor/
+https://permiso.io/blog/s/approach-to-detection-androxgh0st-greenbot-persistence/
+https://sysdig.com/blog/cloud-breach-terraform-data-theft/
+https://orca.security/wp-content/uploads/2023/06/Orca-Security-2023-Honeypotting-in-the-Cloud-Report-Attacker-Tactics-and-Techniques-Revealed.pdf
+Annex: Indicators of compromise
+These indicators have been observed between August 6 2023, and September 7 2023.
+
+Indicator	Type
+Java_Ghost	EC2 security group name
+xg1	EC2 keypair name
+temp_key_pair	EC2 keypair name
+EmperorsToolsShops32	IAM user name
+one_piece	IAM user name
+Policy-role-6	IAM user name
+Policy-role-16	IAM user name
+s3.dev	IAM user name
+s3.simprosys	IAM user name
+flashx7860	IAM user name
+sesadministrator	IAM user name
+ses-admin	IAM user name
+ses_BackupUser	IAM user name
+sesadminsmtp	IAM user name
+roxaot	IAM user name
+devlops	IAM user name
+produc-sns-net-usr	IAM user name
+adminprod	IAM user name
+adminprodz	IAM user name
+admindvelop	IAM user name
+ampIify-dev	IAM user name
+root	IAM user name
+jSDSsajsnhjjjjjjwyyw	IAM user name
+ses_legion	IAM user name
+ses_master	IAM user name
+MailSES	IAM user name
+s3-ftp	IAM user name
+3[.]92.161.20	IP Address
+45[.]8.144.238	IP Address
+35[.]88.137.175	IP Address
+185[.]174.101.50	IP Address
+38[.]25.16.137	IP Address
+34[.]222.249.116	IP Address
+54[.]144.221.102	IP Address
+44[.]211.239.66	IP Address
+165[.]22.30.213	IP Address
+45[.]137.22.252	IP Address
+114[.]124.242.80	IP Address
+107[.]182.128.12	IP Address
+3[.]134.110.223	IP Address
+45[.]128.199.130	IP Address
+18[.]207.250.11	IP Address
+179[.]43.142.141	IP Address
+170[.]64.156.73	IP Address
+35[.]93.106.70	IP Address
+54[.]179.17.106	IP Address
+45[.].137.22.184	IP Address
+54[.]163.234.166	IP Address
+45[.]77.104.18	IP Address
+3[.]238.100.27	IP Address
+116[.]206.35.14	IP Address
+191[.]96.50.11	IP Address
+31[.]42.184.32	IP Address
+95[.]214.24.124	IP Address
+54[.]149.145.75	IP Address
+170[.]64.148.101	IP Address
+13[.]56.247.108	IP Address
+18[.]159.195.197	IP Address
+35[.]203.175.21	IP Address
+110[.]137.115.39	IP Address
+180[.]244.163.225	IP Address
+170[.]64.166.210	IP Address
+18[.]144.86.242	IP Address
+185[.]145.245.42	IP Address
+103[.]241.66.180	IP Address
+20[.]163.67.84	IP Address
+54[.]215.183.223	IP Address
+45[.]8.17.29	IP Address
+35[.]93.87.139	IP Address
+20[.]219.103.204	IP Address
+114[.]124.212.97	IP Address
+170[.]64.174.72	IP Address
+45[.]128.199.232	IP Address
+64[.]190.113.103	IP Address
+80[.]76.51.97	IP Address
+54[.]202.114.214	IP Address
+3[.]120.207.231	IP Address
+5[.]62.20.22	IP Address
+45[.]137.20.63	IP Address
+103[.]241.66.161	IP Address
+203[.]4.236.234	IP Address
+179[.]43.191.162	IP Address
+20[.]97.113.197	IP Address
+51[.]222.42.163	IP Address
+34[.]82.27.79	IP Address
+165[.]227.178.173	IP Address
+135[.]125.27.253	IP Address
+184[.]168.125.148	IP Address
+107[.]22.38.236	IP Address
+3[.]87.88.196	IP Address
+179[.]43.145.194	IP Address
+34[.]168.149.29	IP Address
+45[.]128.199.108	IP Address
+54[.]245.40.95	IP Address
+165[.]227.177.229	IP Address
+2[.]58.150.54	IP Address
+3[.]143.228.87	IP Address
+20[.]18.34.148	IP Address
+149[.]28.33.206	IP Address
+36[.]77.170.40	IP Address
+146[.]190.84.26	IP Address
+3[.]230.173.139	IP Address
+34[.]83.136.204	IP Address
+access denied
+i-
+Access denied
+EmperorsToolsShops32
+Java_Ghost
+sts:GetCallerIdentity
+ses:GetAccount
+ses:GetSendQuota
+ses:ListIdentities
+sns:GetSMSAttributes
+iam:ListUsers
+ec2:DescribeRegions
+ec2:DescribeInstances
+ec2:DescribeVpcs
+lightsail:GetRegions
+lightsail:GetInstances
+route53:ListDomains
+route53:GetHostedZoneCount
+s3:ListBuckets
+servicequotas:ListServiceQuotas
+s3
+Java_Ghost
+xg1
+temp_key_pair
+EmperorsToolsShops32
+one_piece
+Policy-role-6
+Policy-role-16
+s3.dev
+s3.simprosys
+flashx7860
+sesadministrator
+ses-admin
+ses_BackupUser
+sesadminsmtp
+roxaot
+devlops
+produc-sns-net-usr
+adminprod
+adminprodz
+admindvelop
+ampIify-dev
+root
+jSDSsajsnhjjjjjjwyyw
+ses_legion
+ses_master
+MailSES
+s3-ftp

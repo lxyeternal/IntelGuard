@@ -396,6 +396,154 @@ def update_graph_with_basic_info(package_manager_dict):
     print("所有包信息更新完成")
 
 
+def update_graph_from_json(json_file_path):
+    """
+    从 JSON 文件读取 PyPI 包信息并更新图数据库。
+
+    :param json_file_path: 存储 PyPI 包信息的 JSON 文件路径
+    """
+    # 读取存储在 JSON 文件中的 pypi_basic_info 数据
+    with open(json_file_path, 'r') as json_file:
+        pypi_basic_info = json.load(json_file)
+    if not pypi_basic_info:
+        print("没有读取到有效的包信息数据。")
+        return
+
+    for package_name, package_info in pypi_basic_info.items():
+        try:
+            # 1. 获取或创建 Package 节点
+            package_node = graph.nodes.match("Package", name=package_name).first()
+            if not package_node:
+                package_node = Node("Package", name=package_name)
+                graph.create(package_node)
+
+            # 2. 处理包级别的属性（description, author, author_email）
+            # 2.1 处理 description
+            if package_info['description'] is not None:
+                desc_node = graph.nodes.match("Description", content=package_info['description']).first()
+                if not desc_node:
+                    desc_node = Node("Description", content=package_info['description'])
+                    graph.create(desc_node)
+
+                has_desc = graph.match_one((package_node, desc_node), "HAS_DESCRIPTION")
+                if not has_desc:
+                    has_desc = Relationship(package_node, "HAS_DESCRIPTION", desc_node)
+                    graph.create(has_desc)
+
+            # 2.2 处理 author
+            if package_info['author'] is not None:
+                author_node = graph.nodes.match("Author", name=package_info['author']).first()
+                if not author_node:
+                    author_node = Node("Author", name=package_info['author'])
+                    graph.create(author_node)
+
+                authored_by = graph.match_one((package_node, author_node), "AUTHORED_BY")
+                if not authored_by:
+                    authored_by = Relationship(package_node, "AUTHORED_BY", author_node)
+                    graph.create(authored_by)
+
+            # 2.3 处理 author_email
+            if package_info['author_email'] is not None:
+                email_node = graph.nodes.match("AuthorEmail", email=package_info['author_email']).first()
+                if not email_node:
+                    email_node = Node("AuthorEmail", email=package_info['author_email'])
+                    graph.create(email_node)
+
+                has_email = graph.match_one((package_node, email_node), "HAS_EMAIL")
+                if not has_email:
+                    has_email = Relationship(package_node, "HAS_EMAIL", email_node)
+                    graph.create(has_email)
+
+            # 3. 处理版本及其相关属性
+            for version_name, version_info in package_info['versions'].items():
+                # 3.1 创建或获取 Version 节点
+                version_node = graph.nodes.match("Version", name=version_name).first()
+                if not version_node:
+                    version_node = Node("Version", name=version_name)
+                    graph.create(version_node)
+
+                # 创建 Package -> Version 关系
+                has_version = graph.match_one((package_node, version_node), "HAS_VERSION")
+                if not has_version:
+                    has_version = Relationship(package_node, "HAS_VERSION", version_node)
+                    graph.create(has_version)
+
+                # 3.2 处理 uploaded_via
+                if version_info['uploaded_via']:
+                    for uploader in version_info['uploaded_via']:
+                        uploader_node = graph.nodes.match("UploadedVia", name=uploader).first()
+                        if not uploader_node:
+                            uploader_node = Node("UploadedVia", name=uploader)
+                            graph.create(uploader_node)
+
+                        uploaded_via = graph.match_one((version_node, uploader_node), "UPLOADED_VIA")
+                        if not uploaded_via:
+                            uploaded_via = Relationship(version_node, "UPLOADED_VIA", uploader_node)
+                            graph.create(uploaded_via)
+
+                # 3.3 处理 upload_time
+                if version_info['upload_time']:
+                    for upload_time in version_info['upload_time']:
+                        time_node = graph.nodes.match("UploadTime", date=upload_time).first()
+                        if not time_node:
+                            time_node = Node("UploadTime", date=upload_time)
+                            graph.create(time_node)
+
+                        uploaded_at = graph.match_one((version_node, time_node), "UPLOADED_AT")
+                        if not uploaded_at:
+                            uploaded_at = Relationship(version_node, "UPLOADED_AT", time_node)
+                            graph.create(uploaded_at)
+
+                # 3.4 处理 size
+                if version_info['size']:
+                    for size_value in version_info['size']:
+                        size_node = graph.nodes.match("Size", value=size_value).first()
+                        if not size_node:
+                            size_node = Node("Size", value=size_value)
+                            graph.create(size_node)
+
+                        has_size = graph.match_one((version_node, size_node), "HAS_SIZE")
+                        if not has_size:
+                            has_size = Relationship(version_node, "HAS_SIZE", size_node)
+                            graph.create(has_size)
+
+                # 3.5 处理 python_version
+                if version_info['python_version']:
+                    for py_version in version_info['python_version']:
+                        py_version_node = graph.nodes.match("PythonVersion", name=py_version).first()
+                        if not py_version_node:
+                            py_version_node = Node("PythonVersion", name=py_version)
+                            graph.create(py_version_node)
+
+                        supports_python = graph.match_one((version_node, py_version_node), "SUPPORTS_PYTHON")
+                        if not supports_python:
+                            supports_python = Relationship(version_node, "SUPPORTS_PYTHON", py_version_node)
+                            graph.create(supports_python)
+
+                # 3.6 处理 packagetype
+                if version_info['packagetype']:
+                    for pkg_type in version_info['packagetype']:
+                        type_node = graph.nodes.match("PackageType", name=pkg_type).first()
+                        if not type_node:
+                            type_node = Node("PackageType", name=pkg_type)
+                            graph.create(type_node)
+
+                        has_type = graph.match_one((version_node, type_node), "HAS_TYPE")
+                        if not has_type:
+                            has_type = Relationship(version_node, "HAS_TYPE", type_node)
+                            graph.create(has_type)
+
+            # 提交更新
+            graph.push(package_node)
+            print(f"成功更新包 {package_name} 的信息")
+
+        except Exception as e:
+            print(f"处理包 {package_name} 时出错: {str(e)}")
+            continue
+
+    print("所有包信息更新完成")
+
+
 if __name__ == '__main__':
     # Iterate over all data sources and their JSON files
     count = 0
@@ -403,6 +551,7 @@ if __name__ == '__main__':
     base_dir = os.path.join(project_dir, "Dataset", "IntelliJson")
     for source_dir in os.listdir(base_dir):
         source_path = os.path.join(base_dir, source_dir)
+        print(f"extracting files in {source_dir}..")
         if os.path.isdir(source_path):
             for json_file in os.listdir(source_path):
                 if json_file.endswith('_verify_gpt4.json'):
@@ -451,6 +600,8 @@ if __name__ == '__main__':
     # Load package_manager_dict from JSON file
     with open(output_json_path, 'r') as json_file:
         loaded_package_manager_dict = json.load(json_file)
-    update_graph_with_basic_info(loaded_package_manager_dict)
+    # update_graph_with_basic_info(loaded_package_manager_dict)
+    pypi_basic_info_path = os.path.join(project_dir, "pypi_basic_info.json")
+    update_graph_from_json(pypi_basic_info_path)
     # The graph is now built and ready to be visualized using Neo4j.
     print("Knowledge graph has been successfully created in Neo4j.")

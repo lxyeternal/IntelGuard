@@ -1,0 +1,143 @@
+
+This story starts when Sébastien Lorber, maintainer of Docusaurus, the React-based open-source documentation project, notices a Pull Request change to the package manifest. Here’s the change proposed to the popular cliui npm package:
+Specifically, drawing our attention to the npm dependencies change that use an unfamiliar syntax:
+"dependencies": {
+    "string-width": "^5.1.2",
+    "string-width-cjs": "npm:string-width@^4.2.0",
+    "strip-ansi": "^7.0.1",
+    "strip-ansi-cjs": "npm:strip-ansi@^6.0.1",
+    "wrap-ansi": "^8.1.0",
+    "wrap-ansi-cjs": "npm:wrap-ansi@^7.0.0"
+Most developers would expect to see a semver version range in the value of a package or perhaps a Git or file-based URL. However, in this case, there’s a special npm: prefix syntax. What does it mean?
+What is npm package aliasing?
+The npm package manager supports a package aliasing feature that allows the definition of custom resolution rules for packages. As such, wherever the package is referenced, through code or the lockfile, it will resolve to the name and version as specified by the alias.
+So, in the case of the change proposed in this pull request, the package string-width-cjs will resolve to the package string-width in versions ^4.2.0. This means there will be a node_modules directory entry for string-width-cjs but with the contents of string-width@^4.2.0 and similar behavior in the lockfile (package-lock.json).
+Package aliasing is an npm package manager feature that can be used in caseslike supporting  ESM vs CJS.
+With that said, package aliasing can be abused. In an article and security disclosure dating back to 2021, Nishant Jain, a Snyk Ambassador, demonstrated how the official npmjs registry could be fooled to misinform dependency information based on package aliasing as part of a dependency confusion and supply chain security concern.
+The pull request was benign and there was no risk of a supply chain attack. However, Sébastien’s concern over the package name led to the discovery of a potential security risk.
+Finding suspicious behavior in npm lockfiles concerning malicious modules
+To examine the pull request, Sébastien employed lockfile-lint. This tool checks lockfiles like  package-lock.json or yarn.lock for signs of tampering, ensuring that malicious packages haven’t been injected instead of the original npm package.
+Running the tool showed the following warnings:
+npx lockfile-lint --path package-lock.json --allowed-hosts yarn npm --validate-https --validate-package-names
+
+detected resolved URL for package with a different name: string-width-cjs
+    expected: string-width-cjs
+    actual: string-width
+
+detected resolved URL for package with a different name: strip-ansi-cjs
+    expected: strip-ansi-cjs
+    actual: strip-ansi
+
+detected resolved URL for package with a different name: wrap-ansi-cjs
+    expected: wrap-ansi-cjs
+    actual: wrap-ansi
+
+ ✖ Error: security issues detected!
+Disclaimer: lockfile-lint is a tool that I developed in 2019 following my publication that disclosed the security concern with lockfiles: why npm lockfiles can be a security blindspot for injecting malicious modules.
+High-alert: popular packages look-alikes on npm
+Given the above lockfile-lint results, Sébastien looked up these package names on npm and surprisingly found that these do exist on the public npm registry:
+
+https://www.npmjs.com/package/string-width-cjs
+https://www.npmjs.com/package/strip-ansi-cjs
+https://www.npmjs.com/package/wrap-ansi-cjs
+Sébastien observed that these package names not only exist on npm, but also exhibit suspicious characteristics. The packages weren’t tied to a public source code repository, were empty of any actual code when inspected, and were published anonymously without any associated personal information.
+Looking at the npm package strip-ansi-cjs, there isn’t a README or a  source code repository. There are however, many legitimate and popular packages citing the same behavior.
+In fact, this particular package is popular, as we can see by its 529 dependants (other packages that depend on this one) and 7,274 weekly downloads.
+Looking at the code for strip-ansi-cjs it shows that there’s only a single file in this package, the package manifest package.json file.
+So, why does a package that doesn’t do anything get so many downloads, and why do so many other packages depend on it?
+Let’s inspect the author of these npm packages.
+All three packages are owned by himanshutester002, and their packages were all published last year with programmatic version numbers. Some interesting observations to call out:
+
+isaacs-cliui npm package is potentially a typosquatting attempt on Isaac’s own fork of the cliui project and the legitimate npm package under their namespace: @isaacs/cliui.
+azure-sdk-for-net npm package is potentially an attempt at dependency confusion campaign to attack private packages of the same name.
+link-deep npm package is squatting on a popular capability related to utility packages such as lodash and others.
+You can also note that the user himanshutester002 has no identifiable information on this user profile page on npmjs.
+We previously noted that the strip-ansi-cjs npm package has over 500 other packages that use it, therefore, potentially a positive indicator for popularity. Let’s look at them:
+This might seem credible because of its inclusion on the list, but is it really?
+For example, names like clazz-transformer or react-native-multiply or maybe gh-monoproject-cli seem legitimate, but are they?
+Here is the react-native-multiply npm package page:
+This package has virtually no downloads and its author is an anonymous npm user with no identifiable information. The source URL repository this package redirects to is the nonexistent https://github[.]com/hasandader/react-native-multiply. The GitHub user profile also looks very suspicious and lacks practical activity.
+While the npm package appears to contain source code, a closer look reveals it to be a generated code sample for a “hello world” application prototype.
+You also have to wonder, if this package is just a multiplication library, then why does it need 776 dependencies to do the following:
+import { multiply } from 'react-native-multiply';
+const result = await multiply(3, 7);
+While some joke about JavaScript contributing to an astronomical tree of nested packages through excessive dependency usage, a project with 776 direct dependencies is unreasonably large.
+Among all of these dependencies, are the 3 suspicious npm packages that our story began with: string-width-cjs, strip-ansi-cjs, and wrap-ansi-cjs:
+We mentioned that one of the strip-ansi-cjs dependencies was named clazz-transformer. Let’s look at it:
+Let’s explain what is happening here. ​​The npm package clazz-transformer is intentionally misnamed with the title class-transformer on its README page. Additionally, its source code repository, https://github[.]com/typestack/class-transformer, doesn't correlate with the package name, which raises concerns about its legitimacy.
+The associated repository’s typstack/class-transformer on GitHub has the package.json file as  follows:
+The package.json file on GitHub shows no declaration of dependencies, yet if we inspect the source code of the actual package on npmjs, we see the 437 dependencies that this clazz-transformer is packaged with. Again, they very conveniently bundling the 3 suspicious *-cjs packages:
+Further thoughts on suspicious npm package findings
+Before we draw further conclusions, it is important to mention a few of the traits of the npm packages we observed above:
+
+The React Native packages seem to be derived from the create-react-native-library scaffold tool. This tool also features the default multiply function example as part of the stock source code generated for a new project.
+Packages have directory and file structures and dependencies that could be derived from Next.js 14 starter boilerplate, such as those created with npx create-next-app@14.
+Our peers at Sonatype have previously identified similar cases of flooding open-source registries with packages. In these cases, the ultimate goal was for developers to reward themselves with Tea tokens, which is a Web3 platform for monetizing open-source software.
+Finding some tea.yaml files in the mentioned packages further supports the thesis that part of this campaign’s purpose is to mine Tea tokens through the misuse of Tea.
+Earlier this year, on April 14th, 2024, a Tea forum user posted a comment that further supports the concern of tea abuse:
+Before reaching out with concluding thoughts, I would like to sincerely thank Sébastien Lorber for his cautious maintainer mindset and for helping unveil these threads of a potential npm supply chain attack.
+What is going on with string-width-cjs?
+At this point, I have high confidence that I can continue poking holes in the rest of the packages that are supposedly dependent on string-width-cjs to find very dubious indicators of authentic legitimacy.
+It is my assumption that all of these dependent packages and download boosts are leading to the sole purpose of creating false legitimacy for the 3 *-cjs packages so that in due time, with the proper victim at play, these fake packages will be installed and then follow with a new malicious version.
+To help you stay secure while working with open-source software, I highly recommend adopting security practices and specifically these follow-up educational resources:
+
+Why npm lockfiles can be a security blindspot for injecting malicious modules
+10 npm Security Best Practices
+NPM security: preventing supply chain attacks
+Did we catch a supply chain security campaign amid their foul-play, or is this all about the money trail and as such can be attributed to spam and abuse of public registries like npm and GitHub to mine for Tea tokens?
+However this unfolds, stay vigilant.
+Secure your code as you develop
+Snyk scans your code for quality and security issues and get fix advice right in your IDE.
+
+npm
+string-width-cjs
+string-width
+^4.2.0
+string-width-cjs
+string-width@^4.2.0
+package-lock.json
+package-lock.json
+yarn.lock
+https://www.npmjs.com/package/string-width-cjs
+https://www.npmjs.com/package/strip-ansi-cjs
+https://www.npmjs.com/package/wrap-ansi-cjs
+strip-ansi-cjs
+strip-ansi-cjs
+package.json
+himanshutester002
+isaacs-cliui npm package is potentially a typosquatting attempt on Isaac’s own fork of the cliui project and the legitimate npm package under their namespace: @isaacs/cliui.
+isaacs-cliui
+cliui
+azure-sdk-for-net npm package is potentially an attempt at dependency confusion campaign to attack private packages of the same name.
+azure-sdk-for-net
+link-deep npm package is squatting on a popular capability related to utility packages such as lodash and others.
+link-deep
+himanshutester002
+strip-ansi-cjs
+clazz-transformer
+react-native-multiply
+gh-monoproject-cli
+react-native-multiply
+https://github[.]com/hasandader/react-native-multiply
+string-width-cjs, strip-ansi-cjs
+wrap-ansi-cjs
+strip-ansi-cjs
+clazz-transformer
+clazz-transformer
+class-transformer
+typstack/class-transformer
+package.json
+package.json
+clazz-transformer
+*-cjs
+The React Native packages seem to be derived from the create-react-native-library scaffold tool. This tool also features the default multiply function example as part of the stock source code generated for a new project.
+create-react-native-library
+multiply
+Packages have directory and file structures and dependencies that could be derived from Next.js 14 starter boilerplate, such as those created with npx create-next-app@14.
+npx create-next-app@14
+tea.yaml
+string-width-cjs
+*-cjs
+Why npm lockfiles can be a security blindspot for injecting malicious modules
+10 npm Security Best Practices
+NPM security: preventing supply chain attacks

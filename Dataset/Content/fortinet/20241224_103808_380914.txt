@@ -1,0 +1,356 @@
+
+
+Categories
+
+
+
+Business & Technology 
+
+
+
+
+FortiGuard Labs Threat Research
+
+
+
+
+Industry Trends
+
+
+
+
+Life at Fortinet
+
+
+
+
+Partners
+
+
+
+
+Customer Stories
+
+
+
+
+PSIRT Blogs
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+CISO Collective
+Subscribe
+FortiGuard Labs Threat Research
+A Deep Dive into a New ValleyRAT Campaign Targeting Chinese Speakers
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\fortinet\20241224_103808_380914\fig09tfortiguardvalleyratcampaigncommands.png
+
+Article Contents
+First Stage Loader
+Beaconing Module
+AV Evasion
+RuntimeBroker
+Updated Loader
+RemoteShellCode
+Payload Downloader
+ValleyRAT
+ConclusionFortinet Protections
+IOCs
+Affected platforms: Microsoft Windows
+
+Impacted parties: Targeted Windows users
+
+Impact: Compromised machines are under the control of the threat actor
+
+Severity level: Medium
+FortiGuard Labs recently encountered an ongoing ValleyRAT campaign specifically targeting Chinese speakers. This malware has historically targeted e-commerce, finance, sales, and management enterprises.
+ValleyRAT is a multi-stage malware that utilizes diverse techniques to monitor and control its victims and deploy arbitrary plugins to cause further damage. Another noteworthy characteristic of this malware is its heavy usage of shellcode to execute its many components directly in memory, significantly reducing its file footprint in the victim’s system.
+This blog provides a technical analysis of this campaign.
+First Stage Loader
+This malware uses icons of legitimate applications, including Microsoft Office, with filenames related to financial documents similar to the following:
+
+工商年报大师.exe (translation: Industrial and Commercial Annual Report Master.exe)
+详情查看.exe (translation: View Details.exe)
+3月份涉税财会人员征信拉黑名单如下.exe (translation: The blacklist of tax-related accounting personnel in March is as follows.exe)
+补单对接更新记录txt.exe (translation: Update record of order docking txt.exe)
+票{random characters}助手.exe (translation Ticket {random characters} Assistant.exe)
+To make the lure more believable to the user, it creates an empty file %TEMP%\dome.doc and executes the default application for opening Microsoft Office Word documents. If no default application is set, it shows an error message box with the text, “Open The Document Fail.”
+Upon execution, it attempts to create a mutex named TEST to ensure that only one instance of the malware process is running on the system.
+After that, it deletes the following registry entries, which could have been added in a previous installation of the malware:
+
+HKEY_CURRENT_USER\Software\Console\IpDate
+HKEY_CURRENT_USER\Software\Console\IpDateInfo
+It then stores the IP and the port of the Command and Control (C2) in the following registry entry:
+
+HKEY_CURRENT_USER\Software\Console\
+IpDateInfo = “|i:154.82.85.12|p:5689|”
+Before continuing, it determines if it’s running under a virtual machine by enumerating all services and checking if any of the following VM-related strings are on the service display names:
+
+VMWARE Tools
+VMWare 共享
+Virtual Machine
+VirtualBox Guest
+If any of these services are found, a blank error message box is shown before it terminates.
+Before the shellcode is executed to load the next stage, this malware uses a known technique called sleep obfuscation to evade memory scanners. This involves adding a callback functionality to Sleep or similar APIs that modify the permissions of the allocated memory where the malicious code resides to values not commonly deemed suspicious by scanners. Furthermore, during this process, the malicious shellcode is encoded with a simple XOR operation to evade pattern-based signatures.
+After decoding the malicious shellcode using XOR with a single-byte key, 0x60 in this case, it copies the first 0xc bytes from the Sleep API function and stores it for later use. It then replaces it with code that will lead to executing the malicious callback function.
+This callback function changes the permission of the malicious shellcode and attempts to obfuscate it using the following procedure:
+
+Change the shellcode memory region permission to PAGE_READWRITE
+Encode the shellcode using XOR
+Change the shellcode memory region permission to PAGE_NOACCESS
+Restore the original code of Sleep for it to operate normally
+Call Sleep API
+Change the shellcode memory region permission back to PAGE_READWRITE
+Decode the shellcode
+Change the shellcode memory region permission to PAGE_EXECUTE for it to become executable again
+In general, this malware uses shellcode blocks to run its components directly in memory. This shellcode is similar to the one shared in this GitHub repository: https://github.com/killeven/DllToShellCode/blob/master/DllToShellCode/shellcode_data.c. This specific shellcode has also been seen in older malware campaigns and detected by Fortinet as W64/Agent.CCF!tr.
+Once this malware has finished initializing, it decrypts a shellcode with the AES-256 algorithm using a key derived from a hardcoded 16-byte value. The result is then XOR-ed with 0x60 to reveal the final shellcode. It then triggers the previously mentioned sleep obfuscation routine by calling the Sleep API before finally executing the shellcode by using it as a callback procedure for the EnumSystemLocalesA API.
+The shellcode uses a hashing algorithm called BKDR to obfuscate the API names, which are then used to search for the target APIs by directly traversing the Process Environment Block (PEB).
+After checking standard 64-bit PE characteristics from the payload, the shellcode reflectively loads the embedded DLL, in this case, the beaconing module, by copying it to another memory location, adjusting its base relocation, and manually resolving its imports before its entry point is executed.
+Beaconing Module
+The beaconing module is responsible for loading the RuntimeBroker and RemoteShellcode components. It also allows the malware to persist and gain administrator privileges in the system while ensuring that no AV-related processes are running before it starts communicating with its C2 server.
+This malware adds a scheduled task to allow its component, Loader - discussed in a later section – to execute automatically upon user login. Furthermore, for the Loader component to be executed with high privilege without triggering Windows’ UAC, it employs a known technique that abuses the auto-elevate properties of the legitimate applications, C:\Windows\System32\zh-CN\eventvwr.msc or C:\Windows\System32\CompMgmtLauncher.exe.  By design, these applications eventually lead to the execution of the current default value set on the registry entry HKEY_CURRENT_USER\Software\Classes\mscfile\Shell\Open\Command, which will be set to the path of the Loader component in a later stage of infection.
+AV Evasion
+It attempts to evade detection from Microsoft Windows Defender by adding the root drive of the malware path to the exclusion by executing the following PowerShell command:
+Invoke-Command -Command {Add-MpPreference -ExclusionPath {drive}
+Instead of usually running the command as an argument to the PowerShell process, it uses pipes to communicate with a newly created PowerShell process to execute commands. This could be an attempt to evade AV products that inspect suspicious process arguments.
+By default, it adds the common root drive "C:\" to the list of excluded paths. If the malware was executed from another root drive, it will also be added to the list.
+It then proceeds to kill AV-related processes containing the following executable filenames:
+
+360Sd.exe
+360leakfixer.exe
+safesvr.exe
+MultiTip.exe
+ZhuDongFangYu.exe
+kscan.exe
+kwsprotect64.exe
+kxescore.exe
+HipsMain.exe
+HipsDaemon.exe
+QMDL.exe
+QMPersonalCenter.exe
+QQPCPatch.exe
+QQPCRealTimeSpeedup.exe
+QQPCRTP.exe
+QQRepair.exe
+Notably, the executable names listed are components of products developed by Chinese companies reaffirming their target preference.
+To determine if the processes have been successfully terminated, it does another scan of the running processes to check if any process with the following executable filenames is still running:
+
+360Tray.exe
+360tray.exe
+360Safe.exe
+360safe.exe
+kxetray.exe
+QQPCTray.exe
+If any of these processes are still running, it performs another attempt to kill them by injecting a shellcode with an embedded DLL into a running lsass process. This DLL performs the following procedures:
+
+Add SeDebugPrivilege privilege to the lsass process
+End execution if "colorcpl.exe" or "cleanmgr.exe" processes are running. This is an indicator that the malware has successfully progressed to the later stages of infection, which will be discussed in the later section
+Search and terminate processes with the following executable filenames:
+
+kxescore.exe
+kxetray.exe
+360rp.exe
+360rps.exe
+360sd.exe
+360Tray.exe
+360tray.exe
+360Safe.exe
+360speedld.exe
+ZhuDongFangYu.exe
+SoftMgrLite.exe
+QQPCLeakScan.exe
+QQPCRTP.exe
+QQPCTray.exe
+Once the AV processes are no longer running, it modifies the following AV product settings in the registry to disable their autostart and/or reduce their effectiveness:
+
+HKLM\SOFTWARE\WOW6432Node\kingsoft\antivirus\Windhunter
+
+   WindhunterLevel = 4
+
+   WindhunterSwitch = 0
+HKLM\SOFTWARE\WOW6432Node\kingsoft\antivirus\KSetting
+
+   kxesc = 0
+HKLM\SOFTWARE\WOW6432Node\kingsoft\antivirus\KAVReport
+
+   AutoStart = 0
+HKLM\SOFTWARE\WOW6432Node\Tencent\QQPCMgr
+
+  autostart = 0
+If the AV programs are still found running, the malware process displays an “ERROR” message box and terminates.
+If the user has administrator privileges, it attempts to execute a new process of itself with elevated privileges without prompting Windows’ UAC(User Access Control) security feature using two known methods.
+The first method involves abusing the CMSTPLUA COM class, specifically the ShellExec method of the ICMLuaUtil interface. Since the system automatically grants this class elevated privileges, any process executed using this interface will gain the same. Before using the interface to execute a new process of itself, it attempts to disguise itself as a legitimate explorer.exe process by locating the ProcessParameters structure in the Process Environment Block (PEB) and replacing its ImagePathName and CommandLine fields with the path of the legitimate explorer.exe.
+The second method exploits another legitimate application called fodhelper.exe. Like the first method, this executable gets high privilege upon execution. First, it creates the registry key HKCU\Software\Classes\.pwn\Shell\Open\command and sets its default value to the malware path. Next, it creates another registry key, HKCU\Software\Classes\ms-settings\CurVer, and sets its default value data to .pwn, associating it with the previously created malicious registry entry. Finally, it executes the legitimate fodhelper.exe, which executes whatever ProgID is defined in the CurVer subkey. This leads to the execution of the malware with high privilege.
+At this stage, the malware initiates its communication with its C2 to request other components needed for the next stages of the infection. Prior to this, it checks for internet connectivity by attempting to connect to the legitimate Chinese search engine, http://www.baidu.com.
+The requests sent by this malware at this stage are all in plaintext, but the responses from the C2 are encoded with a randomly generated single-byte XOR key, except for the requests to get the component sizes. This key is included in the malware’s requests in the format {request}_{xor key}.
+There are three possible configurations with the malware request methods to the C2 and its corresponding procedure for storing and executing succeeding components in the system.
+In the specific sample we analyzed, it is configured to request two shellcode blocks from its C2: internally named RemoteShellcode and RuntimeBroker. To do this, it determines the sizes of the shellcode blocks by sending GetRemoteShellcodeSize_{xor key} and GetRuntimeBrokerSize_{xor_key}. The sizes received from the C2 are used to check the integrity of the shellcode upon receipt. After that, the C2 sends the shellcode encoded with the XOR key included in the malware’s requests. A traffic example is provided in the image below:
+RemoteShellCode and RuntimeBroker are decoded and injected into newly created processes of legitimate Windows applications C:\Windows\System32\colorcpl.exe and C:\Windows\System32\cleanmgr.exe, respectively. The functions for these components are detailed in the next sections.
+Meanwhile, the second method is like the first in that they both request two components from the C2—this time, they are wwlib.dll and Winword.exe. While the previous method’s execution of the components takes place in-memory, this method involves writing the components to the disk. Like the previous method, it also requests the sizes of the components. For the size of wwlib.dll, it sends GetWwlibSize_{xor key}. Although the sample we analyzed does not contain the request string for retrieving the size of Winword.exe, extrapolating from the analysis of the first method, it can be assumed that it could send GetWinWordSize_{xor key} beforehand. After the sizes have been determined, it sends GetWWlib_{xor key} and GetWinWord_ {xor key} to receive the binaries, which are then written to the %UserProfile% directory. It then executes Winword.exe. Based on other reports, Winword.exe is a legitimate Microsoft Office Word executable, which would then be executed, inadvertently loading the malicious wwlib.dll upon execution.
+Finally, the last method sends GetOnline_{xor key} to download an executable file, which is then saved as algbg.exe in the %UserProfile% directory. It could send GetOnlineSize_{xor key} to get the executable size beforehand.
+RuntimeBroker
+This shellcode loads and executes a DLL whose primary purpose is downloading a component named Loader from the C2 server.
+The DLL sends the request strings GetLoaderSize_{xor key} and GetLoader_{xor key} to the C2, which responds with the size and the requested executable file, respectively. This file is then saved as Loader.exe in the %USERPROFILE% directory. After dropping the executable file, it sets the default value of the registry entry HKEY_CURRENT_USER\Software\Classes\mscfile\Shell\Open\Command to the said file path. This is to complete the autostart mechanism partially set up by the beaconing module mentioned earlier. This effectively allows the new Loader component to run automatically when the user logs in.
+Updated Loader
+At the time of analysis, the Loader component received from the C2 has the same function as the first-stage loader, which is to execute the beaconing module. We can see in the figure below that the WinMain of the first-stage Loader is very similar to the WinMain of the newer Loader executable from the C2.
+Fortinet detects these variants as W64/RCShell.A!tr.
+Setting aside the striking similarities, this new component has a few behaviors outside the first-stage loader, as detailed below.
+It attempts to detect if it is running inside a sandbox system by counting the files inside the %TEMP% directory. This malware terminates if the number of temporary files is less than 30. Since these systems are restored after every test, they usually have fewer temporary files than conventional systems.
+To continue execution, it makes sure that any of the following registry keys related to popular communication applications in China are found in the system, further confirming our belief that this malware specifically targets Chinese systems:
+
+HKEY_CURRENT_USER\Software\Tencent\Wechat
+HKEY_CURRENT_USER\Software\Dingtalk
+While the first-stage loader uses the AES-256 algorithm to encrypt the shellcode, an interesting method this malware uses in other samples is to disguise the payload within the malware body by keeping them as UUID strings or IP addresses and then converting these benign-looking strings into their hex-byte equivalent to form the shellcode.
+
+RemoteShellCode
+The primary purpose of this component is to request the downloader of the ValleyRAT payload. In addition, it contains the embedded configuration marked with the string “codemark” for the payload to use during its execution at a later stage. This configuration is very similar to the previously reported ValleyRat campaigns, where it contains the latest C2 servers as well as other settings for the RAT.
+To request the payload downloader, it sends the string 64 or 32, depending on the system’s architecture. As shown in the image below, the C2 responds with the payload downloader encoded with XOR, where the key is derived by adding 0x36 to a 10-byte value from the C2's response.
+Similar to how the earlier components are loaded, the shellcode reflectively loads the embedded payloader DLL and executes its export named load while passing the previously mentioned configuration as an argument.
+Payload Downloader
+We detect this component as W64/ValleyRat.A!tr.spy. The C2 configuration from the previous module is decoded by simple string reverse, which is then parsed to configure the downloader. Depending on the configuration, it uses UDP or TCP sockets to connect to the C2 and receive the final payload. First, it will send the size and the key for encrypting the payload, to which the C2 responds with the encoded SHA256 hash of the payload. Lastly, it sends 登录模块.dll_bin (translated as Login module.dll_bin) to request the ValleyRAT malware. A shellcode with the embedded ValleyRAT DLL is then decoded using the same method used to decode the payload downloader. This shellcode is stored in the registry value d33f351a4aeea5e608853d1a56661059 on key HKEY_CURRENT_USER\Console\1.
+Upon execution of the shellcode, the ValleyRAT DLL is reflectively loaded and executed in the system.
+ValleyRAT
+This relatively new RAT is attributed to the suspected APT group “Silver Fox”.
+This malware's capabilities are focused on graphically monitoring the user's activities and delivering other plugins and possibly other malware to the victim system.
+These are the commands supported by this variant:
+Conclusion
+In this article, we have detailed an elaborate and ongoing ValleyRAT campaign specifically targeting Chinese systems. This malware involves several components loaded in different stages and mainly uses shellcode to execute them directly in memory, significantly reducing its file trace in the system. Once the malware gains a foothold in the system, it supports commands capable of monitoring the victim's activities and delivering arbitrary plugins to further the threat actors’ intentions.
+FortiGuard Labs will continue to monitor this ongoing campaign.
+Fortinet Protections
+FortiGuard AntiVirus detects the malicious files identified in this report as
+
+W64/Agent.CCF!tr
+W64/ValleyRat.A!tr.spy
+W64/RCShell.A!tr
+The FortiGuard AntiVirus service is supported by FortiGate, FortiMail, FortiClient, and FortiEDR. The Fortinet AntiVirus engine is a part of each of those solutions. As a result, customers who have these products with up-to-date protections are protected.
+FortiEDR detects the malicious event and is detected by the “Unmapped Executable” rule within the “Exfiltration Prevention” security policy.
+The FortiGuard Web Filtering Service detects the C2 URLs cited in this report as Malicious and blocks them.
+Due to the ease of disruption, damage to daily operations, potential impact to an organization's reputation, and the unwanted destruction or release of PII, etc., it is important to keep all AV and IPS signatures up to date.
+We also suggest that organizations have their end users undergo our free NSE training: NSE 1 – Information Security Awareness. It includes a module on internet threats designed to help end users learn how to identify and protect themselves from various types of phishing attacks.
+If you believe these or any other cybersecurity threat has impacted your organization, please contact our Global FortiGuard Incident Response Team.
+IOCs
+154[.]82[.]85[.]12
+
+154[.]92[.]19[.]81
+1ded5a6c54a7b10365c41bc850ce41f18d86435fbe9315c37bd767ecdf255135
+
+7b98622db7a62ace626dcc8af5bb7ac3726a968241c94612c5b9cb906175f5f3
+
+fb73e089d0a276617b9a213080f84d0e411592c7db5548790e3fe1c53295f5a3
+
+a676c7490086a4112f920936e57ee49e213aaffd12bb38bc433a073ddfae0f24
+
+1235419877ccc1f1820cc75e773fe79f9ad0296dd8eea9aa44f511a7b6348cfd
+
+02aed2b21a90c82d2ca597340aabfa1d6c52302b08aa9f58e87893f6997c2681
+
+02c8f22e9d2df7e051fffc49c7d2d240787fbe8395b4c3c96be40b5a111a03ce
+
+0a971e606e839e7d5e72dcea0a8a3d081c951250ce25b0ddaf2429bad87ebe3d
+
+12ae203fa199291754649a4e592fb0880339c88b07f1d69798114afca06b8061
+
+14bf52de60e60a526141ffe61ef5afc2a3bc7d60d4086e644ec80e67513d2684
+
+17ff585fadcf40e25ad9d09cf007d20f6691ccf31d93a5d48d25f7e811cb0ca4
+
+22bfdc52a65905088b8b897a630c66c16ec5c2eba992c1c0722e5c8da9afa181
+
+24a871b7b837b217d271747337381fbbcff61edfe44e087c55921564b170a8c9
+
+47d7ce4ce72ca7e0cebab472e2165a1ebbd9395a60d7478990fd4dbec2eb195f
+
+583001d3d4dc0a72c92cf27a390e95e1fad6229d18ab255b625985939eb4b90f
+
+7172dff66af9c34958a3b095210664c26a934b5f734b64ea3170f1507a120503
+
+72542f81546656de73e009b541ed12cbcc9feced4f6ab79f9e9a0ee9df148b6a
+
+76b1c8b026ac9e72ffe8ac1dd8d18abfbb4eb9c23bccb42ab9af2580ed72b7ad
+
+8378960ee2bfc32930e19f762f561f4a6448160de2bde6ce330309326d745f89
+
+8790506401a3bac69f6669a3dd832650e4752ff68dd6f0cef35b43e6ad59d7df
+
+8a6b352c45e48e3564e259ade4f544d01900e8c3f9a74e52ae3bc62f74ddf013
+
+8b7d3de2c77c59663ec5d8969b688530a3c9228b72807bc17a9822d558c42ee8
+
+a47423b59d75e228198450f7a9a2e051eeca6388028a6deb8e9843951bf21575
+
+aae7f34bdc0aa362bb42eb5e4cff69b60d67f7f155a3e2b9b905c90a1cc2aac4
+
+ad753becec205160b78de45c11ed42f3da707c9cee0688fa4190233a9b4f1379
+
+ad9bd41e73eff193caab25960b6a990641ea8d412b5ba456b64ad165b7216c48
+
+b50ad87cd7ce19ae30cb709ea3ceb7107b129c64ec9c314157fc6a8df079262b
+
+c486ca7291799a7474196c7cf60158421a2d81697e24e693e76cd1da06b9bf1c
+
+ce8224de916a5eb0c76c9ba7acc3833f8cdc7f7d31a72dfbe69d2be1f8b7cc48
+
+d208b80a6608c72c3c590f86d93b074533c0c4ef8a46b6d36ed52cc2b4c179d5
+
+d63792ee67c6f1702188695387c64991029dabd702d48eac3ea3f0eef280d4a1
+
+ebd3a506c226e98dcedc1b882a11addd25ded8ee5110249b5b1a391e4d77d327
+malware
+Related Posts
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+
+
+
+
+
+
+
+
+News Releases
+News Articles
+
+Threat Research
+FortiGuard Labs
+Threat Map
+Ransomware Prevention
+
+Fortinet Community
+Partner Portal
+Investor Relations
+Product Certifications
+
+About Us
+Exec Mgmt
+Careers
+Training
+Events
+Industry Awards
+Social Responsibility
+CyberGlossary
+Sitemap
+Blog Sitemap
+
+(866) 868-3678
+Copyright © 2025 Fortinet, Inc. All Rights Reserved
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs

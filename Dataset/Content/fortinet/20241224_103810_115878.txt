@@ -1,0 +1,223 @@
+
+
+Categories
+
+
+
+Business & Technology 
+
+
+
+
+FortiGuard Labs Threat Research
+
+
+
+
+Industry Trends
+
+
+
+
+Life at Fortinet
+
+
+
+
+Partners
+
+
+
+
+Customer Stories
+
+
+
+
+PSIRT Blogs
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+CISO Collective
+Subscribe
+FortiGuard Labs Threat Research
+Microsoft OneNote File Being Leveraged by Phishing Campaigns to Spread Malware
+Affected platforms: Microsoft Windows
+
+Impacted parties: Windows Users
+
+Impact: Fully control the victim’s computer
+
+Severity level: Critical
+A couple of phishing campaigns that recently caught FortiGuard Labs’ attention were found sending phishing emails with attached malicious Microsoft OneNote files to spread the AsyncRAT malware.
+As a cybersecurity researcher, I conducted an in-depth analysis of these phishing campaigns, tracing the entire process from the initial phishing email to the final deployment of AsyncRAT, which gains complete control of the victim's device.
+In this analysis, you will learn about the contents of this attack, such as what kind of phishing email starts the campaign, how a malicious Microsoft OneNote file is involved in the campaign, how it is leveraged to download and execute malicious files on the victim’s device, the kinds of techniques that enable it to evade detection and analysis, and how the malware – AsyncRAT – communicates with its C2 server, including what control commands it supports to fully control the victim’s device.
+The following flowchart roughly describes the entire process of how the phishing campaign delivers and executes AsyncRAT:
+The Phishing Email
+Figure 1.1 shows the captured phishing email in Outlook. As you can see, the email’s Subject has been marked as SPAM by our FortiMail service to alert the recipient to potential risks.
+The phishing email is disguised as an urgent shipment notification from a well-known delivery company. It asks the recipient to confirm whether a shipping address is correct by opening the attached Microsoft OneNote file, “SHIPPING_DOC.one”.
+Attached Microsoft OneNote File
+Microsoft OneNote is a digital note-taking software provided as part of the Microsoft Office suite. It allows users to create notes that include texts, pictures, tables, and drawings. It also has a feature that allows users to insert file attachments into OneNote, including executable files (click menu “Insert” -> “File Attachment”).
+The left side of Figure 2.1 shows the OneNote file attached to the phishing email after being opened in the Microsoft OneNote program. It contains a button that lures the intended victim into clicking it to view the content. This button-like image conceals four identical BAT files that can be seen on the right side of Figure 2.1 when the button picture is moved out of the way.
+When double-clicking the button-like image, one of the inserted BAT files (viewn.bat) is executed.
+Relevant Batch Files
+A batch file (.BAT) is a script containing a group of commands executed together by a command-line interpreter (like cmd.exe).
+The code in the viewn.bat file is similar to the following:
+Once the victim double-clicks the picture in the Microsoft OneNote program, a piece of Windows PowerShell script is also executed that downloads another BAT file called “Io.bat”. It is launched using the command “start Io.bat”.
+Figure 2.2 below shows the content of Io.bat in an editor.
+Io.bat’s primary task is similar to the previously described “viewn.bat”. It runs a Windows PowerShell script that downloads a ZIP archive file called “view.zip” onto the victim’s device. The script then decompresses an EXE file (view.exe) from the ZIP archive and executes it using the “start view.exe” command.
+Malware often employs complex methods to evade detection and analysis by security researchers. In this case, the downloaded view.exe is not the malware payload but a dropper of another batch file (“fresh.bat”).
+Figure 2.2 shows several screenshots of view.exe in a debugger. View.exe calls Windows-native APIs to load a resource called “CABINET” from the “RCData” folder in its RESOURCE section. It includes compressed data in a CAB file type. View.exe decompresses the resource data and saves it into the file “%temp%\IXP004.TMP\fresh.bat”. It then calls the API CreateProcessA() to run fresh.bat with the command “cmd /c fresh.bat”.
+Fresh.bat is obfuscated, as shown in Figure 2.4. Its commands are split into a branch of variables that are combined at the bottom before executing. The purpose of the combined commands is to copy Windows PowerShell.exe into the current folder and rename it as “fresh.bat.exe”. It then uses this to execute the piece of PowerShell code shown below.
+The PowerShell code is lightly obfuscated, like the reversed function names. However, it is easy to understand its code with the added comments.
+This segment of PowerShell code reads a chunk of strings that start with “:: “ from fresh.bat, a transformed PE file, as shown in Figure 2.4. (By the way, lines starting with “::” are comments in batch files (.BAT).) It then dynamically decodes, decrypts, and decompresses a PE file into memory and executes it by invoking its EntryPoint() function. Although it is fileless, it is originally named tmp72AF.tmp according to its compile information.
+Figure 2.5 shows a screenshot of the process tree, which explains the workflow from opening the OneNote file to running fresh.bat and fresh.bat.exe to executing the PowerShell code. It also shows the relationship between relevant processes.
+The Fileless .Net PE File
+The fileless .Net PE file (origin name “tmp72AF.tmp”) is a malware loader program. It decrypts two executable modules from its .Net Resource section and launches them.
+1.     Anti-analysis
+In the Main() function, the malware calls the APIs CheckRemoteDebuggerPresent() and IsDebuggerPresent() to check if it is running in a debugger. It then checks the value of that assessment in Debugger.IsAttached. If either of them is “true”, the program exits immediately.
+Windows provides a system module called “amsi.dll“ (Antimalware Scan Interface) that has an export function called AmsiScanBuffer(). This can scan a data buffer for malware or malicious content. Tmp72AF.tmp can override the API function to have it always return a code of 0x80070057, which means "the parameter is incorrect". This override technique prevents the API AmsiScanBuffer() from detecting malware. To do this, it needs to call the API VirtualProtect() to set the memory of AmsiScanBuffer() to writable. Figure 3.1 illustrates a comparison between the original API AmsiScanBuffer() and the override API.
+2.     Decrypt two executable modules from the .Net Resource section
+As mentioned earlier, there are two modules in the .Net Resource section to be decrypted. Figure 3.2 displays the .Net Resource section with those two resources, “payload.exe” and “runpe.dll”.
+These two resources are encrypted and compressed using GZip compression. They are decrypted into the memory of the running processes (fresh.bat.exe, the copied PowerShell.exe). As their names suggest, the .Net program uses “runpe.dll” to launch “payload.exe”.
+The below figure shows when tmp72AF.tmp invokes the runpe.RunPE.ExecutePE() method of runpe.dll, where string3 is “runpe.RunPE”, string4 is “ExecutePE”, and array3 holds the data of the decrypted payload.exe.
+ExecutePE() launches payload.exe in a newly-created thread by invoking its entry point function.
+Process Hollowing
+Payload.exe is a 64-bit console program that performs process hollowing to implant the AsyncRAT client into the target process notepad.exe.
+The trick of payload.exe is leveraging the “syscall” instruction every time it needs to call the undocumented APIs. In addition, all constant strings are encrypted and only decrypted before being referenced.
+This allows it to evade anti-virus software detection, creating challenges for security analysts. Below is a list of syscall ids and the corresponding APIs used by payload.exe.
+The following code snippet of “syscall” is used for calling the API NtOpenProcess(), where eax should be 0x26.
+To maintain persistence of the target process on the victim's device, payload.exe disguises the target process to appear as if it was started by the victim—which means its parent process is explorer.exe. To do this, it retrieves the process information of explorer.exe from the current process list by calling API NtQuerySystemInformation() using SystemProcessInformation as the value of the parameter SYSTEM_INFORMATION_CLASS.
+It then calls the API NtOpenProcess() to retrieve the process handle of explorer.exe. It uses this handle to set the PROC_THREAD_ATTRIBUTE_PARENT_PROCESS attribute to explorer.exe using the API UpdateProcThreadAttribute(). This allows child processes to inherit this attribute. Meanwhile, that API function fills an attribute list with the inherited information from explorer.exe.
+As you can see in Figure 4.1, the malware was about to call the API CreateProcessW() with a full path of notepad.exe with the created flag of CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED and lpStartupInfo with the inherited explorer.exe information.
+After its creation, the notepad.exe process becomes a sub-process of explorer.exe as if it’s launched by the victim.
+Using Process Explorer software, we can see that the created notepad.exe process is now a sub-process of explorer.exe, and its status is “Suspended” (without “Running”), as shown in Figure 4.2.
+Subsequently, it leverages “syscall” to invoke APIs, such as NtAllocateVirtualMemory() and NtWriteVirtualMemory(), for allocating memory in the target process (notepad.exe). It transfers some data to the just-allocated memory containing the encrypted AsyncRAT client and a piece of ASM code in charge of decrypting and deploying the AsyncRAT client into the target process notepad.exe.
+It then proceeds to create an APC object and add it to the APC queue of a thread of notepad.exe by using the API NtQueueApcThread() with a thread function parameter pointing to the copied ASM code.
+Finally, the API NtResumeThread() is called to resume the execution of the previously suspended notepad.exe process.
+AsyncRAT
+AsyncRAT is a Remote Access Trojan (RAT) that allows attackers to gain control of a victim's computer system. Its features include stealing sensitive data, monitoring user activity, and executing commands remotely on the infected device.
+AsyncRAT is written in C# language and runs in a .Net Framework environment. Since it is fileless in this phishing campaign, I needed to dump it from the notepad.exe process for deep analysis.
+Once AsyncRAT starts, it decrypts a group of setting values in its Main() function, as shown in Figure 5.1. The setting values for the captured AsyncRAT indicate:
+A crypto key was used to decrypt the following setting values:
+
+The C2 server host and ports 95.216.102.32:6606, 7707, and 8808
+The AsyncRAT version is “0.5.7B”
+“If maintain persistence” is set to “false”
+The Mutex object name is "AsyncMutex_6SI8OkPnk"
+“If support Pastbin” is set to “null”
+“If perform anti-analysis detection” is set to “false”
+“If make the process critical” is set to “false”
+The Group name is set to “Default”
+An HWID is generated using the victim’s hardware information
+ServerSignature and Certificate are used to communicate with the C2 server through the SSL protocol
+Once set, the AsyncRAT is ready to send information collected from the victim’s device to its C2 server and then wait for control commands from the C2 server to remotely control it.
+For secure communications, AsyncRAT uses the SSL protocol to deliver its packets.
+Below is a screenshot of the first packet that AsyncRAT sends to its C2 server before sending it over SSL.
+The data of the packet is saved in a unique format. All packets between AsyncRAT and its C2 server are in the same format, including value type, value name, and value. From the packet, I extracted the information in the following table as an example to explain the packet format.
+The value of “Packet” is the control command, where the “ClientInfo” command is used to send basic information about both the victim’s device and the AsyncRAT client to the C2 server, like a registration packet.
+AsyncRAT also supports many other control commands to control the victim’s machine.
+Most of the control commands AsyncRAT provides:
+"blankscreen+", "blankscreen-", "botKiller", "BotKiller", "chat", "chat-", "chatExit", "chatWriteInput", "ClientInfo", "close", "disableDefedner", "dos", "dosAdd", "Error", "executeDotNetCode", "fileManager", "GetXmr", "keyLogger", "limeUSB", "Logs", "pcOptions", "Ping", "Ping!)", "plugin", "pong", "processManager", "Received", "remoteDesktop", "reportWindow", "reportWindow-", "restart", "savePlugin", "sendFile", "sendMemory", "sendMessage", "sendPlugin", "shell", "shellWriteInput", "socketDownload", "thumbnails", "thumbnailsStop", "torrent", "uac", "uninstall", "visitURL", "webcam", "xmr", and more.
+Features that AsyncRAT supports:
+Backdoor Access:  The attacker can remotely perform whatever activities they want within the infected system.
+Run Executable Files: The attacker can transfer any executable file and run it on the victim’s device.
+Credential Stealing: AsyncRAT can grab various user credentials from different applications, including Chrome, Firefox, Edge, and Internet Explorer.
+Remote Desktop Control: The attacker can achieve remote desktop control of the infected system.
+File Manager: AsyncRAT permits attackers to have full access to files on a targeted computer. They can move, delete, copy, or modify files.
+File Searcher: The attacker can search files on the infected system. The picture below shows how it starts the File Searcher feature on the AsyncRAT server.
+Process Manager: The attacker can check and kill running processes on the victim’s device.
+Keylogging: The malware has a keylogger function that can keep track of all keystrokes made on the victim’s device, monitoring both offline and online activities.
+DDoS Attacks: AsyncRAT can launch widespread DDoS attacks from multiple systems under its control to target specific websites.
+Audio Recording: The malware can unmute the microphone on infected machines to record audio.
+Webcam Control: AsyncRAT can enable the victim’s webcam to capture images and video.
+Summary
+I have explained how the phishing campaign started with a SPAM email, how a Microsoft OneNote file is involved, and what BAT files are leveraged to download more malicious files (like Io.bat, view.zip).
+We also explored the anti-analysis techniques it uses to evade being detected and analyzed by security researchers. I elaborated on how a complicated strategy is used to protect its code, such as loading executable files from the PE Resource section, always keeping the key modules fileless, and creating a target notepad.exe process on behalf of explorer.exe.
+Finally, I demonstrated what the packet format looks like, what essential information AsyncRAT can collect from the victim’s device, and what control commands AsyncRAT supports to fully control the victim’s device.
+Fortinet Protections
+Fortinet customers are already protected from this campaign with FortiGuard’s AntiSPAM, Web Filtering, and AntiVirus services as follows:
+The downloading URLs and C2 server are rated as “Malicious Websites” by the FortiGuard Web Filtering service.
+FortiMail has recognized the phishing email as SPAM.
+FortiGuard Antivirus service detects the attached OneNote file, as well as the follow-up downloaded lo.bat file and view.zip files, with the AV signatures “MSOffice/Agent.OXZ!tr “, “BAT/Agent.OXZ!tr”, and “MSOffice/Agent.PLI!tr”.
+FortiGate, FortiMail, FortiClient, and FortiEDR support the FortiGuard AntiVirus service. The FortiGuard AntiVirus engine is a part of each of those solutions. As a result, customers who have these products with up-to-date protections are protected.
+We also suggest our readers go through the free NSE training: NSE 1 – Information Security Awareness, a module on Internet threats designed to help end users learn how to identify and protect themselves from phishing attacks.
+If you believe this or any other cybersecurity threat has impacted your organization, please contact our Global FortiGuard Incident Response Team.
+IOCs:
+URLs:
+https://transfer.sh/get/IKRQSd/view.zip
+https://transfer.sh/get/sxSJuL/lo.bat
+C2 Server List:
+95.216.102.32:8808
+Relevant Sample SHA-256:
+[SHIPPING_DOC.one]
+305D7962894C83EBFCC863FE129180F20E6144F1F59D70971249D14E6D178FA4
+[lo.bat]
+DE5331B71DC535F75DADE1FBD042120FE9732FA851700A54D5C423B45145C929
+[view.zip]
+66FBD626EAC4B285F093E5FBFF484DAA95D270E981EDA051836B5EE47EA7A01B
+
+Learn more about Fortinet’s FortiGuard Labs threat research and intelligence organization and the FortiGuard AI-powered security services portfolio.
+email phishing, 
+    
+      phishing, 
+    
+      malware analysis
+Related Posts
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+
+
+
+
+
+
+
+
+News Releases
+News Articles
+
+Threat Research
+FortiGuard Labs
+Threat Map
+Ransomware Prevention
+
+Fortinet Community
+Partner Portal
+Investor Relations
+Product Certifications
+
+About Us
+Exec Mgmt
+Careers
+Training
+Events
+Industry Awards
+Social Responsibility
+CyberGlossary
+Sitemap
+Blog Sitemap
+
+(866) 868-3678
+Copyright © 2025 Fortinet, Inc. All Rights Reserved
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs

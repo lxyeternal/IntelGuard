@@ -1,0 +1,75 @@
+
+Migrating from IMDSv1 to IMDSv2—and ultimately disabling IMDSv1 access—is an important security best practice. However, organizations often encounter challenges with discovering and updating workloads that still rely on IMDSv1. The complexity increases in environments with diverse EC2 instances and containerized workloads, where visibility into IMDSv1 usage can be limited. Without addressing these dependencies, enforcing IMDSv2 across all workloads may disrupt critical services.
+In this post, we’ll be taking a look at the steps involved in IMDSv2 adoption and outline how you can identify containers and processes that are preventing you from enforcing IMDSv2 across your workloads. In doing so, we’ll examine the recommendations we gave you in our previous post about Securing the EC2 Metadata Service in greater depth.
+The state of IMDSv2 migration
+The EC2 Instance Metadata Service provides important information to each individual EC2 instance. This includes several categories of information, such as the machine image ID (AMI), hostname, and associated security groups. Even more significantly, it includes the credentials associated with the role the EC2 instance has been launched into, which provides access to all of the AWS APIs the role has been granted access to.
+In 2023, we wrote about IMDSv1, and why it was imperative for organizations to migrate away from it to v2. A quick glance over HackerOne reveals quite a number of IMDS-related vulnerabilities, including two critical issues impacting the US Department of Defense and a critical SSRF vulnerability in DuckDuckGo.
+
+Still, IMDSv2 adoption remains a problem for many organizations. In our 2024 State of Cloud Security report, we found that only 32 percent of EC2 instances have IMDSv2 enforced. While adoption has risen from 21 percent in 2023, there’s still significant progress to be made.
+This migration can be a heavy lift for large organizations, as evidenced by the experiences that companies such as Slack and CRED have shared in their public writeups about how they approached the migration.
+Key steps and challenges in IMDSv2 migration
+Let’s take a look at the options that have been traditionally used to identify IMDSv1 workloads and migrate them to IMDSv2, as well as some of the challenges associated with these methods. We can break the process down into four different stages:
+Step 1: Discovery
+This first step involves identifying whether any workloads are still making IMDSv1 calls. There are a few different options that organizations can use to achieve this:
+
+CloudWatch’s MetadataNoToken metric, which highlights EC2 instances making IMDSv1 calls
+CloudTrail’s ec2RoleDelivery property, which pinpoints roles associated with IMDSv1 calls, allowing you to identify relevant EC2 instances
+AWS’s aws-imds-packet-analyzer, which identifies processes on a machine making IMDSv1 calls—this approach uses eBPF to gain visibility into both the instance and the workloads, without directly instrumenting them
+While these options are effective, they come with tradeoffs. CloudWatch provides instance-level granularity but struggles with complex container deployments, where it’s difficult to pinpoint which container is using IMDSv1. CloudTrail allows workload-level detection but doesn’t always tie back easily to specific EC2 instances. The aws-imds-packet-analyzer is the most detailed, showing both the instance and workload together, but deploying it at scale requires significant effort.
+{
+    "eventVersion": "1.10",
+    "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "xxx:i-xxx",
+        "arn": "arn:aws:sts::xxx:assumed-role/xxx",
+        "accountId": "xxx",
+        "accessKeyId": "xxx",
+        "sessionContext": {
+            "sessionIssuer": {
+                "type": "Role",
+                "principalId": "xxx",
+                "arn": "arn:aws:iam::xxx:role/xxx",
+                "accountId": "xxx",
+                "userName": "xxx"
+            },
+            "attributes": {
+                "creationDate": "2024-12-17T05:48:35Z",
+                "mfaAuthenticated": "false"
+            },
+            "ec2RoleDelivery": "2.0"
+        }
+    },
+    "eventTime": "2024-12-17T10:46:21Z",
+    "eventSource": "ec2.amazonaws.com",
+    "eventName": "DescribeNetworkInterfaces",
+    "awsRegion": "us-east-1",
+    "sourceIPAddress": "xxx",
+    [...]
+}
+Step 2: Attribution
+After discovery, the next step is to identify which codebases and teams own these workloads. For many organizations, this is a significant challenge due to the diversity and volume of EC2 instances in use.
+Approaches here will vary depending on the tools and catalogues available within an organisation. At minimum, workloads should be tagged to indicate ownership for chargeback purposes; this can be a good place to start your investigation. In addition, if you have a service catalog such as Datadog’s available, this provides a central location to consult for ownership information.
+When this data is not available, the next step is to try and chase the service back through your CI/CD pipelines to the location of the source code, and then use commit information to try and establish ownership. Ultimately, the less runtime annotation available, the more tedious this process becomes.
+It’s also possible to work backwards: if you have specific IMDSv1 queries and the user agent they were made with (which indicates what language the underlying code is written in), a GitHub or GitLab search can surface where this logic is defined. From there, you can reach out to code owners.
+Step 3: Migration
+After attribution, the migration phase involves updating workloads to stop using IMDSv1, which can be a considerable effort across teams and codebases.
+Common patterns of IMDSv1 use that will need to be reconfigured include:
+
+Explicit calls to IMDSv1 endpoints
+Outdated libraries relying on IMDSv1
+Unfit configurations that do not enforce IMDSv2 preference (Note: Datadog Agent can be configured to prefer IMDSv2, hence making migration easier: whenever possible, IMDSv2 will be used, which will drastically reduce IMDSv1 usage and corner-cases to investigate. See the agent documentation)
+In each case, the code or configuration needs to be updated and redeployed across the board to remove IMDSv1 usage.
+Step 4: Enforcement
+Finally, IMDSv2 enforcement can be applied at different levels, providing flexibility during the transition. Organizations can begin at the instance level, the Auto Scaling group (ASG) level, or even across broader subsets of accounts using AWS service control policies (SCPs). SCPs are particularly powerful, as they can block the creation of EC2 instances with IMDSv1 support and prevent IMDSv1-based credentials from accessing AWS APIs. This allows for a gradual rollout of IMDSv2 by applying SCPs selectively to specific accounts or organizational units.
+When deciding whether to enforce IMDSv2 at the instance level, at the ASG level, or using SCPs, the choice often depends on the organizational structure of the teams involved. ASG and EC2 configurations are typically managed by operations teams, while SCPs fall under the purview of security teams. Leveraging one approach or the other may depend on team responsibilities and collaboration. In practice, combining both approaches to suit the distribution of responsibilities during the migration can be effective. In the long term, once all instances have transitioned to IMDSv2, SCPs offer a comprehensive safeguard to prevent regression to insecure configurations.
+How Datadog can help
+Inspired by the aws-imds-packet-analyzer and aiming to overcome its limitations, we’ve implemented IMDSv1 detection within Datadog’s Cloud Workload Security (CWS) rule engine in Cloud Security Management, using its network detection capabilities. This enables customers to identify workloads still using IMDSv1 without deploying additional software or manually linking workload and instance identities. When paired with Datadog’s Service Catalog, this feature links IMDSv1 requests back to the relevant service and team metadata for easy attribution.
+The rule logs detailed request attributes, including process name, path, arguments, IMDS URL, and User-Agent, offering insights into the context of each call. For example, identifying teams actively using IMDSv1 can help target specific migration needs. Additionally, logging the User-Agent helps pinpoint languages and libraries making IMDSv1 calls, making it easier to prioritize dependency upgrades. This data also helps optimise IMDS usage; for example, at Datadog, we identified and eliminated unnecessary queries to the local-ipv4s IMDSv2 endpoint, reducing load.
+Here’s how it works: Cloud Workload Security uses eBPF probes in kernel space to analyse network traffic, which is then matched against the rule engine. When IMDS traffic is detected, the engine checks it against the latest rules, generating a signal for IMDSv1 activity.
+This new CSM rule makes it much easier to find which teams to involve for an IMDSv2 migration and provides them with actionable contextualized information to help.
+This IMDSv1 coverage is available through the Cloud Security Overview page in the Security Dashboards section. The IMDSv1 detection rule is disabled by default—in order to start using it, click the imds_v1_usage rule link and follow the steps to enable the rule.
+Once you’ve deployed the rule, you'll have a deep insight about your IMDSv1 usage in the dedicated Dashboard.
+Datadog can also help you enforce IMDSv2 usage. CSM provides out-of-the-box rules to flag instances still supporting IMDSv1 directly (“Publicly accessible EC2 instance uses IMDSv1”, “Publicly accessible EC2 host is running IMDSv1 and has an SSRF vulnerability”). While these do not prevent the creation of these instances, they make it easy to keep track of what is happening as the enforcement journey progresses.
+Conclusion
+Transitioning from IMDSv1 to IMDSv2 can be a complex process, especially in large, distributed environments where it can be difficult to obtain visibility into IMDSv1 usage across all of your EC2 instances. The migration can be made easier by breaking the process into key steps—identification, attribution, migration, and enforcement—though there are still challenges to overcome. Datadog CSM provides out-of-the-box rules that help with all of these essential steps, making it easier to secure your infrastructure against threats that exploit the vulnerabilities in IMDSv1.
+imds_v1_usage

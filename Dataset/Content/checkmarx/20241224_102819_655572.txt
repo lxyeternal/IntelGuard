@@ -1,0 +1,113 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_655572\Website1024x5122.png
+Deskpro is a multichannel helpdesk software solution that helps thousands of world-leading organizations manage their customer communications and userbase across multiple channels including email, live chat, voice, and social media. The Deskpro solution can be deployed on organizations’ own server infrastructure or via public or private cloud services.
+
+Given the shift to remote work and need for software that enables virtual collaboration, the Checkmarx Security Research Team decided to audit the security of Deskpro in accordance with the company’s Responsible Disclosure / Bug Bounty Program, discovering a severe cross-site scripting (XSS) issue that can be exploited in multiple ways.
+Impact Summary
+Successful exploitation of the discovered XSS vulnerability could have allowed attackers to hijack the sessions of admins and takeover the accounts of helpdesk agents. This would give the attackers the same privileges as admins and agents in terms of what they can execute, or the information they are exposed to. In certain cases, attackers would have been able to reset the helpdesk, wiping all system data.
+Part 1: Administrator Session Hijacking
+CVSS Score: 8.8 (High) CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H
+
+This issue was found in Deskpro version 2020.2.9, running in a docker container using the official Deskpro docker image. Nevertheless, the underlying problem – a stored XSS vulnerability – also affects the cloud version.
+Description
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_655572\7.jpg
+Malicious users can execute arbitrary code in the victim’s browser context to exfiltrate the session token. With this token at hand, malicious users would be able to hijack victims’ sessions and execute actions on their behalf.
+
+The Deskpro solution tracks users’ activities, issuing requests like the one in Figure 1 to the /portal/api/auth/session endpoint: no authentication nor authorization is required.
+
+
+
+Figure 1: User tracking request/response
+
+As shown in Figure 1, the request payload includes several details about visited pages such as their URL (url), title (pageTitle), the page from where the user came from (referrer), etc.
+
+This data is used to compute some statistics made available to administrators through the “Ticket Insights” built-in dashboard, as shown in Figure 2.
+
+
+
+Figure 2: “Ticket Insights” built-in dashboard
+
+Arbitrary code can be included in the request pageTitle property of the meta object. An example is shown below.
+
+
+
+This data is stored in the Deskpro database and is loaded whenever the “Top KB Views” widget is rendered. In such a situation, the code is executed in the browser’s context, and a modal box is shown. Figure 3 illustrates this scenario for the administrator account.
+
+
+
+Figure 3: Payload code execution in the admin’s browser context
+
+Although Deskpro includes a Content Security Policy (CSP), it does not prevent inline scripts execution.
+
+Attackers may take advantage of this issue to craft malicious requests, including source code, to exfiltrate the admin’s session token to a server controlled by them. Although the session cookie has the httpOnly flag, its value is also available via JavaScript, accessing the DESKPRO_SESSION_CODE global variable hardcoded in the DOM.
+
+The script below does exactly what was described above, and it was used in our proof-of-concept.
+
+
+
+With the admin’s session code, attackers would be able to place it in their own browser, getting access to the admin’s session. It would allow them to execute actions on the admin’s behalf. Note that admin accounts have access to the whole system, being able to access customers’ and other agents’ data (tickets, CRM, etc.) and the system configuration (e.g., SMTP server credentials). In some cases, attackers would be able to reset the helpdesk, wiping all system data.
+
+The underlying stored XSS issue also affects Deskpro Cloud. Figure 4 shows the unauthenticated request to the /portal/api/auth/session endpoint on a trial Deskpro Cloud instance.
+
+
+
+Figure 4: Deskpro Cloud request with the XSS payload
+
+Figure 5 shows the XSS payload reflected on the admin’s built-in “Ticket Insights” dashboard.
+
+
+
+Figure 5: XSS payload reflected on Deskpro Cloud admin’s dashboard
+Part 2: Agent Account Takeover
+CVSS Score: 8.1 (High) CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N
+
+This issue was found in Deskpro 2020.2.9, running in a docker container using the official Deskpro docker image. Nevertheless, the underlying problem – a stored XSS vulnerability – also affects the cloud version.
+Description
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_655572\9.1.jpg
+Malicious users can execute arbitrary code in the victim’s browser context, allowing them to take over a victim’s account.
+
+As described previously in the Administrator Session Hijacking section, the Deskpro solution tracks users’ activities, which can be displayed in built-in or custom dashboards such as the “Ticket Insights” built-in dashboard.
+
+Agents can be granted access to dashboards, such as the “Ticket Insights” built-in one.
+
+As for the administrators session hijacking attack, attackers may take advantage of the same vulnerability to include a specially crafted payload in the meta object’s pageTitle property.
+
+The request payload above includes a script that is stored in the Deskpro database. When the agent opens a dashboard that includes the “Top KB views” widget (e.g., the build-in “Ticket Insights” dashboard), then the script is executed. The script is shown below for better readability.
+
+
+
+Once executed, the malicious script adds a secondary email address to the agent’s (victim’s) account, behind the scenes and without notice. The required request token (_rt) can be gathered from the DP_REQUEST_TOKEN global variable hardcoded in the DOM. Figure 1 shows the account settings with the secondary email address added by the malicious script.
+Figure 1: Account settings after malicious script execution
+
+Then, to take over the agent’s account, the attacker goes to Deskpro agents Log In page (/agent/login?return=/agent/) to trigger the password recovery, providing his own email address included in the malicious payload (attacker@somehost.com).
+
+The attacker would receive an email in his inbox with a link to reset the password. After doing that, the attacker would be able to access the agent’s account and execute actions on his behalf.
+
+The attacker should remove the original agent email address to complete the account takeover, making his address the primary address. By doing this, the legitimate agent wouldn’t be able to recover control over the account.
+
+Note that the underlying issue also affects Deskpro Cloud, as previously shown in Figures 4 and 5.
+Recommendations
+To avoid XSS issues, applications should perform proper data encoding / escaping according to the output context, e.g. before merging it with markup templates or appending it to the Document Object Model (DOM).
+
+Although there was a CSP, which could have helped with mitigating the XSS, inline scripts were allowed. When using inline scripts can’t be avoided, cryptographic nonces should be used to create an allow-list of specific inline scripts.
+
+Users should always be asked to re-authenticate when performing sensitive actions like, in this case, changing email addresses associated with an account. Moreover, the account owner should be notified about such changes, in real time, so that it can act in a timely fashion in case of suspicious activity.
+References
+
+A7:2017-Cross-Site Scripting (XSS) – OWASP TOP Ten 2017
+C4: Encode and Escape Data – OWASP Top Ten Proactive Controls 2018
+Testing for Stored Cross-Site Scripting – OWASP Testing Guide
+Require Re-authentication for Sensitive Features – OWASP Authentication CheatSheet
+Content-Security-Policy – MDN Web Docs
+Summary of Disclosure and Events
+After discovering and validating the vulnerability, we notified Deskpro of our findings and worked with them throughout the remediation process until they informed us everything was appropriately patched. Deskpro’s responsiveness and professionalism throughout the process is worth noting and quite admirable.
+Timeline of Disclosure
+
+October 31, 2020 – Checkmarx shared the full report with security@deskpro.com
+November 2, 2020 – Deskpro confirmed receipt of report and began fixing the issues
+November 9, 2020 – Deskpro confirmed the issues were fixed; requested 90-day wait for public disclosure
+February 11, 2021 – Public disclosure
+Final Words
+Despite being very old and well-documented, XSS vulnerabilities continue to be one of the most overlooked and serious issues. Application security testing solutions are key for detecting XSS vulnerabilities and are a critical component in enabling developers to build, deploy, and maintain secure software. To learn how to mitigate these types of issues, visit our CxCodebashing lesson here.
+
+Vulnerabilities like the one discovered here are why the Checkmarx Security Research Team performs its investigations. This type of activity is part of our ongoing efforts to drive the necessary changes in software security practices among organizations worldwide.

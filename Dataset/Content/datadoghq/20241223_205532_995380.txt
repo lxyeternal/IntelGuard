@@ -1,0 +1,120 @@
+
+AWS administrators depend on CloudTrail to monitor API activity within their accounts. By logging API usage, CloudTrail enables teams to detect suspicious activity in AWS environments, catch attacks quickly, and better understand what happened following security incidents.
+The Datadog Security Research Team identified a method to bypass CloudTrail logging for specific IAM API requests via undocumented APIs. This technique would allow an adversary to perform reconnaissance activities in the IAM service after gaining a foothold in an AWS account—without leaving any trace of their actions in CloudTrail.
+We shared this information with AWS, who have since remediated the vulnerability.
+Disclosure timeline
+March 10, 2022: Researcher reports the issue to AWS.
+
+March 10, 2022: AWS acknowledges the issue.
+
+March to October, 2022: AWS works on several complex internal changes needed to align the CloudTrail logging behavior of the two services.
+
+October 24, 2022: AWS pushes a fix that updates iamadmin API calls to generate events in CloudTrail, in the same way that the iam service does.
+
+January 17, 2023: Datadog releases public disclosure.
+What is CloudTrail?
+CloudTrail is an event logging service that provides a source of truth as to what takes place in an AWS account. It records not only control plane and (optionally for some services) data plane API requests but also other kinds of events. In general, all API actions are recorded regardless of whether those result from AWS’s command line interface, the management console, or software using the SDKs. Per AWS, CloudTrail “helps you enable operational and risk auditing, governance, and compliance of your AWS account.”
+These capabilities have made CloudTrail the go-to resource for engineers to determine what an adversary did during a security incident. If an attacker could perform actions against the AWS API and bypass CloudTrail, defenders would have no way of knowing what occurred.
+Discovery
+Undocumented APIs are an area of active research in cloud security, because they may offer attackers additional functionality or enable them to perform unexpected actions. For example, researchers at Rhino Security Labs identified an undocumented API that an attacker could use to escalate privileges in an AWS account.
+A straightforward (albeit slow) way to find undocumented APIs is to monitor network traffic in a web browser’s developer tools while browsing the AWS Management Console. As you move through the console and interact with AWS services, the application will make requests to various AWS APIs. By monitoring this activity, you may notice API calls to unusual or undocumented services.
+While using the AWS Console, we noticed several requests to a service called “iamadmin.”
+
+
+This was interesting because this service is clearly different from the normal IAM service. Typically, when making requests to IAM from the console, the traffic is sent to /iamv2/api/iam. In iamadmin’s case, the final part of the url was iamadmin.
+
+
+Beyond the change in the URL, the request itself was somewhat notable. Usually, the format of the X-Amz-Target header is two terms separated by a period. For example, iam:ListRoles would use AWSIdentityManagementV20100508.ListRoles. With the iamadmin APIs, we noticed that the X-Amz-Target header was much longer and appeared to use a service called AWSIdentityManagementAdminService.
+
+
+We also noticed that the method names were similar to other IAM methods, but not exactly the same. For example, in the request shown above, the operation was for ListMFADevicesForMultipleUsers, which is very similar to iam:ListMFADevices. We presumed the purpose for this was to enhance performance by making fewer requests from the browser. With this iamadmin API service, you could make one request and supply 50 user names, rather than making 50 individual requests.
+This was certainly interesting, so we quickly set up a test harness and started investigating further.
+Testing
+To manually send requests to the AWS API, you need to sign your request using the SigV4 format. The good news is that AWS provided examples of how to do this. As you can see in the screenshot below, we signed our request using information we saw in the iamadmin API calls.
+
+
+With these changes made, we could run our script and call the iamadmin service. This revealed the following:
+
+
+From this output, we could see that our theory was correct. ListMFADevicesForMultipleUsers appeared to be a wrapper for iam:ListMFADevices. You could make a single call to this endpoint while specifying multiple IAM users and receive the results of iam:ListMFADevices all at once, rather than making a call for each user.
+As security engineers, our next thought was to look at the events that should have been generated in CloudTrail. We were curious if the event source would be the usual iam.amazonaws.com or if instead it would use iamadmin.amazonaws.com.
+What surprised us was that nothing showed up in CloudTrail at all—even after calling the API multiple times, both with and without the required permission. What was even more surprising was that we could get results from the API without it appearing in CloudTrail.
+Below, you can see the result of the API call with the correct permission.
+
+
+But when we looked in CloudTrail, there was nothing.
+
+
+This undocumented API allowed us to make a request to AWS and get results without logging to CloudTrail. To confirm our finding, we used the AWS CLI to call iam:ListMFADevices, which generated the expected CloudTrail log.
+
+
+Expanding on the concept
+Our next task was to identify what other IAM methods we could call. By de-minifying some JavaScript and finding the various method names from the AWS Console, we uncovered 13 total methods we could invoke.
+
+
+We then mapped the iamadmin methods to the equivalent IAM methods that they wrap:
+
+iamadmin method	Equivalent IAM method
+ListPoliciesForGroups	iam:ListGroupPolicies
+ListAttachedPoliciesForGroups	iam:ListAttachedGroupPolicies
+GetGroupMembershipCounts	iam:GetGroup
+ListGroupsForUsers	iam:ListGroupsForUser
+ListAccessKeysForMultipleUsers	iam:ListAccessKeys
+ListAccessKeyLastUsedForMultipleAccessKeys	iam:GetAccessKeyLastUsed
+GetLoginProfilesForMultipleUsers	iam:GetLoginProfile
+ListDescriptionsForPolicies	iam:ListPolicies
+BatchGetRoleLastUsed	iam:GetRole
+ListMFADevicesForMultipleUsers	iam:ListMFADevices
+ListSigningCertificatesForMultipleUsers	iam:ListSigningCertificates
+ListServiceLinkedRoleDeletionAttempts	iam:GetServiceLinkedRoleDeletionStatus
+GetServiceLinkedRoleTemplate	iam:GetServiceLinkedRoleTemplate
+It is worth noting that some of these methods do not always behave as you would expect. For example, BatchGetRoleLastUsed requires the iam:GetRole permission, but its response is very different. For example, here is a successful invocation of iam:GetRole using the AWS CLI:
+
+
+Here is an invocation of iamadmin:BatchGetRoleLastUsed:
+
+
+And here is the error that would result if you used iamadmin without having the requisite permission:
+
+
+Based on this error message, it appeared that iamadmin:BatchGetRoleLastUsed requires iam:GetRole because it can retrieve a subset of information from it (specifically, the RoleLastUsed section). You can see this in the normal invocation using the AWS CLI.
+That being said, some methods do work as expected. For example, iamadmin:ListAccessKeysForMultipleUsers:
+
+
+
+
+Here is iamadmin:ListGroupsForUsers:
+
+
+
+
+Disclosure
+After playing with this technique for a while, it became clear that this was not intended functionality. Being able to bypass CloudTrail logging and getting the results of those calls has serious implications for defenders, because it limits their ability to track what an adversary has done in an environment and what actions they’ve taken.
+Furthermore, this technique also makes it possible to bypass GuardDuty for findings such as IAMUser/AnomalousBehavior, because GuardDuty uses CloudTrail as a data source, and it can’t alert on something it can’t see.
+We reached out to AWS to disclose this finding, and they began to work through their vulnerability remediation process. This logging bypass has now been fixed. Requests to the iamadmin service will generate their corresponding iam API events in CloudTrail.
+Acknowledgements
+We’d like to give major thanks to Dan Urson and the AWS Security Outreach Team for being awesome to work with, as always.
+iamadmin
+iam
+iam:ListRoles
+AWSIdentityManagementV20100508.ListRoles
+AWSIdentityManagementAdminService
+ListMFADevicesForMultipleUsers
+iam:ListMFADevices
+ListMFADevicesForMultipleUsers
+iam:ListMFADevices
+iam:ListMFADevices
+iam.amazonaws.com
+iamadmin.amazonaws.com
+iam:ListMFADevices
+BatchGetRoleLastUsed
+iam:GetRole
+iam:GetRole
+iamadmin:BatchGetRoleLastUsed
+iamadmin:BatchGetRoleLastUsed
+iam:GetRole
+RoleLastUsed
+iamadmin:ListAccessKeysForMultipleUsers
+iamadmin:ListGroupsForUsers
+iamadmin
+iam

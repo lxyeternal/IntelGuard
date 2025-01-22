@@ -1,0 +1,154 @@
+
+Mass assignment, also known as autobinding or object injection, is a category of vulnerabilities that occur when user input is bound to variables or objects within a program.
+Mass assignment vulnerabilities are often the result of an attacker adding unexpected fields to an object to manipulate the logic of a program. This was the cause of a famous GitHub authentication vulnerability, where mass assignment functionality in Ruby on Rails allowed an attacker to add their public key to the rails GitHub organization and push a commit to master.
+This blog post was motivated, in part, by the Spring4Shell vulnerability, a remote code execution (RCE) vulnerability caused by autobinding functionality included in the Spring framework. This prompted an exploration into whether a similar vulnerability could be found in the Python ecosystem.
+In this post, we’ll examine the potential risks from Python’s setattr() function, and discuss ways to prevent Mass Assignment vulnerabilities in your application.
+Introducing setattr
+A commonly used way to implement mass assignment in Python is the inbuilt setattr() function. This function takes an object, attribute name, and attribute value, and sets the attribute of the object to the provided value. It is able to add new attributes as well as change existing ones.
+Whilst convenient, allowing a user to set the value of any attribute in an object can have unintended consequences.
+Firstly, it allows for traditional mass assignment logic vulnerabilities to arise in a program. Object fields that were not intended to be modified by a user can now be changed
+Secondly, the attributes that can be modified with setattr are not limited to programmer-defined fields — both functions and inbuilt attributes such as __class__ and __dict__ can be set. Unlike the Spring4Shell vulnerability, setattr is unable to set nested child attributes of an object, limiting the scope of an attack. However, it is easy to cause an exception to be thrown at the point that setattr is called, by setting __class__ to a string value, or later during program execution by overwriting a function belonging to the object. Causing an exception to be thrown in this manner may result in abnormal program behavior or denial of service.
+The code below is a small example that uses setattr to create a user. Running it with the input first_name=Sam,last_name=S will result in the output Sam S: Permission denied.
+1class User():
+2	def __init__(self, admin=False):
+3    		self.admin = admin
+4
+5	def is_admin(self):
+6    		return "You are admin!" if self.admin else "Permission denied"
+7
+8def parse_input(usr_in):
+9	return dict([tuple(kv.split("=", 1)) for kv in usr_in.split(",") if "=" in kv])
+10
+11def create_user(info):
+12	user = User()
+13	for key, value in info.items():
+14    	setattr(user, key, value)
+15	return user
+16
+17def main():
+18	user = create_user(parse_input(str(input())))
+19	if hasattr(user, "first_name") and hasattr(user, "last_name"):
+20    		print(f"{user.first_name} {user.last_name}: {user.is_admin()}")
+21
+22if __name__ == "__main__":
+23	main()
+To cause the program to crash from an uncaught exception, the input first_name=Sam,last_name=S,is_admin=foo can be used — this will override the is_admin function, replacing it with a string and causing an exception to be thrown when the function is called.
+The input first_name=Sam,last_name=S,admin=foo overrides the admin attribute of the User object with the string foo, because this is a Truthy value. When the is_admin function checks the admin attribute, the user is treated as an admin and Sam S: You are admin! is output.
+Preventing Mass Assignment
+A general strategy for mitigating mass assignment vulnerabilities is to keep objects containing user input separate from the objects responsible for internal program logic. This is done by creating Data Transfer Objects (DTOs), which only contain the fields that a user is able to set. In Python, this is easy to do using dataclasses. The following code shows how a DTO can be used to define allowed fields explicitly. If incorrect fields are specified, a TypeError is raised — which is then caught and handled, preventing the attacks mentioned above.
+1from dataclasses import dataclass
+2
+3@dataclass
+4class UserDTO():
+5	first_name: str
+6	last_name: str
+7
+8class User():
+9	def __init__(self, dto, admin=False):
+10    		self.first_name = dto.first_name
+11    		self.last_name = dto.last_name
+12    		self.admin = admin
+13
+14	def is_admin(self):
+15    		return "You are admin!" if self.admin else "Permission denied"
+16
+17def parse_input(usr_in):
+18	return dict([tuple(kv.split("=", 1)) for kv in usr_in.split(",") if "=" in kv])
+19
+20def create_user(info):
+21	try:
+22    		return User(UserDTO(**info))
+23	except TypeError:
+24    		return None
+25
+26def main():
+27	user = create_user(parse_input(str(input())))
+28	if user:
+29    		print(f"{user.first_name} {user.last_name}: {user.is_admin()}")
+30
+31if __name__ == "__main__":
+32	main()
+Validating the user input is also a way to prevent mass assignment vulnerabilities. As always, it's better to validate using a list of approved data rather than checking for data that is forbidden. The following code still uses setattr but checks the attribute name against a list of allowed attributes.
+1class User():
+2	allowed_fields = ["first_name", "last_name"]
+3
+4	def __init__(self, admin=False):
+5    		self.admin = admin
+6
+7	def is_admin(self):
+8    		return "You are admin!" if self.admin else "Permission denied"
+9
+10def parse_input(usr_in):
+11	return dict([tuple(kv.split("=", 1)) for kv in usr_in.split(",") if "=" in kv])
+12
+13def create_user(info):
+14	user = User()
+15	for key, value in info.items():
+16    		if key in User.allowed_fields:
+17        			setattr(user, key, value)
+18    		else:
+19        			return None
+20	return user
+21
+22def main():
+23	user = create_user(parse_input(str(input())))
+24	if user:
+25    		print(f"{user.first_name} {user.last_name}: {user.is_admin()}")
+26
+27if __name__ == "__main__":
+28	main()
+It’s always best to be explicit with what user input a program expects, but if you need to be more flexible with the handling of user input there are alternatives to the setattr function. The collections module in the Python standard library provides two useful classes to help — collections.UserDict and collections.abc.MutableMapping. These classes can be inherited from in order to provide extra functionality to key/value mappings. If you need to access values via attributes rather than keys, this can be achieved by implementing a __getattr__ method on your class. In the example below, the User class behaves like a dictionary and is able to store any fields provided by the user. By overriding __getattr__, when an attribute is accessed that can not be found as part of the usual mechanism for accessing an attribute, it is instead returned from the dictionary of user-supplied fields. This allows the user-supplied fields to be accessed in the same manner as attributes, but prevents attributes belonging to the class from being overridden by user input.
+1from collections import UserDict
+2
+3class User(UserDict):
+4	def __init__(self, info, admin=False):
+5    		self.admin = admin
+6    		super().__init__(info)
+7
+8	def is_admin(self):
+9    		return "You are admin!" if self.admin else "Permission denied"
+10
+11	def __getattr__(self, name):
+12    	if name in self:
+13     		   	return self[name]
+14    		else:
+15        		raise AttributeError("'User' object has no attribute '{}'".format(name))
+16
+17def parse_input(usr_in):
+18	return dict([tuple(kv.split("=", 1)) for kv in usr_in.split(",") if "=" in kv])
+19
+20def create_user(info):
+21	return User(info)
+22
+23def main():
+24	user = create_user(parse_input(str(input())))
+25
+26	if "first_name" in user and "last_name" in user:
+27    		print(f"{user.first_name} {user.last_name}: {user.is_admin()}")
+28
+29if __name__ == "__main__":
+30	main()
+Protecting your Python libraries
+Weighing security against convenience and flexibility can be difficult in the height of software development. Something that seems benign on the surface, can expose you and your application to a variety of security risks — which is why education and alternative methods are so important. We’ve discussed how setattr works and the dangers of relying on it in your Python libraries, as well as several ways to prevent Mass Assignment vulnerabilities. With this knowledge, you’re well on your way to protecting your Python applications from attacks and data breaches. To learn more, head over to our homepage and create your free account or book a demo to see how Snyk can help protect your code, containers, dependencies, and cloud infrastructure.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+setattr()
+setattr
+__class__
+__dict__
+setattr
+setattr
+__class__
+first_name=Sam,last_name=S
+Sam S: Permission denied
+first_name=Sam,last_name=S,is_admin=foo
+is_admin
+first_name=Sam,last_name=S,admin=foo
+foo
+is_admin
+Sam S: You are admin!
+setattr
+setattr
+__getattr__
+setattr

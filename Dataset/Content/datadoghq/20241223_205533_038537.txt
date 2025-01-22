@@ -1,0 +1,82 @@
+
+One common way for users to authenticate to Kubernetes clusters is through an API that issues JSON Web Token (JWTs). These tokens can be used to identify a Kubernetes user or service account and grant them access to the environment. While this isn’t a new feature, Kubernetes 1.24 added a command that allows users to create these tokens more easily using the TokenRequest API.
+Unfortunately, attackers can abuse this feature to create long-lived and hard-to-detect privileged access to Kubernetes clusters. In this post, we’ll outline how this feature works, how attackers can abuse it, and how you can detect its misuse by monitoring Kubernetes audit logs.
+How to create JWTs in Kubernetes
+As with any sub-command provided to kubectl, the help option provides information and examples about specific commands. In this case, we’re looking at the create token command.
+
+
+Looking at this example, we can identify a few intended use cases for creating JWTs in Kubernetes, namely we can create tokens that are bound to service accounts in different namespaces or tokens bound to secret objects. The concept of “binding” the token is important, as the only way to revoke a token issued with this command before its duration expires is to delete the object it’s bound to. Tokens are bound to service accounts by default, but they can also be bound to pods or secrets.
+If, for example, we want to create a new token for the default service account in the default namespace, we can use the following command:
+
+
+The resulting JWT is a relatively standard-looking token: its audience is the Kubernetes API server, its duration is one hour, and its subject is the service account that we used as the name of the token.
+
+
+Token security considerations
+While this example appears relatively benign, there are some security considerations for the  TokenRequest API that Kubernetes cluster operators should take into account.
+First, similar to Kubernetes certificates, there’s no way to directly revoke these tokens once they’ve been issued. It is possible to remove access by deleting the object (i.e., the service account, pod, or secret) that they were bound to when created, but if they’re bound to a system service account, that may not be a practical strategy.
+Second, it’s possible to create very long-lived tokens. In a standard Kubernetes cluster, it is possible to set the --duration parameter to any value. So, for example, we can create a token with a one-year lifespan.
+
+
+This is somewhat dependent on the Kubernetes distribution used, as the provider may choose to put a limit on the duration of tokens that can be issued, for instance AWS EKS limits the maximum lifetime to 24 hours. But by default, users can create tokens of any duration. This allows an attacker who successfully breaches your Kubernetes cluster to achieve persistent access to your environment.
+Lastly, while Kubernetes audit logs contain records of the act of creating a token, there is no record of the token itself anywhere in the Kubernetes API after it’s created. As a result, it’s not possible to easily get a list of issued tokens, apart from by reviewing those creation records via the cluster audit logs.
+Best practices for token security in Kubernetes
+Given these considerations, Kubernetes cluster operators should adhere to some best practices to ensure the TokenRequest API feature is used securely.
+Apply role-based access control (RBAC)
+From an RBAC perspective, it’s important to restrict access to the token sub-resource of serviceaccount objects. Adhere to the principle of least privilege when providing direct access to these resources or assigning rights that give a user wildcard access to them (e.g., default admin or cluster-admin).
+Monitor Kubernetes audit logs
+In addition, you can monitor Kubernetes audit logs to detect misuse of the TokenRequest API, as the audit log for a token creation contains some useful information for security purposes.
+First, in terms of the key information, you can see the user and IP address used to request the token. There are instances in which system services will request these tokens, but in the example below, you can see it’s been requested by the kubernetes-admin user and from a specific IP address. This might be a cause for concern, as kubernetes-admin is a generic system administrator account, so it’s difficult to know who actually asked for this token.
+
+
+The next important features of the audit log for a token request are the object reference and request URI. If the log indicates the default service account token in the default namespace has been requested, that is probably not a cause for concern, as that account should not have significant permissions to the cluster.
+
+
+However, you might notice that the requested object reference is something other than a default service account, as below.
+
+
+This would be a greater cause for concern, as the clusterrole-aggregation-controller service account has effective cluster-admin rights. This type of activity could indicate an attempted escalation of privilege by an attacker.
+Another potentially useful signal in the audit log is the user-agent requesting the token creation. Kubectl has its own specified agent string, so filtering for requests that came from kubectl could help identify interactive users requesting tokens, rather than general Kubernetes system services using the TokenRequest API. (One caveat to this approach is that a sophisticated attacker might customize their user-agent to avoid this detection.)
+
+
+One important detail that isn’t visible when Kubernetes audit logs are only capturing metadata (a common default, including in popular distributions such as AWS EKS or Azure AKS) is the duration of the token. To see this, you’ll need to increase the audit log level to Request or higher and also be running Kubernetes 1.22 or later due to a bug in earlier versions.
+With this level of logging enabled, it’s possible to see the expirationSeconds parameter, which you can use to identify when long-lasting credentials are created.
+
+
+It’s important to note, however, that in managed Kubernetes distributions, cluster operators may not have the ability to to change the audit policy that’s used in their environment and may need to work with their provider to establish the necessary audit log controls.
+How to detect exploitation of the TokenRequest API
+To demonstrate how an attacker might use the TokenRequest API to gain persistent access to a real-world Kubernetes environment, we implemented the technique in Stratus Red Team. Then, we were able to establish a detection method for this type of attacker behavior using Kubernetes audit logs and an alert in Datadog Cloud SIEM.
+From a terminal with access to our target cluster, we can run a command that creates a token with a one-year lifetime for the privileged clusterrole-aggregation-controller service account.
+
+
+This will generate a log entry that looks like this:
+
+
+Then, using the parameters shown in the log entry for the event, we can create a rule in Datadog Cloud SIEM.
+
+
+This rule filters Kubernetes audit log requests for instances where the token sub-resource of a serviceaccount resource is passed a CREATE request, the username referenced in the audit logs is not system:kube-controller-manager, and the requesting user is not in the group system:nodes. We include these exclusions because the Token Request API is used by Kubelets and the controller manager to create tokens for pods and internal services, respectively, so we would get a lot of false positives if we left in these parameters.
+Datadog Cloud SIEM then produces an alert showing the creation of a suspicious token in our Kubernetes cluster.
+
+
+Once your team receives this alert, you can take appropriate action to investigate the incident, remove the object associated with the token, or take steps to identify and remove unauthorized users from your Kubernetes environment if an attack has indeed occurred.
+Monitor your Kubernetes environment for malicious token creation
+While Kubernetes tokens are an important part of allowing workloads to authenticate to clusters, they may be abused by an attacker to gain persistent access to a cluster. It’s important to bear this security risk in mind when designing security controls for your Kubernetes environment. Using Kubernetes audit logs and monitoring tooling, it’s possible to detect behavior in your environment that follows this pattern, spot attacks using this vector, and respond quickly and appropriately to stop or mitigate the attack.
+help
+create token
+--duration
+token
+serviceaccount
+admin
+cluster-admin
+kubernetes-admin
+kubernetes-admin
+clusterrole-aggregation-controller
+cluster-admin
+Request
+expirationSeconds
+clusterrole-aggregation-controller
+token
+serviceaccount
+system:kube-controller-manager
+system:nodes

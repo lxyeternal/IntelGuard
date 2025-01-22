@@ -1,0 +1,180 @@
+
+
+Categories
+
+
+
+Business & Technology 
+
+
+
+
+FortiGuard Labs Threat Research
+
+
+
+
+Industry Trends
+
+
+
+
+Life at Fortinet
+
+
+
+
+Partners
+
+
+
+
+Customer Stories
+
+
+
+
+PSIRT Blogs
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+CISO Collective
+Subscribe
+FortiGuard Labs Threat Research
+FortiGuard Labs Discovers Multiple Vulnerabilities in Microsoft Message Queuing Service
+Over the last few months, FortiGuard Labs has discovered and reported multiple vulnerabilities found in the Microsoft Message Queuing (MSMQ) service. Microsoft patched these vulnerabilities in the April and July 2023 security updates. These patches are rated as critical/important, and as always, we urge users to install them as soon as possible.
+Affected platforms: Windows
+
+Impacted parties: Microsoft Windows users with Microsoft Message Queuing service installed
+
+Impact: Remote code execution and denial-of-service
+
+Severity level: Critical and Important
+In this post, we will walk through the attack surfaces of MSMQ, the approaches we took to tackle the challenges we encountered during fuzzing, and finally, we will provide details of the vulnerabilities.
+Exploring MSMQ Attack Surfaces
+MSMQ is a proprietary messaging protocol developed by Microsoft that allows applications running on separate computers to communicate in a failsafe manner. MSMQ ensures reliable delivery by placing messages that fail to reach their intended destination in a queue and then resending them once the destination is reachable. RabbitMQ is an open-source messaging queuing protocol similar to MSMQ.
+The MSMQ service is hosted as a standalone Windows service under MQSVC.EXE. The MSMQ operation is implemented in both user-mode and kernel-mode components, namely MQQM.DLL and MQAC.SYS. As shown in Table 1, MQQM.DLL exposes TCP/IP and Remote Procedure Calls (RPC) ports allowing applications to interact with the service via the network.
+Based on the open ports being used, we determined that most of the potential attack surfaces are reachable remotely by adversaries. In other words, any security vulnerability discovered from these identified attack surfaces could have a severe security impact, from remote Denial of Service (DoS) to remote code execution. As a result, we uncovered three security issues reachable through port 1801, which were caused by message header parser routines implemented in MQQM.DLL. However, our attempts to identify security issues through the RPC interface have yet to yield results.
+Fuzzing the message header parser is straightforward, as the message header parser operates in multiple threads and thus can handle concurrent messages independently. Furthermore, there is no global state that will affect the fuzz result when the fuzzer sends crafted packets to the target. However, the challenge is that the target is running on a remote service process, and we need to monitor the target service process when it crashes. When the crash happens, a manual process restart is required as the Windows automatic service restart is not persistent. This is necessary to ensure a persistent fuzzing operation that can run continuously.
+Subverting Windows Service Process
+Injecting DLL into the Windows Service process used to be relatively straightforward on older versions of Windows, such as Windows 7, before protected process light (PPL) and control guard were introduced. Various control guards have been deployed on critical Windows processes, such as Windows services, since Windows 10. In particular, Code Integrity Guard (CIG), which requires binaries to be signed by Microsoft if they run on Windows-protected processes, and Application Control Guard (ACG), which controls the host application's behavior according to mitigation policies.  In our case, we were greeted with the message shown in Figure 1 when we injected our custom unsigned DLL into SERVICES.EXE.
+According to the error message, when User-Mode Code Integrity (UMCI) is enforced, untrusted binaries cannot be executed or loaded into the protected process. While a UMCI exclusions path is partially documented by Microsoft, following the suggested registry key modification does not immediately enable us to run an unsigned DLL in the service host process. After some reverse engineering on the code integrity module, namely CI.DLL, we concluded that the following requirements need to be satisfied to work around the UMCI checks:
+1. Enable UMCI path exclusions. The following example adds an exclusion for "\tools"
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\CI\TRSData]
+
+"TestPath"=hex(7):5C,00,74,00,6f,00,6f,00,6c,00,73,00,00,00,00,00
+2. Enable UMCI audit mode. Add the following REG_DWORD
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\CI]
+
+“UMCIAuditMode” = dword:00000001
+3. CI!g_CiDeveloperMode|2 bitmask must be set before CI!CiInitializePolicy function exits
+4. Unset the PsProtectedLight flag on the target process via EPROCESS.Protection
+5. Unset the DisableDynamicCode and AuditDisableDynamicCode flags on the target process via EPROCESS.MitigationFlagsValues
+An astute reader should realize that steps 3 – 5 require real-time modification of some data in the kernel-module data structure. However, it is trivial to achieve if you have a Windows kernel debugger attached to the target OS.
+After that, the custom DLL can install a hook on the service host process to monitor process creation and process termination operations. For our use case, the custom DLL uses the Windows debugger API to capture exceptions/crashes for our target service process, MQSVC.EXE. The code snippet for the main debugger thread is shown in Figure 3.
+At the same time, we also wanted to attach a debugger to the service process before it starts to execute. This is very helpful in reverse engineering if you want complete control over the target process before it starts to execute any code. On top of that, we can also use the Windows Time-Travel-Debugger (TTD), tttracer.exe, to capture the complete trace of the target service process, which is helpful for crash triaging. Figure 4 shows the code snippet of the hook function in the custom DLL that will delay the execution of the target process when it is spawned by services.exe.
+MSMQ Structure-aware Fuzzing
+Network protocol fuzzing is more effective if we send well-crafted packets to the target. Fortunately, MSMQ specifications are publicly available, and most importantly, most of its message headers data structure is documented by Microsoft. This allows us to write a structure-aware fuzzer that will mutate data according to its format and data type rather than generating random meaningless input data.
+Another critical component needed by our MSMQ fuzzer is a coverage-guided capability. TinyInst by Ivan Fratric is my first go-to binary instrumentation library for remote process fuzzing. Furthermore, the library is well-designed, making it easy to integrate into any custom fuzzer.
+Figure 5 shows the code snippet of the MSMQ fuzzer that attempts to generate a structured EodMessage header packet.
+A typical MSMQ packet must include headers, such as BaseHeader, UserHeader, and MessagePropertiesHeader. It may also include additional optional headers, like TransactionHeader, SecurityHeader, DebugHeader, SessionHeader, etc.
+As shown in Figure 6, the optional headers come after the mandated headers and are ordered sequentially. Our MSMQ fuzzer considers the order of the message headers to pass the sanity check of the message header parser. One of the RCE vulnerabilities is, in fact, caused by an unsanitized field in a particular message header data structure when the crafted packet is parsed by the message header parser. Because of how the message header parses the packets—looking for the headers sequentially—it will eventually trigger an out-of-bounds memory write.
+FortiDAST Exploit Engine CVE Detections
+FortiGuard Labs provides vulnerability identification signatures to FortiDAST users that can detect these vulnerabilities via an exploit engine module called the FortiDAST Scripting Engine (FSE). Some of the basic features of this exploit engine were introduced in a FortiGuard blog back in 2021.
+FortiDAST performs automated black-box dynamic application security testing of web applications to identify vulnerabilities that threat actors may exploit. FSE is an add-on to FortiDAST that enables the detection of CVE-specific vulnerabilities on networked assets not limited to web applications.
+When users configure the Exploit Engine (Figure 8), they will be asked to select the type of applications currently supported by FSE.
+In this case, we will demonstrate the ability of FortiDAST to detect assets that run the vulnerable Message Queuing service.
+Upon completing the scan, FortiDAST will show the result of FSE under the Exploit Engine dashboard, as shown in Figure 10:
+Overview of Discovered Vulnerabilities
+This next section reviews the vulnerabilities we discovered using the process described above along with related IPS signatures.
+FG-VD-23-001: Message Queuing Exactly-One-Delivery (EOD) Header Out-of-Bounds Read
+This out-of-bounds read occurs because EodHeader, StreamIdSize, and OrderQueueSize are not validated before accessing them in the message header parser routine CQmPacket::CQmPacket. The message header parser routine has scrutinized most of the message header, but it turns out that the data structure for the header in question is not being validated.
+Based on our analysis, an information disclosure exploit seems implausible. However, a denial-of-service attack can be achieved when the out-of-bound read accesses an invalid address.
+FortiGuard Labs has released the IPS signature MS.Windows.Message.Queuing.Service.CVE-2023-28302.DoS to detect this issue.
+FG-VD-23-002: Message Queuing Message Header Out-of-Bounds Write
+This out-of-bounds write occurs because the message header parser, CQmPacket::CQmPacket, does not properly validate a message header with an arbitrary size. Some message headers, such as EodHeader, EodAckHeader, and CompoundMessageHeader, allow attackers to specify an arbitrary size/length that is not properly sanitized. As mentioned previously, the message headers are organized in sequential order. The message header parser will adjust the pointer according to the defined data structures for each specific message header. Since some message headers are not being validated, the pointer can be adjusted to point to an arbitrary location, an invalid address in this context, and potentially cause memory corruption when the pointer to the message header is dereferenced in the later part of the code.
+FortiGuard Labs has released the IPS signature MS.Windows.MSMQ.CVE-2023-21554.Remote.Code.Execution to detect this issue.
+FG-VD-23-015: Message Queuing Compound Message Header Out-of-bounds Write
+This vulnerability is a result of a manual code audit. After analyzing the previous vulnerabilities, we looked into the message headers that have not performed a sanity check on their data structure. As a result, the CompoundMessage header caught our attention. Figure 11 defines the CompoundMessage header data structure.
+Based on our analysis, the message header was referenced in CQmPacket::GetPacketBody. This function will retrieve data from the MsgBodySize field. An out-of-bounds write will occur when the data is dereferenced without any sanity check in functions such as CQmPacket::Decrypt, VerifySignature10, and VerifySignature20, just to name a few. Apart from the CompoundMessage header, the SecurityHeader is also required in the crafted network packet to trigger this vulnerability. Notably, all the data fields in the SecurityHeader data structure are properly validated.
+A malformed data structure in the CompoundMessage header could affect the MSMQ kernel mode component, MQAC.SYS. Our fuzzer uncovered the faulty code path to trigger the out-of-bounds write in MQAC.SYS with a properly defined SrmpEnvelopeHeader that holds SOAP XML contents to the target queue. Figure 12 shows the crash call stack in MQAC.SYS when it leverages the unsanitized length in the CompoundMessage header.
+FortiGuard Labs has released the IPS signature MS.Windows.MSMQ.CompoundMessage.Remote.Code.Execution to detect this issue.
+Conclusion
+Fortinet customers can use FortiDAST to identify any network assets that may be vulnerable to the MSMQ vulnerabilities discussed previously. FortiGuard Labs has also released IPS signatures to protect our customers from the vulnerabilities mentioned in this post. Again, we can’t emphasize enough the urgency to apply the latest Microsoft patches to prevent you or your organization from falling victim to a devastating cyberattack.
+Fortinet Protections
+FortiDAST customers are able to detect the existence of these vulnerabilities in their assets.
+
+
+
+Fortinet IPS customers are protected with the following signatures, which were previously released for these vulnerabilities:
+
+MS.Windows.MSMQ.CVE-2023-21554.Remote.Code.Execution
+MS.Windows.Message.Queuing.Service.CVE-2023-28302.DoS
+MS.Windows.Message.Queuing.Service.CVE-2023-21769.DoS
+MS.Windows.MSMQ.CompoundMessage.Remote.Code.Execution
+If you believe these or any other cybersecurity threats have impacted your organization, please contact our Global FortiGuard Incident Response Team.
+
+Learn more about Fortinet’s FortiGuard Labs threat research and global intelligence organization and Fortinet’s FortiGuard AI-powered Security Services portfolio.
+microsoft
+Related Posts
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+
+
+
+
+
+
+
+
+News Releases
+News Articles
+
+Threat Research
+FortiGuard Labs
+Threat Map
+Ransomware Prevention
+
+Fortinet Community
+Partner Portal
+Investor Relations
+Product Certifications
+
+About Us
+Exec Mgmt
+Careers
+Training
+Events
+Industry Awards
+Social Responsibility
+CyberGlossary
+Sitemap
+Blog Sitemap
+
+(866) 868-3678
+Copyright © 2025 Fortinet, Inc. All Rights Reserved
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs

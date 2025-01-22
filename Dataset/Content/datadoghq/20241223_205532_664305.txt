@@ -1,0 +1,378 @@
+
+Yesterday, AWS released a new feature of Amazon EKS, EKS Cluster Access Management, a set of capabilities that simplifies granting and managing access to EKS clusters. In this post, we provide a deep dive into these features and how they help solve common identity and access management (IAM) challenges when using EKS. We then discuss threat detection opportunities based on the newly available CloudTrail events associated with this feature.
+Identity and access management challenges in Amazon EKS
+In a previous post, we covered in depth how IAM works in EKS and some common challenges that arise.
+First, the AWS identity that creates an EKS cluster has automatic, invisible system:masters administrator privileges in the cluster that cannot be removed.
+Second, to grant access to an EKS cluster, you need to explicitly map AWS identities to Kubernetes groups using an in-cluster ConfigMap, aws-auth, that lives in the kube-system namespace. For instance, the following entry assigns the developers Kubernetes group to the developer AWS IAM role.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-auth
+  namespace: kube-system
+data:
+  mapRoles: |
+    # ...
+    - rolearn: arn:aws:iam::012345678901:role/developer
+      groups: [developers]
+      username: "developer:"
+This means that we need to configure permissions when creating the cluster. What's more, principals with administrator privileges to an AWS account do not necessarily have access to EKS clusters in that account, since EKS IAM is managed separately and not through the native AWS IAM mechanisms. Finally, it means it's typically challenging to understand which identities in the AWS account have access to EKS clusters, as this requires analyzing the aws-auth ConfigMap of each individual cluster.
+The new EKS Cluster Access Management capabilities
+The new capabilities of EKS Cluster Access Management help address some of the issues with IAM in EKS by allowing you to manage access to your clusters using the AWS API. In particular, the new feature enables you to:
+
+Map AWS identities to pre-defined AWS-managed Kubernetes permissions called "access policies"
+Map AWS identities to specific Kubernetes groups
+Gain visibility on former "shadow administrators"—AWS identities who initially created the EKS cluster—and remove their access
+Prerequisites
+To benefit from the new EKS Cluster Access Management features, your EKS cluster needs to match the requirements below.
+
+Running Kubernetes 1.23 or above.
+On the latest EKS platform version, which is most of the time rolled out automatically to your cluster. The required platform version depends on your Kubernetes version:
+
+Kubernetes version	Minimum EKS platform version
+1.28	eks.6
+1.27	eks.10
+1.26	eks.11
+1.25	eks.12
+1.24	eks.15
+1.23	eks.17
+To determine the EKS platform version of your cluster, you can use:
+aws eks describe-cluster --name your-cluster \
+  --query cluster.platformVersion \
+  --output text
+AWS upgrades the EKS platform version automatically in most cases, according to its documentation. If you upgrade your cluster to a newer Kubernetes version (e.g. from 1.27 to 1.28), you automatically benefit from the latest EKS platform version.
+In addition, you'll need the AWS CLI version 1.32.3/2.15.3 or above (see instructions on how to upgrade your AWS CLI version).
+Alternatively, you can use any AWS API client that supports the new features, such as:
+aws-sdk-go-v2 >= 1.49.5
+boto3 >= 1.34.3
+aws-sdk-js >= 2.1521.0
+aws-sdk-java >= 1.12.621
+Managing access to the EKS control plane through the AWS API
+With this new feature, access to the EKS control plane is managed differently from before, in several important ways.
+The new EKS Cluster Access Management feature introduces several concepts, the most important ones being access entries and access policies.
+When you grant access to an AWS principal on a specific EKS cluster, you create an access entry for that principal. You can then assign permissions to that principal by mapping the access entry to Kubernetes groups, and/or access policies. An access policy is an AWS-managed set of Kubernetes permissions. At the time of writing, several access policies are available and can be listed using the command aws eks list-access-policies, such as:
+
+AmazonEKSClusterAdminPolicy, equivalent to the built-in cluster-admin role
+AmazonEKSAdminPolicy, equivalent to the built-in admin role
+AmazonEKSEditPolicy, equivalent to the built-in edit role
+AmazonEKSViewPolicy, equivalent to the built-in view role
+You can grant an access policy either at the cluster or namespace level, similarly to how you'd create a ClusterRole versus a Role in Kubernetes terms. Below is a diagram summarizing the new terminology and how the concepts relate to each other.
+[
+
+
+
+When an access entry maps to both managed access policies and Kubernetes groups, effective permissions are the union of both permissions granted through the Kubernetes group and the managed access policy.
+Jump to the "recipes" section for practical examples!
+Managed access policies AmazonEKSAdminPolicy and AmazonEKSClusterAdminPolicy do, as their name indicates, grant administrator access to the EKS cluster.
+In addition, and although its name does not contain "admin", the managed access policy AmazonEKSEditPolicy may allow for privilege escalation inside the cluster, as it grants sensitive actions such as creating pods. In the absence of additional, non-default security layers like pod security admission, an attacker can escalate their privileges by, for instance, creating a privileged pod and taking over the worker node. This is not an issue specific to Amazon EKS; the built-in Kubernetes roles suffer the same flaw.
+To work around these limitations, it's a good idea to use custom permissions through a Kubernetes group when granting non-administrator, non-read-only permissions.
+This release also introduces new condition keys.
+In particular, you can use:
+
+eks:principalArn, eks:kubernetesGroups, eks:username, eks:accessEntryType when managing access entries (CreateAccessEntry, UpdateAccessEntry, DeleteAccessEntry)
+eks:policyArn, eks:namespaces, eks:accessScope when associating access policies (AssociateAccessPolicy)
+This enables you to craft relatively advanced IAM policies. For instance, the policy below grants read-only access at the namespace level, only to IAM roles in the current account 012345678901:
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "eks:AssociateAccessPolicy",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "eks:policyArn": "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy",
+          "eks:accessScope": "namespace"
+        },
+        "ForAllValues:StringEquals": {
+          "eks:namespaces": "some-namespace"
+        }
+      }
+    }
+  ]
+}
+aws-auth
+The way Cluster Access Management interacts with the aws-auth ConfigMap depends on a cluster-wide setting called the authentication mode.
+By default, the authentication mode is set to CONFIG_MAP when creating a new cluster through the EKS API or an AWS SDK. In this case, the control plane only takes the aws-auth ConfigMap into account, and you cannot create access entries in the cluster. If you create an EKS cluster through the AWS console, the authentication mode is set to API_AND_CONFIG_MAP by default.
+When you set the authentication mode to API_AND_CONFIG_MAP, permissions granted in both are taken into account. When an AWS principal is referenced both in an access entry and in the aws-auth ConfigMap, only permissions granted through the access entry are considered, and the aws-auth ConfigMap is ignored. For instance, if an access entry grants a principal read-only access to the cluster and the aws-auth ConfigMap grants it administrator access, the resulting privileges are read-only ones exclusively.
+Finally, the authentication mode API totally ignores the aws-auth ConfigMap and only takes into account access entries.
+It's worth noting that switching across these authentication modes is a one-way operation—i.e., you can switch from CONFIG_MAP to API_AND_CONFIG_MAP or API, and from API_AND_CONFIG_MAP to API, but not the opposite.
+Management of default cluster administrators
+eks:CreateCluster now accepts a new argument bootstrapClusterCreatorAdminPermissions. This argument is set to true by default, meaning that AWS still provisions administrator access to the principal who creates the cluster.
+However, with this release, we're also now able to see and manage access for anyone who has access to an EKS cluster, including previous "shadow administrators" of existing EKS clusters. "Shadow administrators" now explicitly appear as an access entry of the cluster.
+📖 Common operations and recipes
+With the concepts in mind, let's have a look at common threat detection use cases for the new EKS Cluster Access Management features. All the recipes below assume that your cluster is configured to use the API_AND_CONFIG_MAP or API authentication mode, that you can enable using the command below (remember that this is a one-way operation):
+aws eks update-cluster-config \
+--name eks-cluster  \
+--access-config authenticationMode=API_AND_CONFIG_MAP
+Granting access to an EKS cluster through managed access policies
+To start with a practical example, let’s say you’re authenticated against AWS and wish to grant administrator access to a role in our account to an EKS cluster, through the managed access policy AmazonEKSClusterAdminPolicy.
+First, you can create an access entry for that cluster and principal:
+aws eks create-access-entry \
+  --cluster-name eks-cluster \
+  --principal-arn "arn:aws:iam::0123456789012:role/eks-admin"
+Then, you can associate the managed access policy to this access entry:
+aws eks associate-access-policy \
+  --cluster-name eks-cluster \
+  --principal-arn "arn:aws:iam::0123456789012:role/eks-admin" \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy \
+  --access-scope '{"type": "cluster"}
+Note that each new principal you grant access to the cluster first needs their own access entry, which you can create using aws eks create-access-entry.
+Granting access to an EKS cluster with custom permissions through a Kubernetes group
+When more granular permissions are required, you can also map access entries to Kubernetes groups. For instance, you can create a cluster role that allows listing pods, viewing their logs, and reading config maps:
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-and-config-viewer
+rules:
+  - apiGroups: ['']
+    resources: ['pods', 'pods/log', 'configmaps']
+    verbs: ['list', 'get', 'watch']
+You can then map this role to a Kubernetes group:
+# Note: The Kubernetes group does not need to "exist" before running this command
+kubectl create clusterrolebinding pod-and-config-viewer \
+  --clusterrole=pod-and-config-viewer \
+  --group=pod-and-config-viewers
+To grant these permissions to an AWS IAM role eks-pod-viewer, you can create an access entry in the cluster and associate this Kubernetes group to it:
+aws eks create-access-entry \
+  --cluster-name eks-cluster \
+  --principal-arn "arn:aws:iam::0123456789012:role/eks-pod-viewer" \
+  --kubernetes-group pod-and-config-viewers
+Using the AWS Console to grant access to an EKS cluster
+First, navigate to the Access tab of your cluster. Then, update the access configuration mode to EKS API and ConfigMap.
+[
+
+
+
+You can now manage access entries from the IAM access entries section of the Access tab.
+Understanding the level of access an AWS principal has on an EKS cluster
+For this use case, start by determining if there is an access entry for that AWS principal. If so, you then need to determine if it maps to any Kubernetes groups.
+aws eks describe-access-entry \
+  --cluster-name eks-cluster \
+  --principal-arn "arn:aws:iam::0123456789012:role/some-role"
+{
+  "accessEntry": {
+    "clusterName": "eks-cluster",
+    "principalArn": "arn:aws:iam::012345678901:role/some-role",
+    "kubernetesGroups": [
+      "pod-viewers"
+    ],
+    "accessEntryArn": "arn:aws:eks:us-west-2:012345678901:accessEntry/eks-private-beta-cluster/role/012345678901/some-role/52c446c1-edfb-970c-9918-440dff016168",
+    "createdAt": "2023-06-05T23:43:29.163000+02:00",
+    "modifiedAt": "2023-06-05T23:43:34.273000+02:00",
+    "tags": {},
+    "username": "arn:aws:sts::012345678901:assumed-role/some-role/{{SessionName}}",
+    "type": "STANDARD"
+  }
+}
+Then, you can list the managed access policies for that principal:
+aws eks list-associated-access-policies \
+  --cluster-name eks-cluster \
+  --principal-arn "arn:aws:iam::0123456789012:role/some-role"
+{
+  "clusterName": "eks-cluster",
+  "principalArn": "arn:aws:iam::012345678901:role/some-role",
+  "associatedAccessPolicies": [
+    {
+      "policyArn": "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy",
+      "accessScope": {
+        "type": "cluster",
+        "namespaces": []
+      },
+      "associatedAt": "2023-06-05T23:43:48.786000+02:00",
+      "modifiedAt": "2023-06-05T23:43:48.786000+02:00"
+    }
+  ]
+}
+Here, the some-role role is mapped both to the pod-viewers Kubernetes group and the AmazonEKSViewPolicy access policy. In this case, as mentioned earlier, effective permissions are the union of both mechanisms.
+Removing cluster access to the original identity who created the cluster
+EKS previously did not support removing cluster administrator access to the AWS identity that originally created the cluster.
+When the cluster uses one of the API_AND_CONFIG_MAP or API authentication modes, the EKS API now returns it as a standard access entry that we can easily remove. For instance, we see in the cluster below that the ci-cd role has cluster administrator access:
+aws eks list-access-entries --cluster-name eks-cluster
+{
+  "accessEntries": ["arn:aws:iam::012345678901:role/ci-cd"]
+}
+aws eks list-associated-access-policies \
+--cluster-name eks-cluster \
+--principal-arn arn:aws:iam::012345678901:role/ci-cd
+{
+  "clusterName": "eks-cluster",
+  "principalArn": "arn:aws:iam::012345678901:role/ci-cd",
+  "associatedAccessPolicies": [
+    {
+      "policyArn": "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy",
+      "accessScope": {
+        "type": "cluster",
+        "namespaces": []
+      },
+      "associatedAt": "2023-11-10T09:28:36.588000+01:00",
+      "modifiedAt": "2023-11-10T09:28:36.588000+01:00"
+    }
+  ]
+}
+We can use DeleteAccessEntry to completely remove access to the cluster for this role:
+aws eks delete-access-entry \
+--cluster-name eks-cluster \
+--principal-arn arn:aws:iam::012345678901:role/ci-cd
+Migrating entries from the aws-auth ConfigMap to access entries
+AWS plans to deprecate the aws-auth ConfigMap in a future EKS version. Consequently, it's a good idea to start migrating permissions granted through the ConfigMap to access entries.
+In order to do that, start by making sure your cluster uses the API_AND_CONFIG_MAP authentication mode:
+aws eks update-cluster-config \
+--name eks-cluster \
+--access-config authenticationMode=API_AND_CONFIG_MAP
+Then, create an access entry for each principal that's currently mapped in the aws-auth ConfigMap. For instance, if your ConfigMap contains the following:
+mapRoles: |
+  # …
+
+  - rolearn: arn:aws:iam::012345678901:role/admin
+    groups: [system:masters]
+    username: "admin:"
+
+  - rolearn: arn:aws:iam::012345678901:role/developer
+    groups: [developers]
+    username: "developer:"
+You would then create the following access entries:
+# Grant admin access to the 'admin' role
+aws eks create-access-entry \
+--cluster-name eks-cluster \
+--principal-arn "arn:aws:iam::0123456789012:role/admin" \
+
+ aws eks associate-access-policy \
+--cluster-name eks-cluster \
+--principal-arn "arn:aws:iam::0123456789012:role/admin" \
+--policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy \
+--access-scope '{"type": "cluster"}
+
+# Map the 'developers' K8s group to the 'developer' role
+aws eks create-access-entry \
+--cluster-name eks-cluster \
+--principal-arn "arn:aws:iam::0123456789012:role/developer" \
+--kubernetes-group developers
+Then, you can disable aws-auth ConfigMap support in your cluster (note that this is a one-way operation that cannot be reverted):
+aws eks update-cluster-config \
+--name eks-cluster \
+--access-config authenticationMode=API
+See also the related AWS documentation.
+Threat detection opportunities
+With any feature comes additional attack surface and the potential for abuse. Here are a few ways you can use CloudTrail logs to identify if an attacker is using the new Cluster Access Management feature to carry out malicious activity in EKS.
+AWS principal granted administrator access to a cluster
+You can use the AssociateAccessPolicy CloudTrail event, filtering on requestParameters.policyArn to identify privileged managed access policies assignments. Below is a sample event, shortened for clarity:
+{
+  "eventSource": "eks.amazonaws.com",
+  "eventName": "AssociateAccessPolicy",
+  "recipientAccountId": "012345678901",
+  "requestParameters": {
+    "policyArn": "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy",
+    "accessScope": {
+      "type": "cluster"
+    },
+    "name": "eks-cluster",
+    "principalArn": "arn%3Aaws%3Aiam%3A%3A012345678901%3Arole%2Fsome-role"
+  }
+}
+Since privileges can also be granted through Kubernetes groups using CreateAccessEntry or UpdateAccessEntry, you also need to search for the associated CloudTrail events. These look very similar to each other. Here is an example, shortened for clarity:
+{
+  "eventSource": "eks.amazonaws.com",
+  "eventName": "CreateAccessEntry",
+  "recipientAccountId": "012345678901",
+  "requestParameters": {
+    "kubernetesGroups": [
+      "cluster-admin"
+    ],
+    "clientRequestToken": "e27859b5-9e9f-4b91-a405-c0521693b678",
+    "name": "eks-cluster",
+    "principalArn": "arn:aws:iam::012345678901:role/some-role"
+  }
+}
+AWS principal granted access to several clusters in a short amount of time
+An attacker compromising an AWS account would likely attempt to access all the EKS clusters they can find. As part of this process, they might grant themselves access to the clusters. Consequently, it’s worthwhile to alert when a specific AWS principal is granted any type of access to several EKS clusters in a short amount of time.
+To achieve this, we can leverage the CreateAccessEntry, UpdateAccessEntry and AssociateAccessPolicy CloudTrail events, aggregating on requestParameters.principalArn and alerting when the cardinality of (recipientAccountId, requestParameters.clusterName) goes above a certain threshold.
+External AWS principal granted access to a cluster
+Interestingly, you can create access entries for principals outside of your AWS account. While there are legitimate use cases for this capability, it’s typically best to have visibility into cross-account access.
+We can use the CreateAccessEntry CloudTrail event, alerting when requestParameters.principalArn is outside of the current AWS account, indicated by the value of recipientAccountId.
+How Datadog can help
+We released three Cloud SIEM rules relevant to this new AWS feature:
+
+AWS principal assigned administrative privileges in an EKS cluster
+AWS principal added to multiple EKS clusters
+AWS principal granted access to a EKS cluster then removed
+Conclusion
+The capabilities in EKS Cluster Access Management address many of the previous pain points with IAM in EKS. Still, administrators will want to monitor for signs of malicious activity associated with this new feature.
+AWS recommends moving everything that's in your aws-auth ConfigMap to access entries and access policy associations, as they plan to deprecate it in a future EKS version. The new cluster access management features also allow you to have more control over who has access to your cluster, and makes it possible to consume this information through AWS APIs rather than Kubernetes API as previously.
+system:masters
+aws-auth
+kube-system
+developers
+developer
+aws-auth
+aws eks list-access-policies
+AmazonEKSClusterAdminPolicy
+cluster-admin
+AmazonEKSAdminPolicy
+admin
+AmazonEKSEditPolicy
+edit
+AmazonEKSViewPolicy
+view
+ClusterRole
+Role
+AmazonEKSAdminPolicy
+AmazonEKSClusterAdminPolicy
+AmazonEKSEditPolicy
+eks:principalArn
+eks:kubernetesGroups
+eks:username
+eks:accessEntryType
+CreateAccessEntry
+UpdateAccessEntry
+DeleteAccessEntry
+eks:policyArn
+eks:namespaces
+eks:accessScope
+AssociateAccessPolicy
+aws-auth
+CONFIG_MAP
+aws-auth
+API_AND_CONFIG_MAP
+API_AND_CONFIG_MAP
+aws-auth
+aws-auth
+aws-auth
+API
+aws-auth
+CONFIG_MAP
+API_AND_CONFIG_MAP
+API
+API_AND_CONFIG_MAP
+API
+eks:CreateCluster
+bootstrapClusterCreatorAdminPermissions
+true
+API_AND_CONFIG_MAP
+API
+AmazonEKSClusterAdminPolicy
+aws eks create-access-entry
+some-role
+pod-viewers
+AmazonEKSViewPolicy
+API_AND_CONFIG_MAP
+API
+ci-cd
+DeleteAccessEntry
+aws-auth
+aws-auth
+API_AND_CONFIG_MAP
+aws-auth
+aws-auth
+AssociateAccessPolicy
+requestParameters.policyArn
+CreateAccessEntry
+UpdateAccessEntry
+CreateAccessEntry
+UpdateAccessEntry
+AssociateAccessPolicy
+requestParameters.principalArn
+(recipientAccountId, requestParameters.clusterName)
+CreateAccessEntry
+requestParameters.principalArn
+recipientAccountId
+aws-auth

@@ -1,0 +1,238 @@
+
+This research was presented at fwd:cloudsec Europe on September 17, 2024. You can find the slides here. The recording of the talk will be available in the coming days.
+Key points
+
+Entra ID Administrative Units (AUs) allow scoped role assignment of an Entra ID role over a subset of Entra ID users, groups, and devices, instead of over the whole tenant.
+AUs contain security-relevant features that can assist in hardening an Entra ID tenant.
+Restricted management AUs allow only users with scoped role assignments over that specific AU to modify its members. Tenant-level roles cannot modify AU members.
+HiddenMembership AUs hide their membership from all users, unless they are a member of the AU or have a specific role assignment.
+An attacker with privileged access can use these features to maintain concealed privileges over Entra ID objects through hidden membership AUs, or lock down attacker-controlled accounts through restricted management AUs.
+We do not believe these techniques represent a vulnerability or misconfiguration in Entra ID or the AU feature, as it constitutes "by design" use of Entra ID AUs.
+We have implemented support for emulating these attack techniques in Stratus Red Team.
+Introduction
+As security researchers, one of our team's objectives is to explore, identify, and document new methods to attack cloud resources. During recent research into Microsoft Entra ID, the concept of administrative units (AUs) caught our attention as a helpful feature that also may have unexpected security implications. AUs allow for scoped role assignment within Entra ID. This post will cover security considerations you may want to take related to potential AU misuse in your tenant.
+Specifically, different AU features can present opportunities for privileged persistence by an attacker. "Restricted management" AUs exist to protect sensitive accounts, but they can be used to make an attacker-controlled account difficult to remediate. "Hidden membership" AUs allow for concealment of the membership of sensitive AUs, and they can also be used to conceal the scope of assigned permissions from a reviewing security analyst. These conditions are reversible by a Global Administrator.
+In this post, we'll cover the technical background you need to understand AUs, how they can be used and abused, and details of the AU restricted management and hidden membership features.
+If you're already familiar with AUs, feel free to skip ahead to "Identifying misuse scenarios" below.
+Note: This article is not a vulnerability disclosure. We do not believe use of Entra ID AUs in this way constitutes a security vulnerability or design flaw in Entra ID. Many useful features can cause damage with malicious intent or misuse. The focus of this post is to document these possible methods of misuse and prepare an organization to defend against them.
+Background: What are Entra ID Administrative Units?
+Microsoft states that, "administrative units restrict permissions in a role to any portion of your organization that you define." Expanding on this, Administrative Units (AUs) allow assignment of Entra ID roles like Authentication Administrator or User Administrator across specified tenant users, devices, and/or groups. This allows permission assignment analogous to that of Organizational Units (OUs) in Active Directory.
+Using an AU in an Entra ID role assignment is similar to providing a scope of subscriptions for role assignments in Azure RBAC. Entra ID roles refer to roles assigned to manage objects and settings inside an Entra ID tenant. Azure RBAC roles refer to roles assigned to manage Azure resources such as compute, storage, and subscriptions.
+This is what makes AUs so helpful; you can use AUs to take a least-privilege approach and specify which users an Entra ID role assignment applies to, limiting the blast radius of a possible mistake or malicious action. Without scoping a role via AUs, a user assigned that role in Entra ID will be able to use the role against all users in the Entra ID tenant, from interns to executives.
+An example of a standard role assignment versus a scoped AU role assignment is shown below:
+When a role is assigned over an AU, this is referred to as a scoped role assignment.
+Creating AUs
+AUs can be created through the Azure Portal's "Administrative Units" blade, which uses the Graph API. The complete details of this process are provided by Microsoft in "Create or delete administrative units". Creation and management of AUs requires the Global Administrator or Privileged Role Administrator role.
+You can also create AUs using the Azure CLI, which can facilitate calling Microsoft Graph API endpoints:
+az rest \
+  --method post \
+  --url https://graph.microsoft.com/v1.0/directory/administrativeUnits \
+  --body '{"displayName": "Sample Administrative Unit"}'
+Additional AU properties
+In addition to enabling scoped Entra ID permissions assignment, AUs can be created with restricted management (isMemberManagementRestricted) and hidden membership (HiddenMembership) features to protect which users can modify sensitive users and obscure membership of an AU, respectively. These settings can only be configured during AU creation.
+Restricted management AUs (in preview as of September 2024) were announced in June 2023 to provide extra protection for sensitive accounts. These AUs allow only specified administrators with scoped role assignment over that AU to take action on this group of users, preventing any user not granted a scoped role assignment over the impacted AU from making a change. An illustration of this behavior, where a scoped User Administrator role is permitted to manage a user while a tenant-level Global Administrator role is not, is shown below.
+Restricted management AUs can be created in the AU blade using the "Restricted management administrative unit" flag during AU creation.
+Once the restricted management AU has been created, any user (including a Global Administrator) without a scoped role assignment for this AU will see the following message when trying to modify an account in the AU:
+Additionally, attempts to reset this user's password will fail:
+Menu options to Delete, Edit properties, and Revoke sessions will also be deactivated.
+Accounts in a restricted management AU are thus protected from modification by tenant-wide administrators, unless they're also explicitly administrators of that AU.
+Hidden membership AUs conceal their membership from all users except those inside the AU (its members) and users with certain administrative roles:
+
+Authentication Administrator
+Global Administrator
+Global Reader (Note: Privileged role, different from Directory Reader)
+Groups Administrator
+Helpdesk Administrator
+Privileged Authentication Administrator
+SharePoint Administrator
+Teams Administrator
+User Administrator
+Additional detail on the methodology we used to find this list is available in the Appendix.
+While several privileged roles are included in this list, the number of users with these roles is still low. The majority of these roles are considered privileged by Microsoft and are likely not assigned to security team members. Notably, at the time of this writing, roles such as Security Administrator, Security Operator, and Security Reader were unable to review the membership of these AUs. Additionally, as of the time of this writing, no Microsoft Graph permissions were identified that can view hidden membership AU members.
+While other users can view the role assignments associated with this AU, they cannot see the AU members the role assignment would impact. An example of this is shown below:
+Hidden membership AUs are documented under the "administrativeUnit" object in Graph, and may relate to role assignments that need to be handled with discretion.
+The hidden membership parameter is not displayed as an option when creating AUs in the Entra ID Portal, but it can be provided in the "visibility" parameter of the "administrativeUnits" object in a request to the Microsoft Graph API. This AU can be created using the Azure CLI:
+az rest \
+  --method post \
+  --url https://graph.microsoft.com/v1.0/directory/administrativeUnits \
+  --body '{"displayName": "Hidden AU Administrative Unit", "isMemberManagementRestricted":false, "visibility": "HiddenMembership"}'
+After creating the hidden membership AU, users who do not have one of the above mentioned roles or are not a member of the AU will see an empty list:
+In addition, no warning or property is displayed in the Azure Portal to indicate to the user that this is a hidden membership AU.
+Abusing administrative units for privileged persistence
+Now that we've looked at what AUs are and walked through some specific features that are relevant to AU security, let's shift to a scenario where an attacker with privileged access to an Entra ID tenant may want to protect an additional backdoor account. This could come in useful if their current privileged foothold is discovered, or it could allow them to spread out suspicious operations across a secondary account.
+In this scenario, AUs may present two especially tempting configurations: one to protect backdoor accounts, and another to obfuscate permissions grants.
+Attack prerequisites
+In order to execute the type of AU abuse we will be discussing, an attacker needs to have Global Administrator or Privileged Role Administrator roles. While this level of administrative access is a challenging prerequisite, attacks leveraging IdP platforms for privileged persistence have been on the rise in recent years as attackers look to persist in cloud and hybrid identity environments. Some examples of this in Entra ID are Golden SAML and Silver SAML attacks first documented by CyberArk and Semperis respectively, and recent documentation of misconfiguring Federated Credentials by Dirk-jan Mollema.
+Consequently, privileged persistence techniques can be valuable for attackers who want to stay under the radar and survive an incident response.
+Scenario 1: Sticky backdoor account through restricted AU
+To recap, users in restricted management AUs are protected from tenant-wide administrators making modifications to them. Only administrators assigned permissions over that restricted management AU can use their assigned permissions over users in it.
+A consequence of this feature is that it allows an attacker to create a restricted management AU, then make a backdoor account under their control a member of this AU. Once placed in the AU, the backdoor account cannot be directly modified or removed by anyone, including tenant-wide Global Administrators. To modify the account, a Global Administrator would first need to:
+
+Understand why the backdoor user cannot be removed / modified
+Remove the backdoor user from the AU
+Only then, disable or remove the user
+Even after removing a user from the AU, there is a five minute delay before the user can be removed or modified. This would likely add to the confusion of the scenario.
+We can reproduce this scenario using Stratus Red Team's ​​Create Sticky Backdoor User Through Restricted Management AU technique, after performing az login as a Global Administrator account:
+The result of this configuration is a restricted management AU with a single "backdoor account" member:
+Once added, tenant-level administrators cannot modify users placed within this AU. Any attempt to modify the backdoor account (password reset, delete, revoke sessions, etc.) by a tenant-level administrator results in a permissions failure.
+The below view shows a Global Administrator account with tenant-level role assignment with no option to delete or disable the backdoor user:
+The user will also be unable to perform the "Reset password" action.
+To clean up the scenario and make sure you don't leave any resources behind, you can use stratus revert entra-id.persistence.restricted-au. Due to the delay enforced by Entra ID, you'll need to wait for 5 minutes before running stratus cleanup entra-id.persistence.restricted-au.
+Scenario 2: Covert role assignment through hidden membership AU
+Members of hidden membership AUs cannot be viewed by any users except those with certain high-privilege roles (See "Hidden membership AUs" above) and users who are a direct member of those AUs. This allows an attacker to grant concealed permissions assignments over sensitive accounts. The result of this configuration is that a security analyst reviewing this AU with Entra ID security roles (e.g., Security Administrator, Security Operator) cannot see the users impacted by this role assignment.
+During this scenario, an attacker would create a hidden membership AU and add target user(s) to it as members. They would then create a scoped role assignment such as Privileged Authentication Administrator or User Administrator to the backdoor account over the scope of this new AU.
+This configuration can be emulated in Stratus Red Team with the below command, after performing az login as a Global Administrator account:
+The result of this configuration is a hidden membership AU with a scoped role assignment of Privileged Authentication Administrator to a backdoor account:
+Once configured, only specific roles can view AU members. As an example, below is an image of a Global Administrator (left) viewing AU membership, while a security analyst without specified role assignments (right) is unable to view the same AU's membership:
+Due to the scoped role assignment granted to the backdoor user over this AU, the backdoor user can then modify passwords and clear MFA methods for users in the AU to take over the target user account. When a security analyst attempts to investigate the scope of the backdoor user's role assignment, they will not be able to view AU members. The AU visibility setting cannot be reviewed in the portal, making the AU appear empty. This makes it difficult to understand how the backdoor account has permissions to take over the target user account.
+You can clean up the scenario using stratus cleanup entra-id.persistence.hidden-au.
+Combined impact: Sticky backdoor account with concealed permissions
+Combining these two scenarios, an attacker with existing privileged access (Global Administrator or Privileged Role Administrator) to an Entra ID tenant can combine both techniques to:
+
+Create an account that can't directly be deactivated or deleted, by placing the account in a restricted management AU (Scenario 1)
+Compound the impact of this account by granting a "hidden" role to modify passwords and MFA methods (Privileged Authentication Administrator) for a hidden membership AU containing key tenant administrators or executives (Scenario 2)
+Remediation
+To remediate the effects of a malicious hidden membership or restricted AU in an environment, a Global Administrator or Privileged Role Administrator needs to delete the malicious AU.
+The deletion process is shown in the Azure Portal below.
+The malicious account can then be disabled or deleted. In the case of a restricted membership AU, a delay of approximately five minutes will be required before the account can be deleted.
+Additionally, security team members would need to review the Entra ID tenant's audit logs to understand which users had been placed in the AU during the period of attack and may have been impacted.
+Finding an administrator with the correct role to make this change may take time, adding to the response process. Review "Security considerations" below for further details on preparing to detect and respond to this activity with minimum delay.
+Detecting the abuse of Administrative Units
+Next, we'll cover what to look for in your environment to monitor for suspicious AU usage. Alerting around use of AUs and preparing remediation playbooks will help ensure that AUs are not used maliciously without detection in your environment.
+Logging for AU modifications can be found in the Entra ID audit logs, under the Audit Logs blade (https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/Audit):
+It's a good idea to monitor AU activities and scoped role assignments in case they become active in the future, even if AUs are not currently in use in your environment.
+Detections around these logs have been implemented for Datadog SIEM customers, with additional details available in "How Datadog Can Help".
+Administrative unit creation, modification, and deletion
+We recommend monitoring AdministrativeUnit activities related to AU creation and modification:
+
+Service: Core Directory
+Category: AdministrativeUnit
+Activities (Up-to-date list here):Add administrative unit
+Add member to administrative unit
+Add member to restricted management administrative unit
+Bulk add members to administrative unit
+Update administrative unit
+copy
+Notably, activities such as creation of a restricted membership AU may create only AdministrativeUnit events. This makes monitoring of all AU creation and modifications key for detecting suspicious AU activity.
+Logs for "Add member" will reveal any users added to hidden membership AUs, which can be useful for security team members in the case that they are unable to view AU membership directly.
+Dynamic AUs: Dynamic AUs that add and remove users based on a condition (e.g., user country, department, role, etc.) may generate high-volume Add/Remove member actions. These actions are created by the following identity:
+
+Type: Application
+Display Name: Microsoft Approval Management
+Application ID: 65d91a3d-ab74-42e6-8a2f-0add61688c74
+If your tenant uses dynamic AUs, this may cause AU alerting to become noisy. Consider tuning out Add/Remove member actions from this identity.
+Administrative unit role assignments
+We recommend monitoring RoleManagement activities related to scoped role assignments. These assignments will always include an associated AU scope:
+
+Service: Core Directory
+Category: RoleManagement
+Activities: (Up-to-date list here):Add scoped member to role
+Add member to role scoped over Restricted Management Administrative Unit
+copy
+Additional security considerations
+Along with detecting suspicious AU behavior, a security team may want to take additional actions to ensure they are prepared to respond to malicious AU activity. Let's look at some ways to protect against AU abuse, and decide if AU usage is right for your environment.
+Document AU investigation for analysts
+A security analyst may incorrectly assume that empty AUs do not have any members, as the Azure Portal does not indicate when an AU has hidden membership. This may cause the analyst to incorrectly assume that no users are impacted by a suspicious role assignment.
+Consider training analysts to always double-check this when investigating AUs. All scoped role assignments over an AU that appears empty should be reviewed in logs to see if any members were added to an AU, or reviewed with a Global Administrator to verify if the AU has hidden membership.
+Create an AU remediation playbook
+AUs can only be managed by the Privileged Role Administrator or Global Administrator roles. Any recovery from AU misuse will require close coordination with these administrators, who may not be familiar with AU management.
+Consider creating a playbook to work with these administrators during an incident to:
+
+Review membership of the identified suspicious AU and confirm it matches membership the security team has seen in Entra ID (Administrative Units → [AU Name] → Users)
+Review scoped role assignments for the AU (Administrative Units → [AU Name] → Roles and administrators)
+
+Delete the AU if it is confirmed to be a part of attacker activities (Administrative Units → Click checkbox next to AU → Delete). Note that deleting an AU will not delete any users from the tenant. If the AU is required for daily operations, you can also remove the malicious user from AU membership (Administrative Units → Click AU name → Click user → Remove member). If it also uses a Dynamic filter, modify the filter to remove the user (Administrative Units → Click AU name → Dynamic membership rules → Add expression → "And" "ObjectId" "Not Equals" "<backdoor id>" → Save)
+
+
+Reviewing AU-scoped role assignments (click to enlarge).
+Contain any accounts associated with malicious AU creation and role assignments.
+Creating scoped role assignments with AUs
+AUs offer fantastic role assignment features. While this post focused largely on misuse of AUs, their proper use still deserves attention!
+Note: Scoped role assignment over an AU requires Entra ID Premium P1 licensing for the administrative account the role is granted to.
+Standard AUs are a perfect way to create limited-scope administrators within an Entra ID tenant through scoped role assignments.
+This is helpful for tasks such as segmenting helpdesk role assignments. Used consistently, scoped assignments like this can reduce the blast radius of impacted users during a compromise of an administrative account.
+Microsoft provides additional details on standard AUs in "Administrative units in Microsoft Entra ID".
+Restricted management AUs are helpful for executive accounts, sensitive servers, or users in countries or departments with specific requirements on who can manage their accounts.
+By placing these sensitive objects in a restricted management AU, management of these accounts can be locked down to a limited set of administrators.
+Microsoft provides additional details on using these AUs in "Restricted management administrative units in Microsoft Entra ID".
+How Datadog can help
+For customers using Datadog Cloud SIEM, the following detections have been added to monitor suspicious AU and scoped role assignment activities:
+
+Azure user added to restricted management administrative unit
+Azure user granted scoped role assignment over administrative unit
+Azure user removed from restricted administrative unit
+Azure restricted management administrative unit created
+Azure administrative unit created
+Azure administrative unit modified
+Conclusion
+In this post, we've described Entra ID Administrative Units (AUs) and seen that while they can be used for hardening, an attacker could also leverage them for privileged persistence. This use of AUs by design could lead to unexpected restricted accounts, or concealed permissions.
+Exploring how these features function under the interface of the Azure Portal can also provide a deeper understanding of how the platforms we rely on work at a deeper level.
+We hope you learned something from this! If nothing else, it's our hope that this post provided a good look into how AUs work, their use and potential for misuse, and how they might function in your environment.
+We're eager to hear from you! If you have any questions, thoughts or suggestions, shoot us a message at securitylabs@datadoghq.com or open an issue. You can also subscribe to our newsletter or RSS feed!
+Appendix
+As of this writing, the list of Entra ID roles and Microsoft Graph permissions that can list members of a hidden membership AU (see Scenario #2) was not available as a part of Microsoft's public AU documentation. In order to determine which roles could view members of a hidden membership AU, we performed a series of automated tests using Terraform. Results of this testing identified that nine Entra ID roles and zero Microsoft Graph permissions could view hidden membership AU members.
+Entra ID and Microsoft Graph role testing methodology
+We created two separate Terraform test cases to achieve the following steps for each category of permissions:
+
+Fetch all permissions or roles of an applicable permission category from the Graph API:
+
+a. Microsoft Graph permission
+
+b. Entra ID built-in role
+Create one Application Registration and Service Principal for each applicable permission
+Assign permissions through creating one of the following permissions assignments:
+
+a. One Entra ID role to each applicable Service Principal
+
+b. One Microsoft Graph permission to each applicable Application Registration
+Fetch Microsoft Graph tokens for all created identities
+Test if each identity can view a hidden membership AU's members through the Microsoft Graph API and save the HTTP response received as a part of this
+Results
+Based on this testing during the week of August 26, 2024, the following nine Entra ID roles were identified as being able to list a hidden membership AU's members:
+
+Authentication Administrator
+Global Administrator
+Global Reader (Note: Privileged role, different from Directory Reader)
+Groups Administrator
+Helpdesk Administrator
+Privileged Authentication Administrator
+SharePoint Administrator
+Teams Administrator
+User Administrator
+We could not easily identify a source Entra ID permission for each of these role templates as several permissions relating to directory users and AUs cannot be assigned to Entra ID custom role templates for more granular testing.
+However, the following permissions likely granted the ability to review hidden membership AU members for the associated roles:
+
+microsoft.directory/administrativeUnits/allProperties/allTasks: Global Administrator, Privileged Role Administrator
+microsoft.directory/administrativeUnits/allProperties/read: Global Reader
+We could not identify any Microsoft Graph permissions that could view hidden membership AU members:
+The AdministrativeUnit.Read.All, Directory.Read.All, AdministrativeUnit.ReadWrite.All, and Directory.ReadWrite.All permissions allowed access to the AU object, but did not list hidden membership AU members.
+isMemberManagementRestricted
+HiddenMembership
+az login
+stratus revert entra-id.persistence.restricted-au
+stratus cleanup entra-id.persistence.restricted-au
+az login
+stratus cleanup entra-id.persistence.hidden-au
+Core Directory
+AdministrativeUnit
+Add administrative unit
+Add member to administrative unit
+Add member to restricted management administrative unit
+Bulk add members to administrative unit
+Update administrative unit
+Application
+Microsoft Approval Management
+65d91a3d-ab74-42e6-8a2f-0add61688c74
+Core Directory
+RoleManagement
+Add scoped member to role
+Add member to role scoped over Restricted Management Administrative Unit
+Delete the AU if it is confirmed to be a part of attacker activities (Administrative Units → Click checkbox next to AU → Delete). Note that deleting an AU will not delete any users from the tenant. If the AU is required for daily operations, you can also remove the malicious user from AU membership (Administrative Units → Click AU name → Click user → Remove member). If it also uses a Dynamic filter, modify the filter to remove the user (Administrative Units → Click AU name → Dynamic membership rules → Add expression → "And" "ObjectId" "Not Equals" "<backdoor id>" → Save)
+<backdoor id>
+Contain any accounts associated with malicious AU creation and role assignments.
+microsoft.directory/administrativeUnits/allProperties/allTasks
+microsoft.directory/administrativeUnits/allProperties/read
+AdministrativeUnit.Read.All
+Directory.Read.All
+AdministrativeUnit.ReadWrite.All
+Directory.ReadWrite.All

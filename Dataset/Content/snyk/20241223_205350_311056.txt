@@ -1,0 +1,83 @@
+
+This supply chain series centers on the lessons learned from OpenSSL and what you need to consider when enhancing your supply chain security. While this series will focus on OpenSSL and relevant libraries, we'll also consider vulnerabilities across the board. In the first installment, we covered everything you need to know about where to look for vulnerable libraries. Let’s dive into part two and discuss how to find — and more importantly, fix — vulnerabilities in your supply chain.
+How to find vulnerabilities in your supply chain
+The methods you use to look for offending libraries or packages depends on the areas you're inspecting. Hosts and VMs use different mechanisms than containers and code. Today, we'll be focusing on the software side of things — the containers and code.
+Having a central view of your entire ecosystem can help answer the "where are we impacted?" part of the question. This central view would provide visibility into your entire application portfolio. It should include all of your applications and the components that make them up — the code, containers that you deploy them in, as well as all of their open-source dependencies. This "central view" would effectively store a software bill of materials (SBOM) for each of your software components, providing an index over all of the applications and containers that you're running or storing.
+Source code and open source libraries
+A central view is great, but, as they say, hindsight is 20/20. It's entirely possible the OpenSSL announcement hit before you had a chance to set up an inventory (or even before you knew centralizing your inventory was an option). Let's take a look at things to consider and places to look if you don't yet have this centralized. Modern applications leverage open source components and libraries — 80% or more of the code in your applications might be out of your direct control. So, determining where these libraries and packages are used is a big part of the problem.
+Finding the libraries that get imported by your custom applications and projects is more complicated than looking on physical hosts. You can do a brute-force scan for "openssl" in all of the occurrences of requirements.txt under your project root directories, but that's likely not going to find much. Not only is it not likely that any single host has all of the source code from all of your projects on it, it's entirely possible (or even probable) that if your application(s) rely on OpenSSL, they do so by the transitive properties that we touched on earlier.
+Ideally, you'll have a software bill of materials (SBOM) for each of your applications which would allow you to quickly determine risk, but they're not yet pervasive. Several tools allow you to generate an SBOM for your applications. For example, the Snyk provides an API and CLI command, snyk sbom, which generates a software bill of materials in SPDX or CycloneDX formats. But manually checking each of your source code repositories isn’t practical. Rather than just scanning your source code on your local machine, many solutions allow you to scan your source code where it lives — in the repo's. Snyk, for example, allows you to add the repositories you want to monitor by simply linking your accounts and selecting which repos to add.
+When repositories are linked in this manner they can be scanned on a regular basis. This helps with finding newly discovered vulnerabilities that were already lurking in your projects' dependencies (for example, the OpenSSL vulnerabilities, which we didn't know about yesterday), in addition to any vulnerabilities that may have been added by developers.
+Container images
+Container images are also part of your software supply chain. Not only do they serve as engines for your workloads, they also bundle things outside of your code and its dependencies. Several tools exist for scanning container images for composition, packages, and vulnerabilities — including Snyk Container, which offers both paid and free tiers, IDE integrations, a command line interface, and supports automation in your CI/CD pipelines. There are also several open source projects — such as Syft, Grype, trivy, as well as an unofficial "docker index" tool — that can check for vulnerabilities. The docker-index tool can be used from the command line to find CVEs. While the tool itself is currently unsigned, you can execute it in a container (very meta). Here's an example of a public image, apache/tika:2.6.0.1, which, at the time of this writing, still has a vulnerable version of OpenSSL. I've expanded the arguments for readability, feel free to shorthand the -it.
+1docker run \
+2    --interactive \
+3    --tty \
+4    --rm \
+5    ghcr.io/docker/docker-index:main \
+6    cve -i \
+7    apache/tika:2.6.0.1 CVE-0000
+The docker-index command identifies the OpenSSL vulns, 3602 & 3768, but nothing else:
+1INFO Requesting image apache/tika:2.6.0.1
+2INFO Copied image
+3INFO Indexed 333 packages
+4INFO Detected 2 vulnerabilities
+5
+6Detected CVE-2022-3602  HIGH
+7https://dso.docker.com/cve/CVE-2022-3602
+8
+9pkg:deb/ubuntu/openssl@3.0.2-0ubuntu1.6?os_distro=jammy&os_name=ubuntu&os_version=22.04
+10ADD file:ba96f963bbfd429a0839c40603fdd7829eaca58f20adfa0d15e6beae8244bc08 in /
+110: sha256:301a8b74f71f85f3a31e9c7e7fedd5b001ead5bcf895bc2911c1d260e06bd987
+12
+13Detected CVE-2022-3786  HIGH
+14https://dso.docker.com/cve/CVE-2022-3786
+15
+16pkg:deb/ubuntu/openssl@3.0.2-0ubuntu1.6?os_distro=jammy&os_name=ubuntu&os_version=22.04
+17ADD file:ba96f963bbfd429a0839c40603fdd7829eaca58f20adfa0d15e6beae8244bc08 in /
+180: sha256:301a8b74f71f85f3a31e9c7e7fedd5b001ead5bcf895bc2911c1d260e06bd987
+Most container and open source component scanners show a list of vulnerabilities, with some indicating a "fix" version as well. An example of this is the output from Trivy, which identifies a laundry list of vulnerabilities that the docker-index doesn't pick up (subset, below):
+It identified the two new HIGH severity OpenSSL vulns, along with an overview and a "fixed" version, but doesn't really help build a more secure container:
+┌────────────────┬────────────────┬──────────┬───────────────────┬────────────────────┐
+│ libssl3        │ CVE-2022-3602  │ HIGH     │ 3.0.2-0ubuntu1.6  │ 3.0.2-0ubuntu1.7   │
+│                │                │          │                   │                    │
+│                ├────────────────┤          │                   │                    │
+│                │ CVE-2022-3786  │          │                   │                    │
+│                │                │          │                   │                    │
+└────────────────┴────────────────┴──────────┴───────────────────┴────────────────────┘
+Similar to the open source discussion in our first post, while scanning one or two container images might be possible, scanning hundreds or thousands of container images is unrealistic in a typical development workflow.
+Similar to transitive dependencies and open source, you're likely not running images like Ubuntu or tika themselves, but instead using images that are derived from them — and inheriting any of the vulnerabilities that they included, plus any other vulns that you added via user instructions, which adds a layer of complexity to the search.
+Where we are impacted
+As we've seen, there are several tools that can help find vulnerable libraries in our container images and open source dependencies. Tools that perform ad hoc analysis on your local dev environment might work for projects with few developers, but become unwieldy as the size of the team and the number of projects grow. On the other hand, tools that can integrate with the source of truth for your application portfolio — source code repositories and container image registries — can track your inventory to provide up-to-date information to keep you informed about any potential impacts. For example, filtering on another high-profile vulnerability, Snyk Reporting shows a centralized view of our projects that are impacted by Log4Shell. Whether we've gone via the brute-force method or the tidy centralized view, we at least have an answer to the "where are we impacted?" question.
+It's more than just "finding" occurrences
+We've seen that over 80% of the code in your software supply chain might come from external sources, but finding the occurrences is only part of the question the boss will ask. Now that we know where we're vulnerable and have a list of things to fix, we still have the second half of the question to address: "how are we going to fix it?". For operating systems or applications, "fix" usually means waiting for and applying patches or updates from a vendor.
+With open source library and container vulnerabilities you will also likely be waiting for updates from the project maintainers, but with additional steps. The maintainers are likely also waiting for a fix from someone else upstream. Take Ubuntu 22.04, the long-term support (LTS) version of the popular Linux distro as an example. When the OpenSSL vulnerabilities were disclosed, Ubuntu 22.04 included OpenSSL 3.0.2 (in particular, 3.0.2-0ubuntu1.6), one of the vulnerable versions. In Ubuntu's case, rather than move to 3.0.7, the 3.0.2 version was patched to include fixes for the vulnerabilities. But that wasn't all there was to it. Once the library was patched, they still needed to release the update to Ubuntu 22.04 itself, and build updated container images.
+If you're a direct consumer of Ubuntu images (for example, if your Dockerfile starts with FROM ubuntu:22.04) you could rebuild your images to pick up the fix once the impacted images were published (and hopefully you test your images, as even the most minor changes need to be vetted). If, however, you're a downstream consumer relying on images that are derived from that new version of Jammy Jellyfish, you might need to wait a couple more iterations for the fixes to propagate before the image you're waiting for is updated.
+Unlike the open source container scanning options in the previous section, Snyk Container helps you navigate image dependency trees to find better base images, enabling you to build more secure images. Snyk maintains and regularly updates an index of image versions for popular official images on Docker Hub, allowing you to determine when images that leverage rolling tags (images that are updated in-place, rather than bumping a minor version) are out of date. In this case, Snyk Container detects that ubuntu:22.04 has been updated since the scanned image was built, and indicates that it should be rebuilt to pick up the change:
+1Your base image is out of date
+21) Pull the latest version of your base image by running 'docker pull ubuntu:22.04'
+32) Rebuild your local image
+Snyk Container can also provide you with a list of better image choices, whether you're leveraging Official Docker Images or specifying your own custom base images, including one-click pull request generation so you can quickly upgrade to remediate multiple vulnerabilities at once.
+Fixing vulnerabilities in open source dependencies is also straightforward with Snyk. In addition details about vulnerable libraries and fixed version information, as seen below:
+Snyk also provides the tools to remediate them via "Fix PRs", allowing you to address multiple vulnerabilities with one click.
+If the one-by-one fix methodology isn't something that works for your scale, then the best answer to the "how are we going to fix it" question is straightforward — "We'll fix it with Snyk".
+Prepare for the next supply chain vulnerability with Snyk
+Take advantage of the downgraded OpenSSL vulnerabilities to test your processes for handling vulnerabilities. Create playbooks and checklists for how to handle the next vulnerability, including which people to involve, how to assess impact, the inventory that needs to be evaluated, and how you'll communicate findings and impact internally (and externally if applicable). Perhaps most importantly, make sure that people know where to find the playbooks. Before the next critical vulnerability, start to incorporate tools to track your source code and container inventory so you can be more prepared for the next vuln.
+When you leverage Snyk Container and Snyk Open Source to secure your software supply chain, you can proactively monitor your containers and open source projects. Rather than having to scramble to find occurrences of vulnerable container images or open source packages you can know if you're impacted before the vulnerabilities are even published, so you can feel confident that you have the answers when you click the "send airplane" in Slack, firing off that message to your boss.
+Learn more about software supply chain security tools, and how else Snyk can help you strengthen your software supply chain security, and get started for free today.
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+
+requirements.txt
+snyk sbom
+docker-index
+apache/tika:2.6.0.1
+-it
+docker-index
+docker-index
+HIGH
+tika
+3.0.2-0ubuntu1.6
+FROM ubuntu:22.04
+ubuntu:22.04

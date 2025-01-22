@@ -1,0 +1,184 @@
+
+
+Categories
+
+
+
+Business & Technology 
+
+
+
+
+FortiGuard Labs Threat Research
+
+
+
+
+Industry Trends
+
+
+
+
+Life at Fortinet
+
+
+
+
+Partners
+
+
+
+
+Customer Stories
+
+
+
+
+PSIRT Blogs
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs
+CISO Collective
+Subscribe
+FortiGuard Labs Threat Research
+Ukrainian Military-Themed Excel File Delivers Multi-Stage Cobalt Strike Loader
+FortiGuard Labs has observed an increasing number of campaigns targeting either side of the ongoing Russian-Ukrainian conflict. These may be a cyber element to the conflict or simply opportunistic threat actors taking advantage of the war to further their malicious objectives.
+Recently, we encountered a malicious Excel document masquerading as a tool to calculate salaries for Ukrainian military personnel. This article discusses the technical details of this document that, when triggered, executes evasive multi-stage loaders, eventually leading to Cobalt Strike Beacon malware being loaded onto the victim’s device (Figure 1).
+Initial Attack Vector – Excel with Macro
+The attack starts with an Excel file loaded with malicious macro code (XLSM). The file masquerades as a spreadsheet tool for generating salaries for Ukrainian military personnel (Figure 2). As usual, the document attempts to trick the user into enabling the execution of macros to supposedly auto-populate the cell content. The macro is referenced as sumpropua, an abbreviation of Suma Propisom UA – a Latin transliteration of Ukrainian “сума прописом UA”. This is an old term for financial documents where the total amount of money paid must be written out as words. Converting a monetary value into words is not a trivial Excel task, and using macros for that purpose is commonplace.
+VBA Analysis
+The first thing to notice when opening the VBA code is the large chunk of whitespace preceding the start of the actual code, making it seem empty at first glance. Scrolling down reveals the malicious function SUMMPROPIS2 (Figure 3), which is automatically executed when the file is opened via the Workbook_Open() function. In addition, the document tries to execute this function by referencing it from several cells (shown in the formula bar in Figure 2), which are also triggered when the file is opened. This results in the malware being executed multiple times after opening.
+The VBA code employs simple obfuscation techniques, including unreadable functions and variable names to slow down static analysis. In addition, important data is encoded as hex strings, including the embedded malicious binary.
+The main malicious function OpenModule performs the following functions:
+
+Decodes the malicious binary from a hexadecimal string and saves it to %AppData%\Microsoft\fhasbqwn.dll
+Creates a Windows shortcut (.LNK) file with the name %Temp%\jdbsabdqbsmnqwdssad.lnk. The objective of the .LNK file is to execute the exported function DllUnregisterServer of the malicious DLL, which is commonly used to unregister DLLs from the system. However, this case leads to executing of the DLL’s malicious functions (Figure 4).
+3. Run the shortcut via
+RunDLL32.EXE shell32.dll,ShellExec_RunDLL  %Temp%\jdbsabdqbsmnqwdssad.lnk, which is similar to manually double-clicking on a Windows shortcut (highlighted in yellow in Figure 5). This leads to the execution of the first stage loader.
+Coding Error Causing Multiple Executions
+As mentioned earlier, the embedded payload in the Excel file was executed multiple times. Threat actors do not usually deploy the same payload numerous times, as this can cause unnecessary noise in the system. As a result, we dug deeper to understand why.
+A closer look at the code snippet for the OpenModule function (Figure 6) at line 5280 shows that the function Dir is called with the first argument containing the full path to the IEHistory folder. Using the Dir function here checks to see if a folder exists exactly as the attribute specified in the second argument. Checking for a file or a directory that malware has created during its infection is typically used to prevent re-infection or multiple executions. This appears to be the likely intent of the malware developers.
+However, because the second argument here is an uninitialized variable, it is equivalent to Dir(PathName, vbNormal). This returns a non-empty string only if the IEHistory exists as a file instead of a directory, which causes multiple executions of the whole malware routine. If vbDirectory had been used instead, creating the IEHistory directory after the check would have prevented repeated execution of the routine in subsequent checks.
+First Stage Downloader
+The first stage loader is executed with the following shell command, C:\Windows\System32\regsvr32.exe /u /s “\%AppData%\Microsoft\fhasbqwn.dll". The /s option allows silent execution so that no Windows message box appears after the code executes. The /u option leads to the execution of the DLL’s export DllUnregisterServer (Figure 7).
+To hinder analysis, this DLL is protected by ConfuserEx, an open-source protector used specifically for .NET binaries (Figure 8).
+It then moves itself to %Temp%\kbdlisus.dll and executes the second exported function, DllCanUnloadNow, by running the shell command “C:\Windows\System32\rundll32.exe %Temp%\kbdlisus.dll,DllCanUnloadNow”. The DllCanUnloadNow exported function downloads a seemingly harmless JPEG image file from hxxps://ellechina[.]online/01_logo_HLW-300x168[.]jpg, as shown below (Figure 9), using a specific set of HTTP headers.
+However, upon closer inspection, we found extra binary data (known as a file overlay) immediately after the JPEG trailer denoting the end of the image (see Figure 10) at offset 0x16D23. This overlay contains the encrypted and compressed second-stage loader.
+This malware decrypts the overlay using AES (Advanced Encryption Standard) in CBC mode with a hardcoded key and initialization vector (IV). The resulting data is then decompressed using the DEFLATE algorithm. The result is another .NET binary (exe) with the internal name sdafsfdpieowrfb.exe, also protected by ConfuserEx.
+This executable is then loaded as a new module using Assembly.Load() and directly executed in memory using Assembly.EntryPoint.Invoke() with a string array argument containing “1ffawf” and "afgawkgo".
+Second Stage Loader
+This sample contains a list of blacklisted names and exits if any of these processes are running. Processes checked are Avast Antivirus-related processes and commonly used malware analysis tools such as Process Explorer and Process Hacker. It extracts a similarly AES-encrypted and DEFLATE-compressed third-stage loader DLL from itself and drops it into one of the existing directories in %AppData%. The loader names the DLL after a randomly chosen subdirectory in %AppData%, e.g., Adobe.dll, Microsoft.dll.
+It then creates a scheduled task with the name “Scheduled” and the description “NTFS Volume Health Scan” and “Microsoft Corporation” as the Author to masquerade as a legitimate task.
+This task executes the dropped DLL via the command C:\Windows\System32\rundll32.exe %AppData\[RANDOM_DIRECTORY]\[RANDOM_NAME],UiaPatternRelease when the current user logs into Windows to maintain persistence.
+Instead of the typical usage of schtasks.exe to create this scheduled task, the malware uses Task Scheduler’s ITaskFolder::RegisterTaskDefinition COM function. This might be a way to hide the task creation from security products such as EDRs, which can detect suspicious usage of schtasks.exe based on the command line arguments.
+Figure 11 shows the scheduled task configuration. Note that the Hidden task setting hides the task within Task Scheduler unless Show Hidden Tasks is enabled from the View menu.
+The malware runs the newly-created task to start the third-stage loader. Executing the third stage DLL indirectly via a scheduled task instead of through the second stage loader makes it harder to reconstruct the attack chain, as it is not immediately apparent which process started the third stage loader.
+Process Injector and Cobalt Strike Loader
+Unlike the previous two loaders, this DLL is written in C/C++ and is a multi-stage loader for Cobalt Strike Beacon, a popular tool for adversaries to maintain a foothold before deploying other malware in the victim’s system.
+It then extracts and decrypts another AES-encrypted loader from itself and launches a suspended instance of SearchIndexer.exe (a legitimate executable for the Windows Search feature). It then injects and executes the loader via remote thread injection.
+Inside SearchIndexer.exe, the loader continues to extract and execute additional stages purely in memory before executing the final Cobalt Strike Beacon payload.
+By extracting and parsing the configuration from the memory dump, we found the Beacon’s Cobalt Strike Team Server’s (C2) URLs:
+hxxps://pedaily[.]link/daashbooard/managgemment/oknz05PqOlqLtMGB/tzJGhpVp and hxxps://pedaily[.]link/daashbooard/managgemment/GCLwJmax/KFKcpjlf.
+Conclusion
+This malware campaign shows how threat actors continue to leverage current events to trick users into lowering their security settings to deploy and execute malware in their systems. By using multi-stage loaders, coupled with several common obfuscation and evasion techniques, this attack also attempts to hinder detection and complicate analysis.
+It is important to note that FortiGuard Labs collected JPG files with different encrypted payloads in the overlay during our investigation. This could mean the threat actor may deploy specific payloads to potential victims. In this case, it deploys a Cobalt Strike Beacon designed to maintain a foothold in the victim’s system. This gives the threat actors the flexibility to deploy any malware of their choosing.
+FortiGuard Labs will be monitoring further developments of this campaign.
+Fortinet Protections
+FortiGuard Labs provides the following AV coverage against the files in this attack:
+
+VBA/Agent.CSW!tr
+MSIL/Agent.FGLT!tr.dldr
+MSIL/Agent.FGLT!tr
+W32/Cobalt.FGLT!tr
+Data/Agent.FGLT!tr
+The FortiGuard AntiVirus service is supported by FortiGate, FortiMail, FortiClient, and FortiEDR. The Fortinet AntiVirus engine is a part of each of those solutions. As a result, customers who have these products with up-to-date protections are protected.
+The malicious Excel document can be disarmed using the FortiGuard Content Disarm and Reconstruction (CDR) Service.
+The WebFiltering client blocks all known network IOCs in this attack.
+FortiGuard Labs provides Backdoor.Cobalt.Strike.Beacon IPS signature against Cobalt Strike.
+FortiGuard IP Reputation & Anti-Botnet Security Service proactively blocks these attacks by aggregating malicious source IP data from the Fortinet distributed network of threat sensors, CERTs, MITRE, cooperative competitors, and other global sources that collaborate to provide up-to-date threat intelligence about hostile sources.
+Due to the ease of disruption, damage to daily operations, potential impact to an organization's reputation, and the unwanted destruction or release of PII, etc., it is important to keep all AV and IPS signatures up to date.
+We also suggest that organizations have their end users undergo our free NSE training: NSE 1 – Information Security Awareness. It includes a module on internet threats designed to help end users learn how to identify and protect themselves from various types of phishing attacks.
+IOCs
+4cedec3e1a2f72a917ad9a59ebe116ed50c3268567946d1e493c8163486b888b (XLSM)
+c0c455cd3e18be14d2e34cf4e3fb98e7ab0a75ef04b6049ff9f7b306d62704b8 (1st stage downloader - fhasbqwn.dll)
+2927794d7c550c07303199752b8226f197d7ef497d04cf038859f95b60edc9ce (JPEG with encrypted payload overlay)
+b03c9f7823810e3eeef3c0b1d6c00da4f16fdc2ced92f97f78e5676d0989d9b3 (2nd stage loader - sdafsfdpieowrfb.exe)
+de8c789ef2e1da81182a7529e7b42adf2984cd6e70b02e60fd770ebe658086ae (Cobalt Strike loader)
+%Temp%\jdbsabdqbsmnqwdssad.lnk
+
+%AppData%\Microsoft\fhasbqwn.dll
+
+%Temp%\kbdlisus.dll
+hxxps://ellechina[.]online/01_logo_HLW-300x168[.]jpg
+
+hxxps://pedaily[.]link/daashbooard/managgemment/GCLwJmax/KFKcpjlf
+
+hxxps://pedaily[.]link/daashbooard/managgemment/oknz05PqOlqLtMGB/tzJGhpVp
+Learn more about Fortinet’s FortiGuard Labs threat research and global intelligence organization and Fortinet’s FortiGuard AI-powered Security Services portfolio. Sign up to receive our threat research blogs.
+microsoft excel, 
+    
+      advanced malware, 
+    
+      FortiGuards Labs, 
+    
+      malware research, 
+    
+      macros
+Related Posts
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+FortiGuard Labs Threat Research
+
+
+
+
+
+
+
+
+News Releases
+News Articles
+
+Threat Research
+FortiGuard Labs
+Threat Map
+Ransomware Prevention
+
+Fortinet Community
+Partner Portal
+Investor Relations
+Product Certifications
+
+About Us
+Exec Mgmt
+Careers
+Training
+Events
+Industry Awards
+Social Responsibility
+CyberGlossary
+Sitemap
+Blog Sitemap
+
+(866) 868-3678
+Copyright © 2025 Fortinet, Inc. All Rights Reserved
+
+Business & Technology
+FortiGuard Labs Threat Research
+Industry Trends
+Life at Fortinet
+Partners
+Customer Stories
+PSIRT Blogs

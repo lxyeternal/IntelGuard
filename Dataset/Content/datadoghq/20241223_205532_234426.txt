@@ -1,0 +1,100 @@
+
+Key points
+
+Users with the Key Vault Contributor role can escalate their privileges to read and modify Key Vault contents for any key vault that uses access policies as the access control mechanism. This includes keys, certificates, and secrets.
+This goes against Microsoft's documented intent of the Key Vault Contributor role, which "does not allow you to access secrets, keys, or certificates."
+We reported this finding to the Microsoft Security Research Center (MSRC). MSRC has stated that this configuration "is not a vulnerability" as "key vault contributors have the ability to manage the key vault access policies."
+Microsoft has updated documentation of the Key Vault Contributor role to clarify that this role and permission "can grant themselves data plane access by setting a Key Vault access policy," and that they "recommend you use the Role-Based Access Control (RBAC) permission model" to mitigate this risk.
+An attacker with access to an account with this role or the Microsoft.KeyVault/vaults/write permission could use this configuration to read all data in a target key vault. This commonly includes API keys, passwords, Azure Storage shared access signatures (SAS), and authentication certificates.
+Disclosure timeline
+The following represents a timeline of our communications with MSRC about this configuration:
+- October 25, 2024: Datadog reported the issue to MSRC.
+
+- October 25, 2024: MSRC responded that they had created a case, and updated the status to Review/Repro.
+
+- October 31, 2024: Microsoft updated documentation on the Azure RBAC Key Vault Contributor role to include a new warning about access policy risks.
+
+- November 4, 2024: Datadog followed up with MSRC.
+
+- November 11, 2024: MSRC responded that this configuration "is not a vulnerability" as "Key Vault Contributors have the ability to manage the key vault access policies." They commented that the case was closed and updated the status to Complete.
+
+- November 26, 2024: Datadog confirmed status and provided a draft of this post along with intended publication date.
+
+- November 26, 2024: MSRC acknowledged receipt of this draft.
+
+- December 2, 2024: Datadog followed up with MSRC to ensure no feedback prior to publication.
+
+- December 16, 2024: Datadog published this post.
+Introduction
+During our ongoing security research to explore, identify, and document new methods attackers may use to attack cloud resources, we identified a method of privilege escalation in Azure Key Vault. This could allow a user with the Key Vault Contributor RBAC role, which is not intended to have access to Key Vault data, to read all Key Vault secrets, keys, and certificates.
+Microsoft documentation stated that the Key Vault Contributor role did not have access to Key Vault secrets, keys, and certificates. However, we determined that this role had permissions to add itself to Key Vault access policies and access Key Vault data, effectively bypassing this restriction.
+In this post, we will explain how inclusion of the Microsoft.KeyVault/vaults/write permission in an Azure built-in role violated the defined boundary of what data the role could access, as well as resulting security considerations you should take when working with the Key Vault Contributor role.
+The risk of a similar permission, Microsoft.KeyVault/vaults/accessPolicies/write, was previously documented as a persistence vector in the InverseCos post, "Detection and Compromise: Azure Key Vaults & Secrets", and as a privilege escalation vector in XM Cyber's series "​​Privilege Escalation and Lateral Movement on Azure". However, this permission was not discussed in the context of the Key Vault Contributor role or the Microsoft.KeyVault/vaults/write permission.
+This configuration was determined "not a vulnerability" during review with the MSRC, as "Key Vault Contributors have the ability to manage the key vault access policies." Microsoft's documentation around this role has been updated to clarify the risk of this role. Microsoft's full response can be found in Microsoft's response below.
+Background: Conflicting permissions scopes
+During investigation of Azure Key Vault roles and settings, we noticed that Key Vault can be configured with two possible permissions models:
+
+Azure RBAC permission model
+Key Vault access policy
+Previous research into Azure has shown that multiple permissions models can cause confusion between assumed role definitions and their actual capabilities. One such confusion has been previously documented in TrustOnCloud's post, "How I bypassed the control plane in Azure OpenAI". This post detailed areas where data plane actions could affect control plane data.
+Additionally, the Microsoft.KeyVault/vaults/accessPolicies/write permission had been previously demonstrated as a risk, as described in the Introduction.
+Reading Microsoft's documentation on built-in Azure roles, we also noticed that the Azure Key Vault Contributor role can "manage key vaults, but does not allow you to assign roles in Azure RBAC, and does not allow you to access secrets, keys, or certificates."
+We wondered if modifying access policies was included in the "manage key vaults" component of this role. If so, could this allow a Key Vault Contributor to grant themselves unintended access to key vault data?
+Escalating to read secrets via access policies
+We confirmed that a test user with the Key Vault Contributor role had no direct access to Key Vault data over a key vault configured with access policies:
+However, the user was able to view and add to existing access policies. A policy update could contain the ability to list, view, update and generally manage the data within the key vault.
+This created a scenario where a user with the Key Vault Contributor role could gain access to all Key Vault data, despite having no RBAC permission to manage permissions or view data:
+Since access policies were used as the method of permissions management for the key vault, the RBAC permissions scope intended to prevent data access could be bypassed.
+Example
+To demonstrate the impact of this configuration, let's say an attacker has compromised a user in the Systems Administration team through a phishing campaign using a malicious sign-in link, such as one generated with the popular phishing tool evilginx2.
+With access to the user's session, an attacker could then follow the below attack path. A summary of this path is shown below, followed by details of this scenario:
+Once our attacker has access to the target user's tokens, they investigate the user's Azure roles. They find that the user has access to manage a key vault through the Key Vault Contributor role over the "Cool App" application's Resource Group. This role does not grant data access to key vaults:
+However, the attacker finds that a subset of key vaults were created using access policies. The attacker uses the compromised account's Key Vault Contributor role to add themselves to a target key vault's access policies with all permissions. This allows the attacker to get, list, and update all Key Vault data:
+Following this configuration change, the attacker can access all secrets stored in the key vault. This includes an API key for the target application:
+Impact
+An attacker with the Key Vault Contributor role could modify access policies and grant themselves access to all of a key vault's data. Any Key Vault secrets would then be exposed to this attacker. This data commonly includes API keys, passwords, SAS tokens, and authentication certificates.
+An Azure administrator may incorrectly assume that the Key Vault Contributor role does not have Key Vault data access, even if a key vault uses access policies. This could lead to over-scoped permissions assignments, allowing unintended users to access Key Vault data.
+Remediation
+Several steps are needed to remove the effects of an attacker abusing this configuration. Below, we provide details on how to remove unauthorized permissions and ensure impacted secrets are secured.
+Review access policies of any impacted key vaults. In any situation where an access policy is granted to an unknown user, review the scope of granted permissions and remove any unnecessary access.
+In some cases, this may require following up with an application team for any managed identities or enterprise applications (service principals) that have been granted access to a key vault.
+Rotate all keys an attacker may have had access to within the impacted key vaults. This will ensure that compromised secrets are no longer valid for the application.
+If you collect diagnostic logs on the impacted key vaults, you can review these logs to determine which secrets, keys, and certificates were accessed and require immediate rotation.
+We outline considerations for configuring key vaults to avoid this issue in the "Additional security considerations" section below.
+Microsoft's response
+Following Datadog reporting this behavior to MSRC, Microsoft's documentation of Azure RBAC roles was updated to state that the Key Vault Contributor role allows modification of access policies by design. This updated documentation was then used by MSRC to help clarify that the reported finding did not represent a security vulnerability.
+Documentation updates
+At the time of Datadog's report of this issue on October 25, 2024, no warning was attached to use of the Key Vault Contributor role. On October 31, 2024, Microsoft's "Azure built-in roles" documentation was updated with a warning to users about this potential privilege escalation vector.
+These new warnings clearly outline the risk of trusting the Key Vault Contributor role when using access policies and advise that customers migrate to the RBAC permissions model for granting access to Key Vault data.
+An example of how the "Azure built-in roles" page looked during investigation on October 25, 2024 is shown below:
+On October 31, 2024, Microsoft updated this documentation with a new warning about the risk of access policies:
+MSRC response
+The following response was provided to Datadog by Microsoft's MSRC on November 11, 2024:
+"Thank you again for submitting this issue to Microsoft. We determined that the reported behavior is not a vulnerability because key vault contributors have the ability to manage the key vault access policies as documented here: https://learn.microsoft.com/en-us/azure/key-vault/general/security-features#managing-administrative-access-to-key-vault. This case is now closed.
+Thank you very much for working with us!"
+Additional security considerations
+A security team may want to take actions to ensure that access policies are not in use, or cannot be abused by an attacker as described above. Let's look at some steps to avoid this configuration.
+Avoid using Key Vault access policies
+As noted in Microsoft's updated documentation, when access policies are enabled for a key vault, data access and administration cannot be separated. The Key Vault Contributor role or any role with the Microsoft.KeyVault/vaults/write permission cannot be prevented from role management or data access in this configuration.
+Microsoft now recommends that users rely on the RBAC permissions model for all Key Vault deployments to ensure data access and role management align with their RBAC role definitions. Access policies should not be used in situations where roles with the Microsoft.KeyVault/vaults/write permission should not have data access or role management.
+Consider reviewing existing Key Vault configurations for deployments where access policies are in use, and migrating these key vaults to an RBAC permissions model.
+Limit Key Vault Contributor role assignments
+Wherever Key Vault access policies are in use, consider limiting assignment of roles with the Microsoft.KeyVault/vaults/write permission. This included Key Vault Contributor, Contributor, or any custom roles including this permission.
+Limiting assignment of this role will reduce the number of potential accounts which have access to Key Vault data, either through accidental mismanagement or malicious compromise.
+How Datadog can help
+For customers using Datadog Cloud Security Posture Management (CSPM), the following detection is provided to help identify key vaults that rely on an access policy permissions model:
+
+Azure Key Vault should use RBAC
+Conclusion
+In this post, we reviewed a configuration where use of access policies in a key vault can allow the Key Vault Contributor role unintended data access. This could allow an attacker targeting a user with this role to access Key Vault secrets, keys, and certificates.
+This privilege escalation highlights how multiple permissions models can lead to the possibility of misconfigurations such as the one demonstrated above.
+We'd like to thank Microsoft for working with us on reviewing this finding, and updating documentation to clarify the risk of this role.
+We're eager to hear from you! If you have any questions, thoughts, or suggestions, shoot us a message at securitylabs@datadoghq.com or open an issue. You can also subscribe to our newsletter or RSS feed.
+Microsoft.KeyVault/vaults/write
+Microsoft.KeyVault/vaults/write
+Microsoft.KeyVault/vaults/accessPolicies/write
+Microsoft.KeyVault/vaults/write
+Microsoft.KeyVault/vaults/accessPolicies/write
+Microsoft.KeyVault/vaults/write
+Microsoft.KeyVault/vaults/write
+Microsoft.KeyVault/vaults/write

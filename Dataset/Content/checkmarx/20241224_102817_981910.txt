@@ -1,0 +1,135 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\Shutterstock_21413402191.jpg
+Nowadays, there are open-source solutions for every type of need. From accounting to CMS (Content Management System) applications, we can search for an application on the Internet that offers a solution to a specific issue or answers a need. Although, most of the time, it will be easier/faster than reinventing the wheel, using open-source applications might create some challenges. Security is one of those challenges, and zero-day vulnerabilities might put open-source users at risk.
+With that in mind, one of the activities performed by Checkmarx Labs is to search for security issues in open-source applications. The goal is to help secure open-source software which, usually, is not developed with a security-first approach, and is used by a community that often does not have the means to secure the open-source software.
+One of the applications assessed was osTicket, an open-source ticketing system. With distinctive features and plugins, osTicket gives users the ability to “Manage, organize, and archive all your support requests and responses (…).” During our assessment, the Checkmarx Labs team found some interesting vulnerabilities. In this blog/report, not only will we disclose some of the identified vulnerabilities but also elaborate on the team’s approach to identifying them.
+Research Lab
+The process that we follow, from creating a testing instance with the open-source application to finding the vulnerabilities, includes several steps. One of the first steps is to perform a static analysis scan (SAST) of the project, which will scan the code and find data flows that could lead to possible vulnerabilities. The use of this method often increases the number of issues found and is very useful when conducting these assessments. To validate the exploitability of the scan findings, we create a virtual machine (VM) and install the application in order to have a local testing environment for further testing. This way, we can confirm the existence of vulnerabilities and widen the assessment scope by performing a full penetration test, using both manual and automatic methodologies.
+Methodology
+After finalizing the first steps, we analyze scan results and identify the flows that lead to identified vulnerabilities. Although the scan simplifies the process, we also need to understand the application source code to find the “vulnerability entry point” (the input), and the flows that can be exploited. For example, during the analysis of the results, we identified some strange code injection results ending at “variable variables” [1]. This meant that user input controlled the variable name, and although this is not uncommon, it is a dangerous behavior—especially when user input is used.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\1Picture1.png
+Figure 1 – Variable $sort, from the GET parameter, controlling the initial part of the variable name $x
+In this case, the string “_sort” was added to the variable before its usage. We could not find any interesting variable name with that pattern. So, while the code is potentially weak to overwriting arbitrary variables, they would have to end in “_sort”. This means the code does have a weakness but is not exploitable in a meaningful way.
+There were a few different SAST results on this matter, and we decided to look further:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\2Picture2.png
+Figure 2 – Request parameter concatenated to a raw HTML string at a user-controlled variable
+At the directory.inc.php file, the $_REQUEST parameter was added directly to this string which appeared to be an HTML string, and yes, it was being used in multiple table headers. And of course, it would not be so simple.
+We discovered that osTicket had a custom HTML sanitization method that was applied in many other HTML inputs, and it was not a very standard method for sanitizing input:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\3Picture2.png
+Figure 3 – Request parameters filtered before usage in directory.inc.php
+This is an example piece of their sanitization method:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\4Picture2.png
+Figure 4 – A fraction of the Format: sanitize blacklist function
+Although this method has some complexity, blacklisting specific strings and focusing on sanitizing HTML tags is not an effective way to sanitize the input, since it is difficult to be aware of every possible context and special characters that can be used to build an exploit.
+After this analysis, we tried the only thing left, which was to confirm the vulnerability (in a local testing environment) explained in the Reflected XSS, CVE-2022-32132 section below.
+To confirm the vulnerabilities existence in the application, we created our own environment by setting up the application in a VM, and then perform the dynamic tests. With this environment, we not only confirmed the results found, but we could also find different vulnerabilities that are easier to find with our dynamic testing approach.
+Findings
+Reflected XSS, CVE-2022-32132
+A Reflected XSS [2] was found in osTicket, allowing an attacker to inject malicious JavaScript into a browser’s DOM, which could enable attackers to hijack user sessions, perform actions on a user’s behalf within that user’s session context, and more.
+After the analysis described in the Methodology, we validated that the vulnerability does exist in the application. Our first goal was to understand and escape the sanitizer. Sure enough, some special characters allowed us to discover this Reflected XSS vulnerability in the ‘directory’ URL, which is available by default in every osTicket installation. The blacklist was prepared to block user input from escaping HTML tags or even create dangerous tags like <script>, but on this specific scenario, the input was added to an attribute, and it allowed escaping from attributes. One of the obvious payloads was using the onmouseover attribute, which runs its value as JavaScript when the mouse moves over the component.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\5Picture2.png
+Figure 5 – XSS payload executed
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\6Picture1024x461.png
+Figure 6 – Source page code with the XSS payload
+There are some things that can be done to increase the value (or risk) of this vulnerability, and the first thing is to make it easier for the victim to be attacked. An easy way of achieving this is to also inject the style attribute of the vulnerable HTML tag in order to make it the size of the screen, being almost inevitable for the victim to visit the URL and trigger the payload.
+/scp/directory.php?&&order=DESCE%22%20onmouseover=%22alert(1)%22%20style=%22position:fixed;top:0px;right:0;bottom:0px;left:0px;&sort=name
+Another thing that can be done is to leverage this vulnerability by using other weaknesses. We found two cases that can be abused for that purpose:
+
+A stored HTML injection in the “notes” section can be abused to have a permanent attack vector inside the application that redirects the user to the Reflected XSS, making it in practice, a stored XSS.
+A CSRF in the “change password” functionality can be used as a payload for the XSS, allowing an attacker to change the user password of the victim.
+As the directory.php page is in an admin panel, these steps could leverage this vulnerability from a simple Reflected XSS to a Stored XSS capable of full admin account takeover without the need of any installed plugins.
+Reflected XSS, CVE-2022-31889
+In the Audit plugin, we found two Reflected XSS results where user input from the type or state parameters was inserted into the HTML without being sanitized. The fix adds the missing sanitization for these inputs. A similar procedure to the one presented in the Methodology section, was taken when analyzing the plugins results.
+After the analysis, and confirmation that it was a True Positive, we validated that it was indeed vulnerable to XSS. Looking at the code in which the vulnerability occurs, we can see how easily it can be exploited:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\7Picture1024x2291.png
+Figure 7 – type variable insert in the HTML without sanitization
+The input from the type and state parameters is inserted into the “a” tag without any sanitization. We can just close the href quote and the tag (>) and insert a simple script tag.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\8Picture2.png
+Figure 8 – XSS payload executed
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\9Picture2.png
+Figure 9 – Source page code with the XSS payload
+SQL injection, CVE-2022-31890
+In the same plugin (Audit), we came across a SQL Injection result where user input from the order parameter was inserted into a SQL query without proper sanitization. Looking at the fix, there was a condition in the if statement in the old code that verified if the order query parameter existed in the orderWay array. The problem is that this array was not defined, so PHP will issue a Notice and the if condition will always be false. The correction involved adding the missing array and changing some of the sanitization logic for the order variable.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\10Picture1024x1881.png
+Figure 10 – order_by variable concatenated directly into SQL query
+After confirming that the flow was indeed vulnerable, a Proof-of-Concept was created to demonstrate the real impact, as shown in Figure 13. By exploiting the SQL injection vulnerability, an attacker could obtain passwords hashes, PII, and access privilege information. The fact that the injection is after an ORDER BY makes the possible injection limited. A SQL injection after the ORDER BY clause is different from other cases (after a WHERE clause for example) because the database does not accept UNION, WHERE, OR, or AND keywords. It is possible to have nested queries, and we can also have multiple queries if we use a semicolon, but this is only possible if the method that executes the queries allows multiple queries execution. In this case, the method that executes the queries does not allow multiple queries. Nonetheless, a blind time-based injection is possible, allowing data extraction from the database.
+Example of a regular request:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\11Picture2.png
+Figure 11 – Normal request to the audits.php page
+Sleep injection:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\12Picture2.png
+Figure 12 – Sleep injection result in the audits.php page
+With this knowledge, we can create a script that allows data extraction that triggers a sleep when a particular condition is met, like a specific character in the user’s table that matches one provided by us.
+import requests
+import urllib
+import string
+HOSTNAME = 'http://localhost'
+cookie = {'OSTSESSID': '...'}
+headers = {'User-Agent': '...'}
+alphabet = string.ascii_lowercase + string.digits + '-_!'
+position = 1
+offset = 0
+for letter in alphabet:
+    payload = "(select case when ((select substring(username," + str(position) + ",1) from os_staff LIMIT 1 OFFSET " + str(offset) + ")='" + letter + "') then sleep(0.3) else 1 end);"
+    result = requests.get(HOSTNAME + '/scp/audits.php?&type=S&state=All&order=ASC,' + urllib.parse.quote(payload) +'--&sort=timestamp&_pjax=%23pjax-container', cookies=cookie, headers=headers)
+    if result.elapsed.total_seconds() > 2:
+        print(letter)
+        break
+Figure 13 – Python script that obtains the first username character of the first os_staff table entry
+Session fixation, CVE-2022-31888
+SAST tools increases the number of security issues that can be found, and yet code analysis is not enough when trying to find all kinds of problems. For example, we found a session fixation issue while interacting with the application that, with code review, is difficult to notice.
+Due to the nature of the problem, detecting that a new session is generated and the old one is terminated in the correct place is complex to detect. Most of the time, a clear understanding of the code base is required to spot a session fixation issue, but this can also be applied to other types of vulnerabilities that can be chained together and create a higher risk. Dynamic testing is also necessary if we want to find other types of vulnerabilities, or vulnerabilities that trigger only in specific situations.
+In this case, the application provides two login pages, one for the admin panel and another for the user portal. While testing both interfaces, the existing session cookie (used in both interfaces) is not invalidated after a login.
+We found this vulnerability while fuzzing the login pages. When a login is successful, the server should invalidate the previous session and create a new one by sending it in the Set-Cookie header. This did not happen, and it was also possible to define our own session.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\13Picture2.png
+Figure 14 – Set-Cookie with controlled cookie
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\14Picture2.png
+Figure 15 – Session cookie controlled
+If an attacker can access or control the session value before authentication, an authenticating user would be authenticating a session known to the attacker, who would then hijack it.
+Stored XSS, CVE-2022-32074
+While dynamically analyzing the Filesystem Storage plugin, we came across two issues:
+1 – It’s possible to browse directly to the root of the file upload directory (in this example, the name chosen for the folder is file_uploads). With this, a directory listing is possible, as shown below.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\15Picture2.png
+Figure 16 – File uploads directory content
+2 – Images accessible via this storage do not properly neutralize SVG files, which can contain XSS payloads. For example, uploading the following XML inside a JPG file will serve its contents as SVG.
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" baseProfile="full" xmlns="http://www.w3.org/2000/svg">
+   <rect width="200" height="200" style="fill:rgb(0,255,255);stroke-width:3;stroke:rgb(0,0,0)" />
+   <script type="text/javascript">
+      alert("Stored XSS!!");
+   </script>
+</svg>
+By exploiting these two issues, we were able to find a Stored XSS.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\16Picture2.png
+Figure 17 – XSS payload executed after accessing the image
+Conclusion
+While the injection vulnerabilities such as SQLi and XSS are some of the security issues with more widespread knowledge and mitigation techniques, they are still at the top of vulnerabilities found. According to an Akamai report “the top three web application attacks were LFI (38%), SQLi (34%), and XSS (24%).”
+These issues mainly arise because developers do not take into consideration that all data should be sanitized. Whether coming from user input or a database, the data should always be sanitized. There are also cases where custom sanitizers are implemented, and what happens is that developers’ implementation does not consider all cases. As a result, attackers can find ways to bypass the sanitizer [3].
+OWASP provides a Cheat Sheet series that developers can use to understand the vulnerabilities and how to prevent them [4] [5].
+The research was conducted in testing environments, and no production systems were used to test or exploit the previously mentioned vulnerabilities.
+Timeline
+
+April 20, 2022 – Full vulnerabilities report shared with osTicket team.
+
+osTicket team acknowledged receipt.
+
+osTicket team acknowledged receipt.
+May 19, 2022 – Fix released.
+June 22, 2022 – CVE-2022-31888, CVE-2022-31889, CVE-2022-31890 assigned.
+July 13, 2022 – CVE-2022- 32074 assigned.
+July 21, 2022 – CVE-2022-32132 assigned.
+February 14, 2023 – Public disclosure
+Final Words
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102817_981910\17Picture2.png
+It was a pleasure working with osTicket’s security team. Their professionalism and cooperation, as well as the prompt ownership they took, are what we hope for when we engage with software companies. Kudos!
+This type of research activity is part of the Checkmarx Security Research Team’s ongoing efforts to drive the necessary changes in software security practices among organizations who offer online services in an effort to improve security for everyone overall.
+References
+[1] https://www.php.net/manual/en/language.variables.variable.php
+[2] https://portswigger.net/web-security/cross-site-scripting/reflected
+[3] https://owasp.org/www-community/Injection_Theory
+[4] https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html
+[5] https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html
+Copyright (C) 1989, 1991 Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA. Everyone is permitted to copy and distribute verbatim copies of this license document, but changing it is not allowed.
+
+osTicket team acknowledged receipt.

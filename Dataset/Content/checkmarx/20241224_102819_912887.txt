@@ -1,0 +1,169 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_912887\Website1024x5123.jpg
+Executive Summary
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_912887\Dubbo1a.png
+Having developed a high level of interest in serialization attacks in recent years, I’ve decided to put some effort into researching Apache Dubbo some months back. Dubbo, I’ve learned, deserializes many things in many ways, and whose usage world-wide has grown significantly after its adoption by the Apache Foundation.
+
+
+
+Figure 1 – Dubbo Architecture
+
+According to a mid-2019 press-release, Dubbo is “in use at dozens of companies, including Alibaba Group, China Life, China Telecom, Dangdang, Didi Chuxing, Haier, and Industrial and Commercial Bank of China, among others”. In the same press-release, Apache announced Dubbo being promoted into an Apache Top-Level Project.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_912887\Dubbo1b.png
+Figure 2 – Dubbo Users, According to Apache Dubbo Website
+
+I discovered that Apache Dubbo providers and consumers using versions <= 2.7.3 of Dubbo, when configured to accept the HTTP protocol, allows a remote attacker to send a malicious object to the exposed service, which would result in Remote Code Execution. This occurs with no authentication, and minimal knowledge on an attacker’s part is required to exploit this vulnerability. Specifically, only the exploit described herein and a URL is required to successfully exploit it on any Dubbo instance with HTTP enabled. A proof of concept video also accompanies this report.
+
+An attacker can exploit this vulnerability to compromise a Dubbo provider service, which is expecting remote connections from its consumers. An attacker can then replace the Dubbo provider with a malicious Dubbo provider, which could then respond to its consumers with a similar malicious object – again resulting in Remote Code Execution. This allows an attacker to compromise an entire Dubbo cluster.
+
+The root cause for this issue is due to the use of a remote deserialization service in Spring Framework, whose documentation explicitly recommends not to use it with untrusted data, in-tandem with an outdated library, which contains a lesser-known gadget chain that enables code execution. A combination of unsafe deserialization of untrusted data, and a gadget chain, is what bridges the gap between remote access and remote unauthenticated code execution.
+
+Credits are in order to Chris Frohoff and Moritz Bechler for their research and tools (ysoserial and marshalsec), as some of their code was used in the gadget chain, and their research laid the foundation for this exploit.
+Severity
+Checkmarx considers this vulnerability to have a CVS Score of 9.8 (Critical), since it is an unauthenticated remote code execution vulnerability that provides privileges at the Dubbo service’s permission level, allowing complete compromise of that service’s confidentiality, integrity, and accessiblity.
+
+While not all Dubbo instances are configured to use the HTTP protocol, instances with known vulnerable versions that are configured to use this protocol would be trivially vulnerable, given minimal and readily available information, which is the URL to the vulnerable service. This service URL would be publically available within the network, via services such as a registry (e.g. Zookeeper), and is not considered secret or confidential.
+
+CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H/E:F/RL:U/RC:C/CR:H/IR:H/AR:H
+Specifications
+What’s Going On?
+Unsafe deserialization occurs within a Dubbo application which has HTTP remoting enabled. An attacker may submit a POST request with a Java object in it to completely compromise a Provider’ instance of Apache Dubbo, if this instance enables HTTP.
+
+The Dubbo HTTP instance attempts to deserialize data within the Java ObjectStream, which contains a malicious set of classes, colloquially referred to as a gadget chain, whose invocation results in the execution of malicious code. In this instance, the malicious code in question allows arbitrary OS commands, and the invocation of the gadget chain occurs when an internal toString call is made in the Dubbo instance on this gadget chain, during exception creation.
+Recreating the Issue
+An attacker can submit a POST request with a malicious object to a bean URL for an Apache Dubbo HTTP Service, which would result in remote code execution. The bean, in this case, is the interface implementation class bound by Spring to a given Dubbo protocol endpoint. The bean is wired to a URL, and the request body for the bean contains an HTTP Remote Invocation used to determine which bean method is invoked, and with what parameters.
+
+Once an attacker has the bean’s URL, all they have to do to exploit this vulnerability is to submit a malicious gadget chain via a standard POST request.
+
+A new gadget chain which allows remote OS command execution was found in the scope of vanilla Apache Dubbo with Dubbo-Remoting-HTTP, if the HTTP service and protocol are enabled.
+Follow this guide:
+
+Follow the Official Apache Dubbo Quick-Start guide until a functioning provider and registry are successfully created
+Enable Dubbo HTTP service – Edit dubbo-demo-provider.xml – change dubbo:protocol name to “http”
+To trigger this vulnerability, an attacker must identify a URL to the Dubbo HTTP bean. URL addresses are generally not confidential or privileged, since they can be obtained from Dubbo service registries (e.g., Zookeeper), multicasts, and, in the absence of a well-deployed HTTPS pipeline, allow Man-in-the-Middle attacks.
+Review Appendix 1 for functioning POC code. Note that variables such as the IP address of the Dubbo instance require modification inside this code.
+
+An attacker requires the same dependencies as the Dubbo HTTP Service, stated above. In this PoC, com.nqzero:permit-reflect for reflection features required during serialization, and org.apache.httpcomponents.httpclient was used to send the malicious gadget to the HTTP service. To trigger the vulnerability, a new gadget chain was engineered using means available within the class space of Apache Dubbo and JDK.
+
+This gadget chain uses the following components:
+
+springframework.remoting.httpinvoker.HttpInvokerServiceExporter – this is the deserialization entry point, deserializing the request body. Deserialization of HashMaps, and Java Collections in general, invokes their value insertion methods. In this case, this will invoke HashMap.putVal(h,k,v).
+A HashMap of two org.springframework.aop.target.HotSwappableTargetSource objects, one containing a JSONObject as a target, and another containing a com.sun.org.apache.xpath.internal.objects.XString object as a target
+
+HotSwappableTargetSource objects always return the same hashcode (class.hashCode()), which forces the HashMap.putVal(h,k,v) into running deeper equality checks on HashMap keys, trigger equals() on its contents – the two HotSwappableTargetSource member objects
+HotSwappableTargetSource equality checks validate if the target objects inside HotSwappableTargetSource are equal; in this case – an XString and a JSONObject
+The XString.equals(object) triggers a call equivalent to this.toString().equals(object.toString()) call, which would trigger JSONObject.toString()
+
+HotSwappableTargetSource objects always return the same hashcode (class.hashCode()), which forces the HashMap.putVal(h,k,v) into running deeper equality checks on HashMap keys, trigger equals() on its contents – the two HotSwappableTargetSource member objects
+HotSwappableTargetSource equality checks validate if the target objects inside HotSwappableTargetSource are equal; in this case – an XString and a JSONObject
+The XString.equals(object) triggers a call equivalent to this.toString().equals(object.toString()) call, which would trigger JSONObject.toString()
+JSONObject – org.apache.dubbo.common.json.JSONObject, which is a deprecated class within Dubbo, is used to handle JSON data. If a JSONObject.toString() is invoked, the super method JSON.toJSONString() will be invoked
+
+A toJSONString() call will attempt to serialize the object into JSON using JSONSerializer, which invokes a serializer. This serializer is generated using the ASMSerializerFactory. This factory attempts to serialize all getter methods in objects stored inside JSONObject.
+
+A toJSONString() call will attempt to serialize the object into JSON using JSONSerializer, which invokes a serializer. This serializer is generated using the ASMSerializerFactory. This factory attempts to serialize all getter methods in objects stored inside JSONObject.
+TemplatesImpl partial gadget – this known gadget is utilized by many gadget chains in ysoserial and marshalsec. This partial gadget generates a malicious com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl object. If this object’s newTransformer() method is invoked, the chain will execute java.lang.Runtime.getRuntime().exec(command)
+
+Since JSONObject.toJSONString attempts to serialize all getter methods, the method TemplatesImpl.getOutputProperties() is also invoked
+Internally, TemplatesImpl.getOutputProperties() method invokes newTransformer() to get the properties from a generated transformer
+
+Since JSONObject.toJSONString attempts to serialize all getter methods, the method TemplatesImpl.getOutputProperties() is also invoked
+Internally, TemplatesImpl.getOutputProperties() method invokes newTransformer() to get the properties from a generated transformer
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_912887\Dubbo1d.png
+Figure 3 – Exploit Bytecode
+
+Once newTransformer is invoked, a flow is complete between deserialization at HttpInvokerServiceExporter.doReadRemoteInvocation(ObjectInputStream ois) and java.lang.Runtime.getRuntime().exec(command), thus enabling remote code execution.
+
+The final gadget chain’s structure is:
+
+
+
+Once the vulnerability is triggered, and malicious code is executed (and, in the PoC, an instance of calc.exe pops on the server), an exception will be thrown. However, the application will continue to function as intended otherwise, resulting in stable exploitation for the given gadget chain.
+
+
+
+Figure 4 – PoC Outcome
+Why Is This Happening?
+Apache Dubbo using HTTP remoting occurs when a Dubbo application is created using the HTTP protocol over the Spring framework. A combination of a known-vulnerable class in Spring being invoked naively by Dubbo deserializes user input using the extremely vulnerable (and nigh indefensible) ObjectInputStream. An attacker may provide a payload which, when deserialized, will trigger a cascade of objects and method invocations which, given a vulnerable gadget chain in deserialization scope, may result in Remote Code Execution, as will be demonstrated in this POC.
+
+The vulnerable Spring Remoting class is HttpInvokerServiceExporter. From the Spring documentation:
+
+“WARNING: Be aware of vulnerabilities due to unsafe Java deserialization: Manipulated input streams could lead to unwanted code execution on the server during the deserialization step. As a consequence, do not expose HTTP invoker endpoints to untrusted clients but rather just between your own services. In general, we strongly recommend any other message format (e.g. JSON) instead.”
+
+This is exactly what happens with Dubbo HTTP Remoting. By using the Dubbo HTTP remoting module, an HTTP endpoint is exposed that receives an HTTP request of the following structure:
+
+A POST request
+
+Whose URL refers to the packagename.classname for the bean exposed by the provider, which is wired by Dubbo to the actual package and class
+Whose body is a stream of an object, as serialized by ObjectOutputStream
+
+Whose URL refers to the packagename.classname for the bean exposed by the provider, which is wired by Dubbo to the actual package and class
+Whose body is a stream of an object, as serialized by ObjectOutputStream
+The HttpProtocol handler parses the incoming org.apache.dubbo.rpc.protocol.http.HttpRemoteInvocation object using the HttpInvokerServiceExporter, which, internally, utilizes ObjectInputStream to deserialize it. HttpRemoteInvocation contains an invocation call to a certain method, and the arguments to pass to this method. However, with ObjectInputStream, any arbitrary serialized Java object can be passed, which would then be deserialized in an insecure manner, resulting in unsafe deserialization.
+
+ObjectInputStream, on its own without any external classes, is vulnerable to memory exhaustion and heap overflow attacks, when it is used to deserialize malformed nested objects.
+
+If an ObjectInputStream deserializable gadget chain is available within code scope that allows code or command execution, an attacker can exploit this to craft an object that results in Remote Code Execution. Such a gadget chain was found and exploited.
+Within the Dubbo HTTP service, the following occurs:
+
+JavaX HttpServlet is invoked with user input
+This input is passed to the Dubbo remoting dispatcher, DispatcherServlet, which uses an HttpHandler, an internal class in HttpProtocol, to handle the request and return a response
+InternalHandler.handle() creates the insecure HttpInvokerServiceExporter in line 210 and invokes it on the request in line 216
+From there, internal calls in HttpInvokerServiceExporter finally pass the request stream into an ObjectInputStream in line 115, which is then internally read by the handler’s superclass RemoteInvocationSerializingExporter in line 144.
+The gadget chain is then triggered by the ObjectInputStream readObject operation
+The only piece of knowledge required to exploit an open HTTP port to a Dubbo HTTP Remoting service is the name of a Remote Invocation interface’s package and class. This information is used to craft the URL to which a serialized malicious object must be submitted, which is standard Spring bean behavior. For example, if the remoted interface’s package is named “org.apache.dubbo.demo” and the interface being remoted is named “DemoService”, an attacker needs to POST an object serialized by ObjectOutputStream to the URL “https://domain:port/org.apache.dubbo.demo.DemoService”. This information can be obtained with various methods:
+
+Querying a Zookeeper for available beans, if Dubbo uses a Zookeeper as a registry
+Observing HTTP traffic via Man-in-the-Middle attacks
+Spoofing is also likely to be possible if Dubbo uses a multicast to find services (this was not tested)
+Other means, such as logging services
+No additional information is required to perform the attack.
+
+It should be noted that URL paths are generally not considered confidential information, and hiding a vulnerable web service behind an allegedly unknowable URL path would constitute security through obscurity.
+Summary of Disclosure and Timeline
+When the vulnerability was first discovered, the Checkmarx research team ensured that they could reproduce the process of easily exploiting it. Once that was confirmed, the research team responsibly notified Apache of their findings.
+Disclosure Timeline
+
+13/8/2019 – Checkmarx provides full disclosure to security@apache.org, issue forwarded to security@dubbo.apache.org
+6/9/2019 – Acknowledgement by Apache, Dubbo team that issue is clear
+4/10/2019 – Dubbo team responds regarding technical specifics of intended fix. Checkmarx responds by further explaining the issue – this is the first and last time technical issues are brought up by anyone at Apache in the context of this disclosure
+24/11/2019 – Reminder sent after 90 days had elapsed and publication is imminent with no action on Apache’s part
+3/12/2019 – Apache had requested more time to re-evaluate this issue prior to Checkmarx report publishing. This request was granted, with Apache confirming two days later that a CVE will be issued and a proper fix will be released
+11/2/2020 – CVE-2019-17564 disclosed via dev@dubbo.apache.org mailing list, six months (180 days) after original disclosure
+12/2/2020 – first POC emerges in the wild, but it does not contain the new gadget chain disclosed in this article
+Package Versions
+org.apache.dubbo.dubbo – 2.7.3
+
+org.apache.dubbo.dubbo-remoting-http – 2.7.3
+
+org.springframework.spring-web – 5.1.9.RELEASE
+Vendor Mitigation
+The Apache Dubbo team has resolved this issue by updating FastJSON, which contains the latest version of JSONObject, to its latest version in the project dependencies. This effectively breaks the current chain. They have also replaced the deserialization mechanism used by the HTTP protocol, altering the communication protocol, ensuring this specific exploit will not work.
+Conclusions
+The Dubbo HTTP Remoting service is vulnerable to unauthenticated Remote Code Execution, with virtually no prior knowledge required, other than a URL, for successful exploitation.
+
+The root cause of this issue is the usage of an unsafe Spring class, HttpInvokerServiceExporter, for binding an HTTP service to. This class utilizes a standard Java ObjectStream with no security mechanisms in the form of a class whitelist, which in turn means deserialization allows invocation of arbitrary classes whose deserialization process may trigger malicious code. Use of this class should be discontinued, and replaced with a robust solution that whitelists expected classes in Dubbo HTTP beans.
+
+This type of research activity is part of the Checkmarx Security Research Team’s ongoing efforts to drive the necessary changes in software security practices among all organizations in an effort to improve security for everyone overall.
+Appendix 1
+Appendix 1A: DubboGadget Class
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_912887\Dubbo3.jpg
+A class for attacking a Dubbo HTTP instance
+Appendix 1B: Utils Class
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_912887\Dubbo7.jpg
+Utility class, which includes utility methods, was used in the creation of certain parts of the malicious gadget chain and exposing certain functionality by streamlining reflections. It is derived largely from auxiliary classes and comfort methods in ysoserial by Chris Frohoff – https://github.com/frohoff/ysoserial. Additionally, the makeXStringToStringTrigger is derived from prior research by Moritz Bechler, demonstrated in https://github.com/mbechler/marshalsec
+Appendix 1C: pom.xml File for DubboGadget
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102819_912887\Dubbo8.jpg
+Maven dependencies for DubboGadget
+
+HotSwappableTargetSource objects always return the same hashcode (class.hashCode()), which forces the HashMap.putVal(h,k,v) into running deeper equality checks on HashMap keys, trigger equals() on its contents – the two HotSwappableTargetSource member objects
+HotSwappableTargetSource equality checks validate if the target objects inside HotSwappableTargetSource are equal; in this case – an XString and a JSONObject
+The XString.equals(object) triggers a call equivalent to this.toString().equals(object.toString()) call, which would trigger JSONObject.toString()
+
+A toJSONString() call will attempt to serialize the object into JSON using JSONSerializer, which invokes a serializer. This serializer is generated using the ASMSerializerFactory. This factory attempts to serialize all getter methods in objects stored inside JSONObject.
+
+Since JSONObject.toJSONString attempts to serialize all getter methods, the method TemplatesImpl.getOutputProperties() is also invoked
+Internally, TemplatesImpl.getOutputProperties() method invokes newTransformer() to get the properties from a generated transformer
+
+Whose URL refers to the packagename.classname for the bean exposed by the provider, which is wired by Dubbo to the actual package and class
+Whose body is a stream of an object, as serialized by ObjectOutputStream

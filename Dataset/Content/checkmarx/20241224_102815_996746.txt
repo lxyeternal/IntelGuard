@@ -1,0 +1,67 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\HugginFace04scaled.jpg
+Not The Models You’re Looking For
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image21.png
+
+Previously…
+In previous blogs, we’ve discussed how to exploit the Hugging Face platform using malicious models and the trust users still put in it. But what is being done to detect malicious models? And is it effective?
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image22.png
+spoilers haha no
+Introduction
+Since pickles are notoriously dangerous, there has been some effort by vendors, including HF, to at least flag models that have pickles which may behave suspiciously. According to the HF official blog, they rely on a tool called PickleScan to scan and flag pickles and torches that appear suspicious.
+After  uploaded malicious models to Hugging Face, our models were flagged, as expected from what they described in documentation:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image24.png
+busted!
+PickleScan seems to highlight pickles with potentially dangerous methods/objects, such as “eval” and “exec”. When trying to reach beyond the builtin types, anything would get flagged (more on this later).
+Since models are very dynamic and complex, the first assumption would be that PickleScan must be just as complex as a potential model, otherwise it would be either too naïve or too aggressive. That means the first step must be code-review to see how exactly it defines suspicious behavior.
+Bypassing Model Scanners
+PickleScan uses a blocklist which was successfully bypassed using both built-in Python dependencies. It is plainly vulnerable, but by using 3rd party dependencies such as Pandas to bypass it, even if it were to consider ALL cases baked into Python  it would still be vulnerable with very popular imports in its scope.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image25.png
+No need to be a Python wiz to get the feeling that this list is very, VERY partial.
+Searching deeper in the built-in modules and types reveals a great candidate – bdb.Bdb.run. Bdb is a debugger built into Python, and run is equivalent to exec.
+However, while it was possible to bypass the list with a Bdb reference, attempting to get run would still be flagged as ‘dangerous’, which would also mean it’s flagged:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image29.png
+Oh no dangerous sounds bad!
+This difference occurs because Torch.save defaults to the old “2” Pickle Protocol. When forcing it to update to the current “4” Pickle Protocol, “getattr” is optimized out in favor of a direct reference. This means PickleScan will miss it entirely:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image301024x312.png
+…but ‘suspicious’ is good enough for some reason
+You can read more about the difference between the Pickle Protocols in the official documentation, but essentially it makes sense to short-circuit getattr into explicit methods, if only to decrease the size of the data stream. Also, it helps researchers bypass weak blocklists, which is handy.
+Combining the blocklist bypass with Bdb.run instead of exec and the optimized protocol 4 will bypass Picklescan (at time of writing):
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image33.png
+Not busted 🙁
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image31.png
+NBBL – Never Be Blocklistin’ – code execution from an undetected Torch file
+A gentle reminder – blocklists are NOT good security. Allowlists with opt-in setters for customization are the only way to ensure every single trusted type and object are vetted, even if it is time consuming.
+This exact issue also applied to modelscan:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image23.png
+oh honey
+Improving PickleScan & ModelScan
+Having found these bypasses, it was clear we needed to reach out to PickleScan’s author . They were very prompt in replying and gladly added the Bdb debugger (as well as the Pdb debugger and shutil), and that was quickly deployed to Hugging Face. An identical blocklist approach was identified in ModelScan, an open source scanner for various models. We reported this as well, and they simply ported the fixes that were reported to PickleScan.
+We received no credit on this discovery and are not bitter about that at all. No sir.
+However, blocklists can’t be a great solution in something as wide as the entire Python ecosystem – and a bypass using an asyncio gadget was found, still within what’s built into Python:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image26.png
+Then, to drive the point home that, even if the entire Python module list was thoroughly block listed, the payload class was replaced with one not baked into Python, which is torch.load :
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image28.png
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image32.png
+yo dawg, I heard you like torch.load so I put some torch.load in your torch.load
+These gadgets have also been reported to the PickleScan maintainer, who added asyncio.
+Avoiding Malicious Models
+As an end use, it’s probably best to simply avoid pickles and older Keras versions where possible and opt for safer protocols such as SafeTensors.
+It’s possible to sneak-peek a pickle on HF by clicking the Unsafe and Pickle button next to the pickle:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\checkmarx\20241224_102815_996746\image27.png
+Including the little debugger gadget I reported to modelscan and picklescan and got no credit for, yeah.
+Conclusions
+This is the last blog post in this series. We’ve learned that malicious model scanners simply cannot be trusted to effectively detect and warn against malicious models. A block-list approach to completely dynamic code in the form of malicious Torch/Pickle models allows attackers to leave these solutions in the dust. However, the technical complexity of creating a safe allow-list for required classes is also not dynamic enough to offer the level of support required by these models.
+As such the safe approach to trusting Hugging Face models is to:
+
+Rely only on models in a secure format, such as SafeTensors, which only contain tensor data without logic or code
+
+AVOID PICKLES.
+
+Always thoroughly review supplemental code, even if the models themselves are in a trusted format.
+
+Reject code with unsafe configurations (e.g. trust_remote_code).
+
+Only use models from vendors you trust, and only after validating the vendor’s identity.

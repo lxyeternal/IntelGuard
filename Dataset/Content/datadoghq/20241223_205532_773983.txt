@@ -1,0 +1,119 @@
+
+What's new for security in Kubernetes 1.28
+The second Kubernetes release of 2023 is now available. While version 1.28 contains fewer major security-related changes compared to previous releases, it does include the beta release of an interesting feature called Validating Admission Policy. In this article, we will explore this feature in detail and discuss how to test it out before it becomes generally available. We will also cover another feature that is graduating to stable in this release: an API endpoint that enables users to gather information about themselves.
+Validating Admission Policy
+Validating Admission Policy is a feature that was first introduced in Kubernetes 1.26 and has now reached beta status in version 1.28. It provides a built-in mechanism for validating workloads at admission on Kubernetes clusters. Previously, the only option for implementing admission control without using third-party products was Pod Security Admission, which lacked the flexibility needed for more complex environments.
+This new feature uses the Common Expression Language (CEL) to create policies that can enforce a range of controls. For example, you can create a policy that prevents the use of privileged containers in a cluster.
+Trying out Validating Admission Policy
+To try out this feature, you can spin up a test cluster using a tool like kind (Kubernetes in Docker), which allows you to install test clusters on any machine that can run Docker.
+Since Validating Admission Policy is still in beta in Kubernetes 1.28, you will need to enable a feature gate and the correct API, as specified in the runtimeConfig section below.. You can do this by providing a custom configuration to kind, similar to the following example:
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+featureGates:
+  ValidatingAdmissionPolicy: true
+runtimeConfig:
+  "admissionregistration.k8s.io/v1beta1": true
+You can pass this configuration to kind by using the --config flag:
+kind create cluster --name=vap --config ./kind-vap.yaml
+Once the cluster is up and running, you can use the following kubectl command to confirm that the cluster has the necessary resource types:
+kubectl api-resources --api-group=admissionregistration.k8s.io -o name
+The returned output should include validatingadmissionpolicies and validatingadmissionpolicybindings, as shown below:
+
+
+Next, you need to install a sample policy. Currently, Kubernetes does not offer any default sets of CEL policies, but there are several under development. For testing purposes, you can add a simple sample policy to block the execution of privileged containers in the default Kubernetes namespace.
+First, you need to create a ValidatingAdmissionPolicy object:
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: "privpolicy.example.com"
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["pods"]
+  validations:
+    - expression: "object.spec.containers.all(container, !has(container.securityContext) || !has(container.securityContext.privileged) || container.securityContext.privileged != true)"
+      message: "no privileged containers!"
+The spec field of the object contains a couple of key sections. The failurePolicy specifies what should happen if there's an error evaluating the policy. In this case, we set it to Fail, which means that if the check fails for any reason, the resource will not be admitted to the cluster. The other option is Ignore, which allows the admission to continue in the event of an error.
+The matchConstraints section specifies which requests will trigger a check on this policy. Here, we're interested in cases where pods are created or updated.
+The validations section can include one or more CEL expressions to evaluate. The expression should evaluate to True for the policy to pass; if it evaluates to False, the policy will fail. Where there are multiple expressions, they must all evaluate to True for the policy to pass.
+For example, let's say that you want to ensure the policy passes if none of the containers in the pod have the privileged flag set in the securityContext section of their manifest. As shown above, you need to first allow the policy to pass if there's no securityContext set, which is done with the expression !has(container.securityContext).
+Next, the policy should pass if there is no privileged key in the securityContext, which is checked with the expression !has(container.securityContext.privileged).
+Lastly if the privileged key is present, we want the policy to pass only if it's false. This is checked by using the expression container.securityContext.privileged != true.
+The policy also specifies a message that should be returned if the validation fails.
+To make the policy effective, you need to create a corresponding ValidatingAdmissionPolicyBinding object that defines how the policy will be used in the cluster:
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: "privbinding.example.com"
+spec:
+  policyName: "privpolicy.example.com"
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: "default"
+The spec for this binding contains a couple of key fields. The policyName field should match the policy that the binding applies to, and validationActions specifies what happens if an object fails to pass the policy. In this example, it is set to Deny, but it could also be Warn, which returns a message to the client but still allows the object to be admitted, or Audit, which adds information to the Kubernetes audit log and (like Warn) does not block admission.
+The matchResources section specifies which resources will be subject to the policy. In this case, it applies to any resource that has the kubernetes.io/metadata.name label set to default, linking this policy to the default Kubernetes namespace.
+Now that you've defined these two objects, you can apply them to the cluster and test it out to make sure everything works.
+First, you can try running a standard pod to ensure it's not blocked incorrectly.
+
+
+Then, try creating the same pod—but this time, add the --privileged flag. You can see that it's correctly blocked by the ValidatingAdmissionPolicy.
+
+
+From this example, you can see that Validating Admission Policy should be very useful for cluster operators, because it allows them to control various aspects of workload admission to their environments.
+Authorization API for querying self user attributes
+Kubernetes 1.28 also includes the stable release of a SelfSubjectReview API. This feature was released in beta in Kubernetes 1.27, and it allows users to identify attributes about themselves. Kubernetes does not have a user database, so it has traditionally been difficult for users to understand how the cluster sees them and to discover details about themselves, such as their group memberships. This feature provides an easy way to retrieve this information from the API server.
+This feature should work with any authentication system, but the information you receive may vary depending on the authentication options in use.
+On a Kubernetes 1.28 cluster, you can use the kubectl auth whoami command to retrieve information about your user.
+
+
+Conclusion
+Kubernetes 1.28 includes a couple of new features that improve the security of Kubernetes clusters. Validating Admission Policy provides a flexible option for operators to implement admission control in their clusters without relying on external software. The new API endpoint allows users to debug access and permission problems with their accounts, simply by using a kubectl command.
+The landscape for security in Kubernetes is always changing. In the next couple of versions, we're likely to see some substantial changes with features like Structured Authentication Configuration, which will provide a lot of additional flexibility for authenticating users.
+privileged
+runtimeConfig
+--config
+kubectl
+validatingadmissionpolicies
+validatingadmissionpolicybindings
+ValidatingAdmissionPolicy
+spec
+failurePolicy
+Fail
+Ignore
+matchConstraints
+validations
+True
+False
+True
+privileged
+securityContext
+securityContext
+!has(container.securityContext)
+privileged
+securityContext
+!has(container.securityContext.privileged)
+privileged
+false
+container.securityContext.privileged != true
+ValidatingAdmissionPolicyBinding
+spec
+policyName
+validationActions
+Deny
+Warn
+Audit
+Warn
+matchResources
+kubernetes.io/metadata.name
+default
+--privileged
+ValidatingAdmissionPolicy
+SelfSubjectReview
+kubectl auth whoami
+kubectl

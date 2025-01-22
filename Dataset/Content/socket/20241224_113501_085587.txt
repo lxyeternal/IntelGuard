@@ -1,0 +1,491 @@
+
+What is JSON?
+While it may seem a simple question, JSON is often referenced in a variety of forms and often can be used in reference to adjacent variations or standards. This is a brief summary of a variety potential thoughts to consider when discussing JSON.
+Base Standards#
+
+ECMA - ECMA-404 - Ecma International (ecma-international.org)
+IETF - STD-90 - Internet Engineering Task Force (ietf.org)
+IANA Media Type - Media Types (iana.org)
+JSON has 2 actual standards regarding its syntax and semantics from IETF and ECMA that are in somewhat contention as they are not under the same governing body. These are largely interoperable, but this document mjpeay call out nuanced differences.
+Common Minimal Supersets#
+Comment Support
+Many variants of JSON allow for comments in the form of line comments using // and block comments using /**/. These generally are unused but are sometimes providers of metadata to tooling. For the purposes of explanation in code this document does make some use of this variation. Removal of these comments is expected for spec compliant JSON.
+{
+  //#region metadata
+  /** @link canonical … */
+  //#endregion
+  values: [ 1, 2, 3 ]
+}
+Trailing Comma Supporting JSON
+Many variants of JSON allow for array value entries and object value entries to have a trailing comma (,) even if it is the last entry of the value. This prevents needing to track if an item is the last element. This can also reduce developer maintenance by causing tools like diffs to produce clearer results by not affecting preceding entries by appending a comma. For example, adding an item on a new line for an array can produce a diff that affects 2 lines even if every item is isolated to a single line. Compare:
+[-  1+  1,+  2 ] [   1+  2,]
+Concatenated JSON
+JSON does not natively provide a means of streaming multiple root values without waiting for a complete end of a root value; however, JSON values do not overlap in grammar (except in the case of numbers) and as such can be concatenated without ambiguity if treating the end of a value as the end of an entry in the stream generally. So, for these cases many JSON parsers do allow for streaming multiple values by concatenating values together. Due to numbers having some level of overlap but being less common as a root value type, often these JSON parsers also do allow for some level of separator, commonly line delimited values (e.g. NDJSON, LDJSON, JSONL) but sometimes parsers allow separation by other characters like a comma.
+truefalsetrue,falsetruefalse
+These do allow for multiple roots but are useful beyond that for a few reasons. In particular, having an Array as a root needs to reach the end of stream to validate while using segmented streams means each entry can be validated separately allowing erroneous values to not invalidate an entire stream. Doing so can avoid holding JSON in memory while writing values out. For example, the following shows an incomplete value that could be streamed until it is invalidated (operation aborted, errors, etc.) without needing to keep a big object it in memory:
+{"arguments": [{"BIG_OBJECT":"…"}], "result": 200}
+{"arguments": [{"BIG_OBJECT":"…"}], // note incomplete value
+{"arguments": [{"BIG_OBJECT":"…"}], "result": 200}
+Alternatively saving an Object and assigning an Object ID for large objects is possible and then referencing that but it might not be suitable for all scenarios.
+Additionally, by having segmented streams this often can allow parallel operation by splitting a stream at byte offsets and then searching for a segment's boundaries to analyze. This can be used to perform searching in ways not typically safe to do on unverified JSON such as binary searches when the JSON is sorted and parallel processing. For example, the following JSON can be split in half bytewise (as highlighted) and then search for the nearest boundary and have 2 different workers process only part of the JSON stream knowing finding a boundary means a different root value. Real world usage might be things like searching for "barry@different.example", filtering by domain name, or sending email to each for large amounts of values; this can speed up costly operations but may not be beneficial for small numbers of values.
+"alice@domain.example"
+"barry@different.example"
+"foo@domain.example"
+"susan@domain.example"
+Styles of Deserializers/Serializers#
+JSON serialization and deserialization largely falls into 2 categories: streaming and to completion libraries. Streaming libraries operate by working on small discrete parts of JSON values such as emitting a stream of bytes for each number fully encountered or calling a method after reading a Number value from JSON. To completion libraries are more common and process a full JSON payload before producing any output. To completion libraries are able to determine if a JSON root value is valid prior to any output unlike streaming libraries but require buffering the output while waiting for the JSON root value to complete. Take for example the following incomplete JSON which never terminates the root value:
+[ "Never", "gonna", "give", "you",
+A streaming library may produce a series of method calls for the opening of the root value Array, the Strings contained within, and an error only after these methods are called. A to completion library would only produce an error if operating strictly on JSON. Care must be taken to account for later errors when processing output of a streaming JSON library.
+Lenient Parsing
+A variety of libraries do provide error correction mechanisms in an attempt to produce a valid JSON value regardless of how invalid the input they give it. This may be by providing default values, generating artificial value terminators, etc. These are most useful in cases like text editors where JSON may often be in an invalid state while editing.
+On-Demand Parsing
+By having clear terminators for container endings, there are some forms of on lazy parsers that track offsets into values and only parse the internal structure of a value when it is accessed programmatically (see On-demand JSON: A better way to parse documents?). This means that while the internal values of a container may be invalid this is not error checked during parsing until access.
+{
+  "exports": { "": lib.js }, // note missing quotation
+  "scripts": { "start": "node example.js" }
+}
+This allows for various parts of the JSON root value to only be tracked as offsets rather than fully parsing/reifying any unused components of the value. However, due to the semantics of things like duplicate key these kinds of parsers should be clear on which semantics are chosen and expectations of the input into them less they not match either streaming or to completion common semantics. Additionally, these forms of parsers will necessarily elide errors due to only performing partial parsing (further discussed below) and should only be used in cases where that is appropriate.
+This can have more intricate parsing semantics than other parsers since due to reducing tracking to find key value pairs in objects it can lead to wrap-around semantics where instead of tracking where all the keys are and their respective values start, instead it tracks only the starting offset of a single key and the starting offset for the containing object. When it reaches the end of the container the parser then wraps to the start of the object to try and find the matching key.
+Nuances of Using JSON#
+Interoperability
+Having a minimal specification and low complexity JSON excels at interoperability and generally a JSON deserialization and serialization library for specific scenarios. Even other small formats like INI or TOML can have some interesting edge cases due to keeping state in more complex ways that are less localized than JSON. Almost all scenarios in modern programming have the capability to interact with JSON at some level.
+The lack of some features causes variations in JSON as listed above for things like comments, trailing commas, etc. This fragments the JSON ecosystem and means that understanding what kind of JSON is being operated on and the state of validation of JSON is important. For example, while a tool may accept comments and remove them during internal processing, if it needs to output changes it should not remove the comments when outputting changes. However, when the same tool sends data to APIs, they often will expect JSON without comments and so it must also be about to output JSON without comments. This means for high quality software they often need to operate on multiple variations of JSON if they allow a non-standard feature set.
+While it is stated in both specifications that JSON must be sent as Unicode, IETF and ECMA differ here where IETF says that JSON must be sent as UTF-8 while ECMA leaves it as any form of Unicode code points. Even with these expectations, the reality is that a variety of non-Unicode code points are used in cases such as Chinese characters (E.G. this fastify issue). This often is due to misuse of encodings such as described in this thread. Due to this, it is necessary to know the charset and include it when generating the proper MIME for presenting the content-type of JSON. Additionally, it is common to have JSON with lone surrogates in its source and as such accommodations for parsing are common like for the following in the JS standard library.
+JSON.parse(`"${'🔥'.slice(0,1)}"`) // '\uD83D'
+Stability
+One of the major reasons that so many APIs and systems use JSON is because it is incredibly stable; often JSON will have feature requests that are rejected outright due to lack of backwards compatibility with the plethora of existing libraries that operate on JSON. For example, adding trailing comma support would require a rollout of a significant percentage of all computer software in use to be updated. This is not feasible and so stability of JSON is held with extreme vigilance.
+This level of stability allows maximal compatibility but means for a variety of scenarios unexpected usages of types may occur due to practical limitations across the ecosystem or due to other concerns about needing specific feature sets that will never become part of JSON.
+Well Defined Termination
+Some formats can lead to unknown termination conditions. For example, INI files may be split by line-terminators but lack a termination signal to state that the file has been completely and successfully parsed. In the following example, removing the highlighted part due to something like network error, aborting of file writing, etc. would still result in a valid file but lacking values that may be necessary for operation or may result in issues if missing. Lack of values can result in inability for some software to even start or may result in undesirable default values doing things like causing insecure configuration.
+[server]
+# default of 0.0.0.0 would expand attack surface if this line is lost
+LISTEN_ADDRESS=127.0.0.1
+JSON only lacks clear termination of numbers; however, it is rare for numbers to not be contained in a different type and so this can largely be ignored.
+Limited Types
+JSON has very few types it supports, but the ones it does have can be mapped to almost any programming language or paradigm and are incredibly generic.
+JSON has very limited types and relies on software to interpret types in specialized ways. This decouples JSON from being able to create security infiltration gadgets due to insecure deserialization normally since it generally never maps directly onto objects that perform effects during allocation for most libraries interacting with JSON.
+This lack of types causes many libraries interacting with JSON to allow conversion to runtime specific classes when properly annotated. This means that these annotations can lead to insecure deserialization when used still. For example, the following code may perform evaluation if annotated in a way to automatically be converted when found:
+@JsonRootName(value = "validator")
+class Validator {
+  string src;
+  test = eval(src);
+}
+Manual Data Layout
+JSON does not generally enforce layouts for things like order of property keys nor allow for things like referential values. Software using JSON must manually define any dependence upon data layout and even recreate data layout due to these lacking features. Doing so is not just a problem of requiring developer vigilance to create the layout of Objects and references but also by causing restrictions like not allowing multiple siblings to be written at the same time due to being sequentially parsed. This kind of data layout can surprise people less familiar with JSON as the following JSON are not necessarily equivalent due to a variety of nuances discussed below.
+
+
+Whitespace
+JSON's Object Model treats whitespace between special characters and outside of scalar values (Boolean, Null, Number, String) as insignificant and without semantic meaning. This whitespace is limited to \u0020, \u000A, \u000D, and \u0009. Unicode whitespace properties are not respected, and it would be problematic for them to change due to interoperability and the mutable nature of Unicode as it evolves.
+It is important to note that while JSON's Object Model ignores whitespace that does not mean it is insignificant. Removing whitespace can mangle file formatting for readers of the file using text editors, whitespace may have a necessary trailing newline when fed to other tools, etc.
+Object Model
+JSON is made up of values strictly conforming to 6 data types from JavaScript and no more: Array, Boolean, Object, Null, Number, String. The specifications do not explicitly call out the Boolean values as different from Null, all are considered token literal base values without discrete semantics; however, due to real world consideration differences they are separated here.
+Root Value#
+It must be called out that JSON does not mandate any data type for the root value; the JSON root value may be a non-container type such as a Boolean, Null, Number, or String value. The following are all examples of valid complete values for JSON with not outer container, they are root values:
+[]false{}null0""
+Array#
+According to the specifications:
+An array is an ordered grouping of values. Array values start with a left bracket ([) start character and have a right bracket (]) end character when serialized. Values may be placed between the start and end characters in their directly serialized form and separated by a comma (,) separator character. Trailing separator characters are not allowed in JSON. Arrays may contain no values (serialized as []) or many values with no specified upper limit.
+Real World Considerations:
+Due to various programming language limitations, there is a practical limit is 232-1 values in an array when seeking interoperability with standard libraries.
+Due to needing to know if there is a subsequent and/or previous value in order to serialize a given value in the array, this type is not as suited for streaming data structures as other supersets. If streaming data consider using a prepending comma (,) instead of a trailing comma when producing values in the array. This allows arbitrarily appending a right bracket (]) to terminate the stream rather than a termination value or needing to buffer values to see if they are the final value.
+Boolean#
+According to the specifications:
+A Boolean value is a value that is discretely one of 2 possible values. It can be the value serialized as true or the value serialized as false. JSON has no semantic meaning for these values.
+Real World Considerations:
+These values do not have semantic meaning and may be better suited as an enumeration (enum) in your language if they are not directly used. An example of this can be shown with the following 2 JSON bodies.
+[true, false, true]
+[1,0,1]
+The first body has direct translation into Boolean values for programming languages but occupies more space when serialized and cannot perform in-place edits due to true and false having different lengths. Specialized encoding using enums to map to programming languages may cause interoperability concerns but be beneficial for space and/or extensibility by having more than 2 discrete values but keeping the same serialization type. Alternatively, if a serializer ensures true has a trailing space it would allow in place edits.
+Falsy and Truthy Coercion
+JSON is derived from JavaScript and may be subject to lots of code relying on JavaScript concepts of values being coerced to Boolean values. As such JSON should be aware that the following values are considered to coerce to false and ALL other strict JSON values are converted to true:
+falsenull0-0""
+While this is not in the JSON specification, be aware that missing values are often also converted to falsy values in lots of things working with JSON. Therefore, for optional fields such as an optional "age" field of a person is distinct from null when missing but often considered a falsy value.
+Object#
+According to the specifications:
+An object is a grouping of paired values where the first value is a String value representing a key and the second value can be any JSON value. Object values start with a left brace ({) start character and have a right brace (}) end character when serialized. Entries may be placed between the start and end characters in their directly serialized form and separated by a comma (,) separator character. Trailing separator characters are not allowed in JSON. Objects may contain no entries (serialized as {}) or many values with no specified upper limit.
+Each JSON value entry consists of a String value acting as a key, a colon (:) separator character, and another value acting as the entry value.
+IETF and ECMA standards differ on Object requirements where:
+
+ECMA explicitly states that keys need not be unique.
+IETF states that entry keys should be unique within a given JSON object value.
+Real World Considerations:
+Keys for JSON values are used for a variety of situations that may not seem to comply with the notion that JSON objects are unique mappings of keys to values.
+Ordered Mappings
+It is often misunderstood if JSON object values are often order dependent. Specifications may lead to a false assumption that the order in which keys appear in JSON object entry values are not important; however, a variety of usages of JSON do rely on the key order. Luckily, many modern iterations of standard JSON parsing in programming languages intentionally preserve key order for JSON object values. Either by deserializing into ordered Hash in the case of Ruby, ordered Dict in the case of python, etc. Alternatively, they can preserve key order by not deserializing directly into a well-known type and instead allow iteration of JSON object entry values. This behavior is necessary due to a variety of recent standards such as Import Maps and the package.json fields for exports and imports mappings using object key order in their algorithms.
+Duplicate Keys
+JSON by itself lacks the ability to include metadata (comments) in its serialized form. Therefore, people do use comments. The common behavior of parsers is that only the last entry value for a given key is returned when using the fully mapped form of a JSON object value people have used duplicate keys as comments:
+{
+  "scripts": {
+    "start": "will listen to port 8080 or $PORT",
+    "start": "bin/server.js"
+  }
+}
+This is widespread enough that it is necessary to account for when interoperating with arbitrary JSON and is recommended for any implementations to follow if they accept arbitrary JSON.
+Although the common behavior for the last entry value to be the value when using the mapping the order of the entries is preserved instead. So, if there is a key prior to another in the JSON it will be the first when iterating even if the value is omitted. This matches the behavior of various insertion-ordered map implementations as if each entry was inserted in order it was encountered. This behavior may be relied upon but is rare to be required in real world applications.
+parsed = JSON.parse(`{ "b": 1, "a": 2, "b": 3}`)
+// NOTE:
+// "b" is first key in the stringified form and the parsed string
+// the value of b in the stringified form is the last in the parsed string
+assert.deepEqual(JSON.stringify(parsed), '{"b": 3,"a": 2}')
+Marshaling by First Key
+For a variety of static languages, they can produce deserializers that need to allocate objects as they create an object. It is often seen that deserializers rely on the first key of an object being a special value acting as a tag informing the deserializer on how to allocate that value. This can actually conflict with the object itself which may have the same key as the tag thus causing another case where duplicate keys may be expected. In the following example, we can see a JSON object value that is converted to an Alert class with a duplicate field due to the Alert class having a field also named type.
+{
+  "type": "Alert",
+  "severity": "high",
+  "type": "breach"
+}
+Schema Additional Keys
+Due to many applications of JSON being done by only integrating against a well-known set of keys for JSON object values, it is not uncommon to use underspecified keys for JSON object value schemas as a means to attach metadata. These values often are used for comments. To avoid forwards compatibility problems, ensure to strip unknown additional keys for objects that only expect a very specific set of known keys. For the following JSON schema, additional keys are allowed but would also potentially be fed back to the consumer as a side channel if not properly sanitized to match the schema.
+{
+  "properties": {
+    "a": { "const": 1 }
+  }
+}
+This would validate against {"a":1, "b":2}. If the data does not have "b" removed it may cause unexpected effects from showing additional rows in tables that iterate object value entries or making it impossible to introduce the property key "b" into the schema if the data lake associated with these values is not able to be normalized such as if the data lives under consumer-based storage.
+Some ways to mitigate this forwards compatibility concern are:
+
+Make additional unknown fields in your schema invalid.
+Remove unknown fields from your object values when storing them.
+Add a version tag to your JSON object value or a root JSON object value that can specify what keys are valid.
+Null#
+According to the specifications:
+A Null value is a value that is discretely one value. It is the single value serialized as null. JSON has no semantic meaning for these values.
+Real World Considerations:
+Missing properties vs. Null properties
+Often schemas have optional fields of objects. Due to this, many languages will default missing fields to null. However, doing so is semantically different and observable when producing JSON and can actually violate the ability to round trip through various schema requirements such as the following JSON schema:
+{
+  "properties": {
+    "a": { "const": 1, "nullable": false }
+  }
+}
+This schema would validate {} but would not validate: {"a": null}. Instead of defaulting values to null it is recommendable to preserve and check if the property exists instead.
+Often, values unable to serialize to JSON are coerced to either null or treated as missing values depending on the serialization library dependent implementation. Things like serialization of a function may be treated as missing values in one library but coerced to null in a different library. Due to JS compatibility, it is likely recommended for functions at least to treat them as missing values. Other values that do not directly map to JSON often are converted to JSON in library/language specific manners.
+Special locations for missing values
+When converting missing values into roots, various serialization methods need to perform round trips but do so in different ways according to the location of a missing value.
+
+For root values that are missing values, these values are generally kept as the missing value! When serializing, check the result type of the library used as it may be neither an error nor a valid JSON value for round tripping.
+For Object properties these values often omit the entire key value pairs due to the concern above.
+For Arrays, in order to preserve indices, the values are converted to null.
+// undefined
+let rootMissing = JSON.stringify(undefined)
+// {}
+let propertyMissing = JSON.stringify({ x: undefined }
+// [null, 1, null, 2, null]
+let arrayElementMissing = JSON.stringify([undefined, 1, undefined, 2, undefined])
+Number#
+According to the specifications:
+Numbers in JSON are common notation numbers for decimal or integers with E notation allowed. Prefixing the exponent component of a number with + is allowed but not the entire number. Numbers do not have a distinct terminator character and rely on a boundary with a different grammar token to delineate themselves.
+Real World Considerations:
+Accuracy
+Simple JSON conversion to numbers often excludes a variety of scenarios such as numbers too big for the deserialized value type. For example, JSON.parse("1e309") will result in a value of infinity in many languages that by default deserialize numbers into IEEE 754 64-bit doubles which leads to limited accuracy. Additionally due to common usage of floating-point representation some numbers will also be inaccurate when round tripping such as JSON.parse("0.33333333333333331") often becoming 0.3333333333333333 (Note the last digit differing).
+Due to accuracy issues particularly for large numbers representing 64bit and larger values for things like UUIDs it is common to encode numbers using Strings instead of using the direct JSON Number value type. For example, in the above JSON.parse("0.33333333333333331") becoming JSON.parse("\"0.33333333333333331\"") allows a safe conversion to a String without loss of data when round tripping through other systems that may have accuracy issues. Serializers and deserializers can then at the proper time convert the String value into the proper and adequate Number type outside of these ranges.
+Special Numbers
+IEEE 754 doubles have a variety of special values; these special values should be accounted for as sending JSON through many languages can cause coercion of these values to new values and even different types of values.
+JSON does allow serialization of both an unsigned and negative value for 0. This can cause issues in some integrations as negative zero and zero do have semantic differences resulting in things like 1/-0 becoming a negative infinity but 1/0 becoming a positive infinity.
+JSON does not allow encoding Not a Number values (NaN) even though it is based upon JavaScript which does have NaN. This is left up to libraries to implement the behavior of, but in general NaN are converted to null rather than omitted. Similarly, Infinity and Negative Infinity are not able to be specified in JSON and coerce to null when being serialized. However, unlike NaN due to lack of accuracy deserializing large numbers can result in creating values for Infinity from JSON.
+// '1.7976931348623157e+308'
+JSON.stringify(Number.MAX_VALUE)
+// 'null'
+JSON.stringify(Number.MAX_VALUE * 10)
+// Infinity
+JSON.parse('2e309')
+String#
+According to the specifications:
+A string is an ordered set of valid Unicode code point values representing text. It starts with a double quote (") start character and has a double quote (") end character when serialized. Characters may be placed between the start and end characters with only 3 sets of characters that must be escaped: quotation mark \u0022, reverse solidus \u005C, and the control characters \u0000 to \u001F. Some convenience escapes are available including specifying Unicode code points.
+Real World Considerations:
+Deceptive Characters
+Often JSON is shown in a textual manner to consumers. This means it is generally subject to deception from things like Unicode control characters, diacritics, and things like zero width characters. Ensure that these are not accidentally shown to consumers as equivalent but treated as discrete values. For example: "e\u0301" is visually equivalent to "\u00e9" but has a different code point length and would fail equivalence checks for things like Object keys. So you can have an Object with 2 fields with visually equivalent keys:
+let a='e\u0301';
+let b='\u00e9';
+console.log(JSON.stringify({
+  [a]: a.length, // .length in JS is codepoint length
+  [b]: b.length
+}));
+// output {"é":2,"é":1}
+Lone Surrogates
+Although JSON itself imposes no practical text encoding requirements in general, an expectation should be held of WTF-16 or WTF-8 being provided over JSON Strings. This means that although expecting unicode in strings even when transmitted as valid Unicode, the string encoding itself provides character escapes that can directly produce invalid unicode. An example of this is the character 🔥which in UTF-16 situations is made of 2 code points: \uD83D and \uDD25 across 4 bytes. It is invalid Unicode to separate the bytes but is valid JSON to have a string "\\uD83D".
+let serialized = JSON.stringify("🔥"[0]);
+// '"\\uD83D"' - note extra \JSON.parse(serialized);// "\uD83D"
+Due to this invalid production, there are a variety of concerns. Many decoders will error in this scenario, but not all of them. Ensure that when serializing or validating input you do not split on these characters accidentally for things like truncation of Strings. This will commonly show up in cases where you do something like truncate for previews or splitting for max lengths.
+let preview = str.slice(0, 100);
+// may produce a lone surrogate
+Many languages provide ways to validate Unicode Strings; in JavaScript you can use string.isWellFormed() to validate entire strings and check the first and last code point if doing some sort of substring operation on a known well-formed Unicode String. Due to using strings to represent keys in Object entries this validation must be done on keys as well as values during both serialization and potentially deserialization:
+parseAsReplacement('"\ud83d"') !== parseAsSurrogate('"\ud83d"')
+Robustness Concerns
+Useless Values#
+JSON can often end up with unused values. For example, when wanting to know the avatar image for a Person you may receive a full JSON like the following where an entirely unused object entry for "name" is in the JSON:
+{
+  // this entry would generally be parsed and held in memory
+  "name": "Bradley Meck Farias",
+  "avatar": "https://..."
+}
+Due to how JSON parsers generally work this means that those unused fields do occupy memory when parsing and even after being parsed when doing non-streaming SAX style parsing. Most schema libraries are only applied after a full parse is performed and would not be able to help prune the value if it were to be catastrophically large. If instead of just "name" it could be thousands of keys or thousands of unused elements in an array. Sending large extraneous payloads should be mitigated both by total body size checks prior to/during parsing and things like parser-based pruning. This concern is very minimal when doing streaming style of JSON parsing as it simply would be sent for processing by the streaming library rather than held.
+There are existing platforms concerned with memory like embedded usage in ModdableTech's XS that have special JSON parsing libraries to specifically help mitigate this kind of problem. Additionally, JSON.parse can take a reviver function that trims Objects after they are allocated, but this may unusable since it has to fully allocate an object to begin with.
+Hanging Values#
+When parsing JSON, it is possible for the JSON to have long periods where a value is almost but not entirely completely transferred. Consider the following unterminated string that would be kept by the parser in memory often even if unused on purpose in a sort of slow loris style of attack. Even with streaming style parsing this generally would keep the value entirely in memory while waiting to emit the value. Problems can exist however when multiple of these hanging values pile up on a service each causing unbalanced memory pressure. Chunked streaming libraries can avoid this by emitting many events for large values instead of waiting for a full value. Additional mitigations can be performed by limiting the total memory usage of all concurrent parses of JSON values. Consider the following where a streaming parser may hold onto an incomplete value for name after parsing avatar from the previous example just by re-ordering the fields:
+{
+  "avatar": "https://...",
+  // even with a streaming parser the long string generally would be
+  // held in memory
+  "name": "... and extremely long string that never terminates
+Container Stack Growth#
+JSON has very little state to keep track of if doing a streaming style of parsing. While streaming, data simply can emit keys/values as they are seen; however, in order to track proper Object and Array termination the parser must keep a stack of boolean values at least to represent what the current expected termination character is. Commonly, this stack is not heavily optimized for memory usage however and may occupy more than 1 byte per container. This means that JSON like the following could create quite a bit of unused growth where each [ character occupying a single byte of JSON ends up occupying many times the number of bytes while parsing due to having diagnostic information and non-optimal structures while parsing. This means that some attacks may be performed by simply repeating as many of those characters as possible. For example, the following would simply try to fill up that stack growth.
+// this small stream could take up kB of memory depending on library
+[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[
+Compression
+In general, JSON is often compressed when sent through things like HTTP or even when stored at rest. GZIP and Brotli compression are often quite well suited for ascii printable character-based encodings. It should be noted that compression may suffer when encoding binary data due to a form of double compression causing interference between the two features.
+When sending JSON it can be advantageous to compress data at rest for a variety of reasons. However, due to the nature of compression it may prevent random access patterns that could otherwise be possible. If random access is needed and compression is also desirable splitting up values is one possible solution. For example, if there is a string of data that is 10MB long, but only small slices are accessed at a time it maybe be desirable to instead create chunks of 100kb strings and compress that data at rest using a binary encoding suitable for embedding in JSON this can aid in random access without the need to decompress the entire 10MB of strings for example. Take care that without some form of well known index for the start/end of the split JSON string values the entire range will need to linearly thus potentially defeating the point of random access.
+Encoding Binary Data
+JSON does not have a binary data type for encoding arbitrary data. Often the JSON string type is used in place of having a binary data type. The limits of what characters can be used in JSON Strings allows for a variety of encodings, usually as printable characters for binary data.
+Hexadecimal#
+Although able to completely use hexadecimal within a JSON String, it does not have good compression ratios for binary data. However, this is a stable length compared to the original binary representation and does allow for easy random access by hexadecimal encoding being an encoding of 2 encoded bytes representing every byte of the original data.
+For example, JPEG has a format always starting with 0xFF, 0xD8 and then 2 bytes further refining the type. Software may want to read the first 4 bytes of data for a JPEG encoded as hexadecimal to see the type of JPEG. Software only needs to read the first 8 characters of the hexadecimal encoded string representing the JPEG without reading the entire image's hexadecimal encoded string.
+Base64#
+Encoding using Base64 can be quite desirable but due to sometimes being passed in URL components such as data: URLs it is often desirable to use the Base64URL dialect of Base64. Random access is possible due to Base64 being an encoding of 4 encoded bytes for every 3 bytes of the original data. Due to being a linear bitstring encoding inside each group of 4 bytes some slicing can be done to avoid reading the entirety of a 4 byte grouping.
+In the JPEG example above if using Base64 instead, software would only need to read the first 8 characters of the Base64 encoded string if reading the first 2 groups of encoded data, representing bytes 0-6. If slicing the encoded groups, software actually only needs to read the first 7 characters.
+Base85#
+JSON strings are valid targets for Base85 encoding as long as they use a dialect that doesn't encode the reserved characters of JSON. This can be used for better compression at the cost of available tooling and interoperability. Random access is possible due to Base85 being an encoding of 5 encoded bytes for every 4 bytes of the original data. Base85 encoding is not a linear bitstring but instead a numeric transformation based upon 32bit numeric values and cannot slice a group for partial reading, each group of 5 encoded characters is read in its entirety. Ascii85 is the most popular alphabet for Base85 encoding.
+In the JPEG example above if using Base85 instead, software would only need to read the first 5 characters of the Base85 encoded string.
+For comparison purposes the following table for a 1✕1 GIF pixel image illustrates some data around this:
+
+
+Hex	"4749463839610100010080ff00ffffff0000002c00000000010001000002024401003b"	72	52	66
+Base64URL	"R0lGODlhAQABAID_AP___wAAACwAAAAAAQABAAACAkQBADs"	49	53	61
+Base85	"7nH003FMpg!<@ZM!<<*!!!!!Mz!<<-#!!33i!<>1"	42	46	58
+It may be noted as per this table that the compressed form may actually exceed the original (see underlined) in length; this is due to a double compression issue that can show up, but compression can still have overall benefits that are more easily seen at large binary sizes and variety not shown in this example table. If you are sending lots of binary data, try to know what kind of compressions your data may be sent through.
+Signing#
+Cryptographic signing is performed generally on binary data. To that end, JSON that needs to be signed must be completely normalized otherwise seemingly insignificant alterations like whitespace manipulation or key reordering can affect the signature. Due to this, signing JSON values is not recommended if they may be subject to alterations even if seemingly insignificant. Usages that do perform cryptographic signing of JSON often serialize the entire JSON value prior to signing the value. The serialized value won't be manipulated generally when putting the signed value inside of JSON leading to a sort of double encoding like the following JSON that includes a nested JSON value as a serialized JSON String:
+{
+  "body": "{ \"signed\": \"value\" }",
+  "signature": "..."
+}
+Out of Band Data
+Sometimes binary data may be undesirable to embed directly into JSON. In order to represent binary data this often means using a string to refer to data stored outside of the JSON entirely.
+URLs#
+URLs are commonly used to reference data. URLs do not directly correspond to content however and may be subject to both intentional and unintended updates to their content. Often these are transmitted over HTTP but not necessarily. URLs often can correspond to multiple binary values and may end up with different values depending on how it is retrieved. For example, requesting a PNG or JPEG format vs a SVG representation for an image can be achieved for HTTP based resources. Be wary when using this form of reference having data be volatile in a multitude of ways and cache mismatches. The following example shows how even with a URL adding extra data on these volatilities may be used potentially:
+{
+  "avatar": {
+    "src": "https://img.example/store/bobby",
+    "known-formats": ["png", "svg"],
+    "allow-stale": true
+  }
+}
+Content Addressable Storage#
+A variety of out of band data therefore has content stores that use content addressable storage instead as it more directly maps to a specific value. Due to the lack of property ordering, potential for duplicate fields, etc. it is desirable to remove all extraneous data when generating a storage value for JSON to avoid unexpected mismatches due to that. Just like with URLs it is sometimes possible to include multiple variations of stored values such as different formats:
+{
+  "avatar": {
+    "src": {
+      "png":"sha256-...",
+      "svg": "sha256-..."
+    }
+  }
+}
+Chunked Storage#
+JSON may be too large or repetitive to want to store in a single value. Doing so may have problems with processing, resumable writing, caches, etc. There are a variety of strategies to mitigate these problems that will not be fully covered here.
+An important note with JSON is that the size of values is not determined ahead of time for storage concerns. If you were to store 4-byte chunks for example, the following JSON and its modified form immediately after would not match and in fact split the first JSON in the middle of a Number; no chunks could be reused in this case and would lead to needing to pull the previous/next chunk when trying to process 20
+[1,20,30]
+[10,20,30]
+Instead of storing by a uniform chunk size, it is often advantageous to take different approaches like segmenting on well-known terminators such as the start of special fields in the JSON, not segmenting a value across chunks, and things such as a delta compression. Beware of doing so, doing so can make random access more complex and needs a more intensive index/manifest for chunks.
+Combining Values
+JSON does not specify how values are combined when performing a merge operation. It is generally not advisable to mix types when merging JSON values. A variety of unexpected behaviors can occur such as putting Array/String indices and length as entries on an Object potentially:
+A = {}
+B = [1]
+merge(A,B)
+// { "0": 1, "length": 1}
+
+C = {}
+D = "a"
+merge(C,D)
+// { "0": "a", "length": 1}
+Referential/Cyclic Data Structures
+JSON lacks referential types and thus lacks the ability to represent cyclic values. There are a variety of supersets of JSON that do allow for referential values but in general these are use case specific and have not come into a singular method of representation. Out of band tables for things like Strings are common leading to JSON like the following to reference data:
+{
+  "map": [0, 1, 2, 1, 0,/* … */],
+  "entities": [{/* … */}, {/* … */}, {/* … */}]
+}
+There are standard ways to refer to paths within JSON like JSON Pointer but the complexity of using and integrating in efficient ways means that it is not always used. Usage of these references can allow for the representation of cyclic values like the following example using JSON Pointer to the current JSON root:
+
+{
+  "Rome": {
+    "trips": [
+      {"to": { "$ref": "#/Rome" }, "details": "..."},
+      {"to": { "$ref": "#/Naples" }, "details": "..." }
+    ]
+  }
+}
+Pollution Attacks
+JSON and other formats which allow arbitrary keys may cause problems for dynamic languages due to a class of attacks called "pollution". The most famous of this is JS's prototype pollution attacks, but other languages like Python are susceptible to things such as class pollution. These attacks occur due to automatic assignment of JSON objects to classes/properties that may invoke effects that can eventually lead to things from denial of service to arbitrary code execution.
+Avoid serialization and deserialization in unmanaged ways and only serialize well known properties to classes when possible. Well known attacks often use the following keys: "__class__", "constructor", "__proto__", "prototype".
+The replacements done by these attacks are limited to JSON compatible values which can limit the effects, but a few general rules can assist avoiding problems. Avoid setters that can perform code execution, prefer to use methods that are not compatible for naive assignment (avoid obj.script = "code" or forms that allow setters to be applied in such manner).
+Often the replacement goals are to use as a mutation to a non-local class instead of instance for objects. Try to ensure you only assign to valid class properties that are not intended to be shared across instances.
+Validation
+JSON Schema
+JSON Schema is a strong schema declaration format that is the most prevalent of all in the ecosystem. Commonly it is referenced by a "$schema" entry on root Object values. It encompasses JSON and its particular edge cases in a very flexible manner. The schema format may not be able to be directly translated into many programming languages' types. JSON Schema is itself defined in JSON and is one of the major usages of JSON in the wild.
+There are many libraries that can utilize JSON schema but be aware that JSON schema may need prior validation or normalization of JSON values around topics covered previously such as duplicate keys.
+Be aware that many schemas may refer to a remotely stored schema within themselves. If this is not converted to a safe local storage it is possible to have disruptions due to connectivity, deletion or modification of the remote schema, and/or schema version mismatching.
+Programming Language Types
+Conversion to a specific programming language's type's is generally the end goal of deserialization of JSON. Conversion is often done in a way that is seamless for Boolean, Null, Number, and String types but for Object and Array types these are often converted to classes and may have various lifecycle effects due to conversion. Previous sections have discussed some potential loss of precision in conversions.
+Even if you are using strict programming language types, ensure that the deserialization of JSON is validated before deserializing. Creation of malicious effects is often possible if eagerly allocating classes that have lifecycle effects. Additionally, by separating validation from allocating class instances this allows things like replays without paying for validation twice.
+Another potential gotcha is superimposition of types where some schema may devolve into allowing any value but the class being instantiated expects a specific type. It is not just necessary to validate that the JSON schema is valid, but also that the target classes being instantiated are valid. In the wild serialization may have accidents allowing for invalid JSON.
+interface Person {
+  /* ... */
+  pass_digest?: string
+}
+const to_db = {
+  /* ... */
+  pass_digest: new Digest(/* ... */)
+}
+writePersonStringToDB(JSON.stringify(to_db))
+// { "pass_digest": {}}
+Serialization Considerations
+Templating#
+Oftentimes, many programs working with JSON will repeatedly create a scaffold for a certain code path that allocates an object just to be converted into part of a JSON payload. This can be wasteful both to allocate extra objects every time a code path is run even though the value never changes when serialized and from the extra time taken to serialize the value every time. Consider the following where an Object is serialized repeatedly even though some of its entries never change:
+if (done) {
+  return JSON.stringify({ status: "done", result: result })
+} else {
+  return JSON.stringify({ status: "pending" })
+}
+The values of the status entry never change in either branch, and the else branch the entire JSON payload never changes! It is much less wasteful to avoid all the extra calculations in this payload to determine the value of the status entry every time it is run. This is actually separated into a few discrete possible optimizations:
+
+Determine if an element needs to be serialized, else skip serializing the element.This also allows extraneous data to be excluded by default in the output avoiding potential accidental data exposure.
+
+This also allows extraneous data to be excluded by default in the output avoiding potential accidental data exposure.
+Determine if an element's value has a known type, avoid detecting types dynamically and use specialized serialization for that type.
+Determine the dynamic parts of JSON values and pre-calculate the JSON fragments for the rest of the JSON payload.
+Under these rules work can be skipped and cached for better performance. A real-world example of doing some of this is in fast-json-stringify which uses JSON schema in order to determine optimizations and create a specialized serializer.
+Specialized Formatting#
+Newlines and extraneous whitespace can be avoided in all forms of JSON. This can be used to create advantageous parsing mechanics similar to how newline delimited forms of JSON know that they are on the forward edge of a JSON value. Take for example the following formatted JSON and consider that every newline inside an Array is the start of a complete JSON value followed.
+{
+  "items": [
+    // note this value is not split across newlines!
+    { "type": "sprite", "sheet": ... },
+    { "type": "item", "data": ... },
+    { "type": "map", "tiles": ... },
+  ]
+}
+A serializer can be created that does this kind of special behavior when outputting serialized JSON. By knowing this specialized formatting both humans and machines can quickly avoid processing unnecessary data. If for example a program is only updating sprites it can skip all other elements of the Array without deserializing a potentially large line and instead simply scan to the next line. This technique can also be used to hide information by representing data as whitespace. For example, a JSON stream may include seemingly hidden information like the following which uses whitespace to values to represent the digits 314 by having a number of spaces equal to each of the 3 digits preceding the numbers in the example:
+[   0, 1,    2]
+Deserialization Considerations
+JSON has a variety of serialization considerations and those differ greatly between unprocessed user provided JSON and JSON that has been validated and sanitized. For lots of real-world considerations in Object values, these can be prevent doing eager work if the JSON need to be fully read to resolve the value of a key for example, however, if the JSON is ensured to not have duplicate keys as is often the case when dealing with stored data that went through processing, we can have good deserialization benefits by knowing this fact. Processing to remove duplicate keys is as simple as round tripping through JSON.parse and JSON.stringify.
+Random Access#
+Due to having unknown lengths for JSON values JSON does not facilitate easy random access of values. It is possible to allow for random access through a variety of means.
+Out of band indices. For static JSON values it is possible to index these values using offsets into the JSON value body itself. For example, given the following we could create indices for the keys "nodes" and "edges".
+{
+  "type": "Graph",
+  "nodes": ["root", "child", "grand-child"],
+  "edges": [[0,1], [1, 2]]
+}
+Such an index would allow for random access to the value of the JSON object entry value for the 2 relative keys by pointing to the starting [ of both when doing things like file reads. However, alternate indices are possible just like any database by doing things like instead of relying on Object location relying on semantics of the values. For example, an index could be created that points to the start of the 2 child string values contained within "nodes".
+Partial Parsing#
+Knowing how JSON is laid out with whitespace and/or schema can be used in order to perform relevant partial parsing. For example, a program may only be concerned with aggregating all the login names stored in a JSON payload from the following example. If deserialized knowing this ahead of time it is possible for libraries to skip fully deserializing the type of entry, potentially changing to scan to the next entry as quickly as seeing the first "t" in the entry's key.
+[
+  { "type": "admin", "login": "bradley" },
+  { "type": "member", "login": "stephen" }
+]
+Parallel Processing#
+While JSON itself is expected to be streamed and does not do anything like have a clear container depth when randomly scanning a JSON stream of bytes, it is possible to do parallel processing prior to fully parsing an entire JSON root value if sufficient information is available. For example, a deserializer may be configured in a manner that it knows how newlines are formatted. This actually is very useful for cases like where newlines delimit the values being processed. In the following example an email system could split up the following JSON without ever parsing by knowing the JSON root is a message and list of people needing to be emailed. The deserializer could then be told to ingest the message and then split up the Array not by JSON values but by skipping a well-known number of bytes and finding all values after that point:
+{
+  // each processor would have the deserializer read this value
+  "message": "We've Been Trying To Reach You About Your Extended Warranty",
+  "to": [
+    // the first worker processes values starting in the first N/2 bytes
+    // where N is the number of bytes remaining after the [
+    { "email": "me@example.com" },
+    // the second worker processes values starting in the last N/2 bytes
+    { "email": "you@example.com" }
+  ]
+}
+This JSON could be split up and processed by multiple workers without coordination of the workers.
+Topical Index
+This index provides references and alternative terms for various topics.
+Revisions
+22 July 2024 - Expanded explanation of random access within encoded binary data.
+//
+/**/
+,
+
+
+
+
+"barry@different.example"
+\u0020
+\u000A
+\u000D
+\u0009
+
+
+null	0	""
+[
+]
+,
+[]
+,
+]
+true
+false
+true
+false
+true
+
+
+-0	""
+"age"
+null
+{
+}
+,
+{}
+:
+package.json
+{"a":1, "b":2}
+"b"
+"b"
+null
+null
+{}
+{"a": null}
+null
+null
++
+JSON.parse("1e309")
+JSON.parse("0.33333333333333331")
+0.3333333333333333
+JSON.parse("0.33333333333333331")
+JSON.parse("\"0.33333333333333331\"")
+0
+1/-0
+1/0
+null
+null
+"
+"
+\u0022
+\u005C
+\u0000
+\u001F
+"e\u0301"
+"\u00e9"
+\uD83D
+\uDD25
+"\\uD83D"
+Person
+"name"
+"name"
+"4749463839610100010080ff00ffffff0000002c00000000010001000002024401003b"
+"R0lGODlhAQABAID_AP___wAAACwAAAAAAQABAAACAkQBADs"
+"7nH003FMpg!<@ZM!<<*!!!!!Mz!<<-#!!33i!<>1"
+20
+"__class__"
+"constructor",
+"__proto__"
+"prototype"
+obj.script = "code"
+"$schema"
+
+This also allows extraneous data to be excluded by default in the output avoiding potential accidental data exposure.
+JSON.parse
+JSON.stringify
+"nodes"
+"edges"
+[
+"nodes"
