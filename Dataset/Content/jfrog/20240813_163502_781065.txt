@@ -1,0 +1,187 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\AdvancedSecurity1SecretsDetection863x3001.png
+
+Note: This report was previously published in InfoWorld
+When developing the recently announced JFrog Advanced Security, our Research team decided to try out its new “Secrets Detection” feature. Our goal was to test our vulnerability detection on as much real world data as possible, to make sure we eliminate false positives and catch any bugs in our code.
+As we continued testing, we realized there are a lot more identified active access tokens than expected. We broadened our tests to full-fledged research, in order to understand where these tokens are coming from, the viability of using them and to be able to privately disclose them to their owners. In this blog post we’ll present our research findings and share best practices for avoiding the exact issues that led to the exposure of these access tokens.
+Access tokens – what are they all about?
+Cloud services have become synonymous with modern computing, it’s hard to imagine running any sort of scalable workload without relying on them. The benefits of using these services come with the risk of delegating our data to foreign machines and the responsibility of managing the access tokens which provide access to our data and services. Exposure of these access tokens may lead to dire consequences – a recent example was the largest data breach in history, which exposed 1 billion records containing PII (personally identifiable information) due to a leaked access token.
+Unlike the presence of a code vulnerability, a leaked access token usually means the immediate “game over” for the security team, since using a leaked access token is trivial and in many cases negates all investments into security mitigations. It doesn’t matter how sophisticated the lock on the vault is if the combination is written on the door.
+Cloud services intentionally add an identifier to their access tokens so that their services may perform a quick validity check of the token, this has the side effect of making the detection of these tokens extremely easy, even when scanning very large amounts of unorganized data.
+
+
+AWS	AKIAIOSFODNN7EXAMPLE
+GitHub	gho_16C7e42F292c6912E7710c838347Ae178B4a
+GitLab	gplat-234hcand9q289rba89dghqa892agbd89arg2854
+NPM	npm_1234567890abcdefgh
+Slack	xoxp-123234234235-123234234235-123234234235-adedce74748c3844747aed48499bb
+Which open-source repositories did we scan?
+We scanned artifacts in the most common open-source software registries: NPM, PyPI, RubyGems, crates.io & DockerHub (both Dockerfiles and small Docker layers).
+All in all, more than 8 million artifacts were scanned.
+In each artifact, we used Secrets Detection to find tokens that can be easily verified.
+As part of our research we made a minimal request for each of the found tokens to –
+
+Check if the token is still active (wasn’t revoked or publicly unavailable for any reason)
+Understand the token’s permissions
+Understand the token’s owner (whenever possible) so we can disclose the issue privately to them
+For npm and PyPI, we also scanned multiple versions of the same package, to try and find tokens that were once available but removed in a later version.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\1_Analyzedartifactsperplatforminmillions2.png
+
+Analyzed artifacts per platform (in millions)
+“active” vs. “inactive” tokens
+As mentioned above, each token that was statically detected, was also run through a dynamic verification. This means for example – trying to access an API that doesn’t do anything (no-op) on the relevant service that the token belongs to, just to see that the token is “available for use”. A token that passed this test (“active” token) is available for attackers to use without any further constraints.
+We will refer to the dynamically verified tokens as “active” tokens and the ones that failed dynamic verification as “inactive” tokens. Note that there might be many reasons that a token would show up as “inactive” –
+
+The token was revoked
+The token is valid, but has additional constraints to using it (ex. must be used from a specific source IP range)
+The token itself is not really a token, but rather an expression that “looks like” a token (false positive)
+Which repositories had the most leaked tokens?
+The first question that we wanted to answer was “is there a specific platform where developers are most likely to leak tokens?”
+In terms of the sheer volume of leaked secrets, it seems that developers need to watch out about leaking secrets when building their Docker Images (see the “Examples” section below for guidance on this) –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\2_Distributionofalltokensactiveinactiveamongplatforms1.png
+
+Distribution of all tokens (active + inactive) among platforms
+We hypothesize that the vast majority of DockerHub leaks are caused by the closed nature of the platform. While other platforms allow developers to set a link to the source repository and get security feedback from the community, there’s a higher price of entry in DockerHub – specifically the researcher must pull the Docker image and explore it manually, possibly dealing with binaries and not just source code.
+An additional problem with DockerHub is that no contact information is publicly shown for each image, so even if a leaked secret is found by a white-hat researcher it might not be trivial to report the issue to the image maintainer. As a result, we can observe images that retain exposed secrets or other types of security issues for years.
+The following graph shows that tokens found in DockerHub layers have a much higher chance of being active, compared to all other repositories.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\3_Numberofactive_revokedtokensbyrepository1.png
+Number of active/inactive tokens by repository
+Finally, we can also look at the distribution of tokens normalized to the amount of artifacts that was scanned for each platform –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\4_Distributionofalltokensamongrepositories1.png
+Distribution of all tokens among repositories, each normalized to the amount of artifacts scanned for that repository
+When ignoring the amount of scanned artifacts for each platform and focusing on the relative amount of leaked tokens, we can see that DockerHub Layers still provided the most tokens, but 2nd place is now claimed by PyPI (whereas when looking at the absolute data, PyPI had the 4th most tokens leaked)
+Which token types were leaked the most?
+After scanning all token types that are supported by Secrets Detection and verifying the tokens dynamically, the top 10 results were –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\5_Distributionofactive_inactivetokensforeachrepository2.png
+Distribution of active/inactive tokens for each repository
+We can clearly see that AWS, GCP and Telegram API tokens are the most leaked tokens (in that order), however – it seems that AWS developers are more vigilant about revoking unused tokens, since only ~47% of AWS tokens were found to be active, unlike GCP that boasted an active token rate of ~73%!
+Examples of leaked secrets in each repository
+It is important to see some real-world examples from each repository in order to raise awareness to the potential places where tokens are leaked. In this section, we will focus on these examples and in the next section we will share tips on how these examples should have been handled.
+DockerHub – Docker Layers
+Inspecting the filenames that were present in a Docker layer and contained leaked credentials shows that the most common source of the leakage are node applications that use the dotenv package to store credentials in environment variables. The 2nd most common source was hardcoded AWS tokens –
+
+
+.env	214
+./aws/credentials	111
+config.json	56
+gc_api_file.json	50
+main.py	47
+key.json	40
+config.py	38
+credentials.json	35
+bot.py	35
+Most common filenames in Docker Layers that contained a leaked token
+Docker layers can be inspected by pulling the image and running it, however there are some cases where a secret might have been removed by an intermediate layer (via a “whiteout” file) and in this case the secret won’t show up when inspecting the final docker image. It is possible to inspect each layer individually, using tools such as dive, and find the secret in the “removed” file –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\6_Dockerlayerwithcredentialsopenedinthedivelayerinspector.png
+Docker layer with credentials opened in the dive layer inspector
+Inspecting the contents of “credentials” file reveals the leaked tokens –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\7_AWScredentialsleaked.png
+AWS credentials leaked via ./aws/credentials
+DockerHub – Dockerfiles
+DockerHub took a leading position in our research, containing more than 80% of the leaked credentials.
+Developers usually use secrets in Dockerfiles to initialize environment variables and pass them to the application running in the container. After the image is published, these secrets become publicly leaked –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\8_AWScredentialsleakedthroughDockerfileenvironmentvariables.png
+AWS credentials leaked through Dockerfile environment variables
+Another common option is the usage of secrets in Dockerfile commands that download the content required to set up the Docker application. The example below shows how a container uses an authentication secret to clone a repository into the container –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\9_AWScredentialsleakedthroughtheDockerfile.png
+AWS credentials leaked through the Dockerfile via a “git clone” command
+crates.io
+With crates.io (the Rust package manager), we happily saw a different outcome than all other repositories. Although Xray detected nearly 700 packages that contain secrets, only one of these secrets showed up as active! Interestingly, this secret wasn’t even used in the code, but rather was found as part of a comment –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\10_Secretfoundaspartofacomment.png
+
+PyPI
+In our PyPI scans, most of the token leaks were found in actual Python code.
+For example, one of the functions in an affected project contained an AWS RDS token. Storing a token like this can be fine, if the token only allows access for querying the example RDS database. However – when collecting permissions for the token, it can be seen that the token gives access to the entire AWS account (this token has been revoked following our disclosure to the project maintainers).
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\11_AWStokenleakageinthesourcecodeofaPyPIpackage.png
+AWS token leakage in the source code of a PyPI package
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\12_UnintendedfulladminpermissiononanexampleAWSRDStoken.png
+Unintended full admin permissions (*/*) on an “example” AWS RDS token
+npm
+Other than hardcoded tokens in Node.js code, npm packages can have custom scripts defined in the scripts block of the package.json file. This allows running scripts defined by the package maintainer in response to certain triggers, such as the package being built, installed etc.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\13_npmtokenleakageinnpmscriptsblockpackagejson.png
+A recurring mistake we saw was storing tokens in the scripts block during development, but then forgetting to remove the tokens when the package is released. In the example below we see  leaked npm and GitHub tokens that are used by the build utility semantic-release.
+
+
+
+npm token leakage in npm “scripts” block (package.json)
+Usually, the dotenv package is supposed to solve this problem. It allows developers to create a local file called .env in the project’s root directory and use it to populate the environment variables in a test environment. Using this package in the correct manner solves the secret leak, but unfortunately we have seen that improper usage of the dotenv package became one of the most common reasons for secret leakage in PyPI packages. Although the package documentation explicitly says not to commit the .env files to version control, we found many packages where the .env file was published to npm and contained secrets.
+“No. We strongly recommend against committing your .env file to version control. It should only include environment-specific values such as database passwords or API keys. Your production database should have a different password than your development database.”
+dotenv documentation warning against publishing .env files
+RubyGems
+Going over the results that were detected in RubyGems packages, there were no special outliers. The detected secrets were found either in Ruby code, or in arbitrary configuration files inside the Gem.
+For example, here we can see an AWS configuration YAML that leaked sensitive tokens. The file is supposed to be a placeholder for AWS configuration, but the development section was altered with a live access/secret key –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\14_AWStokenleakageinspec_dummy_config_awsyml.png
+AWS token leakage in spec/dummy/config/aws.yml
+The most common mistakes when storing tokens
+After analyzing all active cases we’ve found, we can highlight the following mistakes developers should look out for, and share a few guidelines on how to store tokens in a safer way.
+Mistake #1 – Not using automation to check for secret exposures
+There were plenty of cases where active secrets were in very unexpected places: code comments, documentation files, examples, or test cases. These places are very hard to check for manually in a consistent way. We suggest embedding a secret scanner in your DevOps pipeline and alerting on leaks before publishing a new build. There are many free, open-source tools providing this kind of functionality. One of our OSS recommendations is trufflehog, which supports a plethora of secrets and validates findings dynamically, reducing false positives.
+For more sophisticated pipelines and broad integration support, we provide JFrog Xray.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\15_AGitHubtokenleakedindocumentation.png
+A GitHub token leaked in documentation, intended as read-only but in reality gave full edit permissions
+Mistake #2 – Generating tokens with broad permissions that never expire
+The majority of cloud services allow setting up finely-grained scopes and permissions when generating an access token –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\16_Newpersonalaccesstoken.png
+GitHub’s Personal Access Token generation screen, with fine-grained token permissions
+Unfortunately, we have observed a very common anti-pattern where a single token is generated with full admin permissions –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\17_AWStokenswithadminvs.restrictedpermissions1.png
+AWS tokens with admin vs. restricted permissions
+~25% of the active AWS tokens we found had full admin capabilities!
+Setting up IAM permissions for an AWS access token is a daunting task, due to the long and complicated list of possible permissions in the IAM permissions model. In many instance, we’ve observed tokens with wildcards, for example – s3:* instead of bothering to add s3:ListBucket and s3:GetObject permissions individually. For users that don’t bother with documentation, AWS gives a “full admin” set of permissions marked as */*, which grants unlimited access to all possible functionality.
+Instead of the developer using the AWS token to download pictures from an S3 bucket, the attacker gains access to the user’s whole AWS infrastructure when the token is leaked.
+We suggest using the least privileges principle and granting only the permissions required to perform a task. Investing time in identifying the scope and choosing the matching permissions is a better use of time than conducting a data breach investigation in the future.
+In addition to the permissions given to the token, setting an expiration date on the token makes sure that “long lost” instances of the token are useless even if the token is leaked in the future.
+Mistake #3 – No access moderation for the secret
+In many cases, a developer may use a hardcoded token somewhere because they believe there is no alternative for moderating the access to this token. In better examples – this token has the exact set of permissions that it needs to have, and thus exposing it to everyone is not an issue. However – not all cloud services may support the exact set of permissions needed for the token, and in such cases exposing the token at all is a problem.
+For example, it is a common practice to keep API secrets in environment variables. This can definitely be safe in a local development environment. But when it comes to cloud services, especially those published in public repositories, the secrets become available to anyone
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\18_AWScredentialsleakedthroughDockerfileenvironmentvariables.png
+AWS credentials leaked through Dockerfile environment variables
+Fortunately, there are a few moderation tools that can be applied, to make sure only validated users may access the token. Here are some examples relevant to a docker-based environment –
+
+Kubernetes secrets (for k8s-based applications)
+Docker secrets (for Docker Swarm services)
+Requiring the user to supply the secret as a docker run argument
+Hashicorp Vault (external tool suitable for many runtime environments)
+The common denominator between these tools, is that the secret is not stored hardcoded in the image, but rather the secret is externally fetched at runtime, after verifying that the client has the proper authorization to use the secret. This means the secret is not exposed when the image itself is exposed. This level of indirection also helps keeping the image running smoothly after a secret rotation, since the image and secret are not tightly coupled to each other.
+Mistake #4 – Fixing a leak by unpublishing the token
+Since a token leakage is a security vulnerability, the naive solution that comes to mind is to remove the key from the code and publish the new “fixed” version, same as with a CVE. However, the internet always remembers. Once a package is published in a repository, it could be automatically cached by many different legitimate and illegitimate actors. These actors will still have access to the package even if it’s unpublished from its original source.
+In the physical world, when you lose a key, the first thing you should do is change the lock. By analogy, when you lose an API key, you should immediately revoke and replace it.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\19_Secrettokensleakedinanenvfile.png
+Secret tokens leaked in an .env file in version 1.1.1 of a package. “Fixed” by unpublishing on version 1.1.2
+Mistake #5 – Exposing unnecessary assets publicly
+Many of the images with leaked tokens that we’ve detected, looked like they had no business belonging in public repositories. Internal test images, company development builds and other private packages, reached the well-known public repositories and exposed sensitive secrets along with them.
+For example – a Docker image that contained tests for a blockchain-related framework was published on Docker Hub –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\20_Dockerimagethatcontainedtests.png
+
+Inside the docker image, a private repository GitHub repository is pulled by using a hardcoded GitHub access token -@@
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163502_781065\21_privaterepositoryGitHubrepositorypulledusinghardcodedGitHubaccesstoken.png
+
+This is bad as it is, since this private GitHub repository can now be pulled by unwanted parties, but it gets worse –  this GitHub token gave complete admin access to the GitHub account, exposing all private repositories and giving complete access to the framework’s website.
+Although there are multiple faults here, the basic issue is that this internal testing container should not have been published on the public DockerHub registry.
+By default, many development tools use a centralized repository which is publicly available and easy to crawl. Some companies may choose to rely on these central repositories and not roll their own private instances, which leave the company assets more exposed when artifacts are published.
+Fortunately, for each of the repositories that we’ve scanned, there are OSS solutions for deploying your own private repository easily –
+
+Docker – Harbor is a CNCF-graduated container registry
+PyPI – private-pypi allows deploying a PyPI index privately
+npm – Verdaccio is a lightweight Node.js private proxy registry
+RubyGems – An official guide by RubyGems highlight several solutions such as Gemstash
+crates.io – crates.io is an OSS project by itself, that can be easily deployed
+For diverse environments that require supporting many types of artifacts with top of the line DevOps capabilities, we provide JFrog Artifactory.
+Giving back to the OSS community
+Although the initial goal of our research was to find and fix false positives in Xray’s new secrets detection tool, we stumbled upon much more active secrets than we initially envisioned. To complete the research, we privately disclosed all leaked secrets to their respective owners (when such owners could be identified) so that the secrets could be replaced or revoked as needed.
+Secrets detection – powered by JFrog Xray
+This research was powered by the new “Secrets Detection” feature which is included in the recently announced JFrog Advanced Security set of capabilities for JFrog Xray. This release takes JFrog Xray out of its familiar software composition analysis space and into the realm of advanced software supply chain security.
+Secrets detection uncovers exposed secrets in your application code, like plaintext API keys, credentials, expired certificates or passwords, that can often be forgotten about and left exposed unintentionally. These exposed secrets can pose a serious threat to the integrity of your software and can invite nefarious actors into your application to access confidential information and data or even access to private networks.
+
+Scan your code base to uncover these secrets and mitigate them before you get anywhere near your production environment.
+Set up configurable automated policies which will generate violations when any secrets are discovered in your application code.
+Mitigate any secrets discovered rapidly with enhanced remediation data that explains what was discovered, why it matters, what could be the effect of this secret being exposed in production, and finally how best to fix it.
+
+scripts
+package.json
+scripts
+.env
+s3:*
+s3:ListBucket
+s3:GetObject
+*/*

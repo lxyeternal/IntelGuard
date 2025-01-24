@@ -1,0 +1,189 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163614_359489\PJSIPJFrogsecurityresearchteam863x3001.png
+
+Update 03/03/22 – Added clarification about vulnerable applications
+JFrog’s Security Research team is constantly looking for new and previously unknown security vulnerabilities in popular open-source projects to help improve their security posture. As part of this effort, we recently discovered 5 security vulnerabilities in PJSIP, a widely used open-source multimedia communication library developed by Teluu.
+By triggering these newly discovered vulnerabilities, an attacker can cause arbitrary code execution in the application that uses the PJSIP library.
+JFrog Security responsibly disclosed these vulnerabilities and worked with PJSIP’s maintainers on verifying the fix to these reported security vulnerabilities.
+What is the PJSIP library used for?
+PJSIP supplies an API that can be used by IP telephony applications such as VoIP phones and conference applications. It is used today by the world’s most popular communication applications such as WhatsApp and BlueJeans. PJSIP is also used by Asterisk, the ubiquitous open-source PBX (private branch exchange) implementation.
+The disclosed PJSIP security vulnerabilities
+
+
+CVE-2021-43299	Stack overflow in PJSUA API when calling pjsua_player_create	Code Execution	8.1
+CVE-2021-43300	Stack overflow in PJSUA API when calling pjsua_recorder_create	Code Execution	8.1
+CVE-2021-43301	Stack overflow in PJSUA API when calling pjsua_playlist_create	Code Execution	8.1
+CVE-2021-43302	Read out-of-bounds in PJSUA API when calling pjsua_recorder_create	Denial of Service	5.9
+CVE-2021-43303	Buffer overflow in PJSUA API when calling pjsua_call_dump	Denial of Service	5.9
+Who is impacted by the PJSIP vulnerabilities?
+Any projects that use the PJSIP library before version 2.12 and pass attacker-controlled arguments to any of the following APIs are vulnerable:
+
+pjsua_player_create –  filename argument must be attacker-controlled
+pjsua_recorder_create – filename argument must be attacker-controlled
+pjsua_playlist_create – file_names argument must be (partially) attacker-controlled
+pjsua_call_dump –  buffer argument capacity must be smaller than 128 bytes
+To clarify – this means that exploitation is context-dependent – an application must use the PJSIP library in a specific manner in order to be vulnerable, namely – calling the aforementioned APIs and passing external input to specific arguments from these APIs.
+
+JFrog’s Security Research team has disclosed the vulnerabilities on the library itself and isn’t claiming any specific application is vulnerable (since we did not research specific applications) – this includes the applications mentioned in the previous section, which were not researched (WhatsApp, BlueJeans and Asterisk).
+Technical breakdown
+PJSIP offers a library named PJSUA that supplies an API for SIP applications. The basic PJSUA APIs are also wrapped by object-oriented APIs. PJSUA offers a rich Media Manipulation API, where we have spotted the following vulnerabilities:
+CVE-2021-43299 was found in pjsua_player_create (OO wrapper – AudioMediaPlayer::createPlayer) which creates a file player and automatically adds this player to the conference bridge.
+This function contains a stack overflow vulnerability:
+PJ_DEF(pj_status_t) pjsua_player_create( const pj_str_t *filename,
+                     unsigned options,
+                     pjsua_player_id *p_id)
+{
+    unsigned slot, file_id;
+    char path[PJ_MAXPATH];
+    ...
+    pj_memcpy(path, filename->ptr, filename->slen);
+    path[filename->slen] = '\0';
+    ...
+}
+filename->ptr is being copied to path without verifying that filename->slen (the filename size) is at most path’s allocated size which is PJ_MAXPATH<c/ode> (260). Therefore, passing a filename longer than 260 characters will cause a stack overflow.
+CVE-2021-43300 and CVE-2021-43302 were found in pjsua_recorder_create() (OO wrapper – AudioMediaRecorder::createRecorder) which creates a file recorder and automatically connects this recorder to the conference bridge.
+This function contains a stack overflow vulnerability:
+PJ_DEF(pj_status_t) pjsua_recorder_create( const pj_str_t *filename,
+                       unsigned enc_type,
+                       void *enc_param,
+                       pj_ssize_t max_size,
+                       unsigned options,
+                       pjsua_recorder_id *p_id)
+{
+    ...
+    char path[PJ_MAXPATH];
+    pj_str_t ext;
+    ...
+    /* Determine the file format */
+    ext.ptr = filename->ptr + filename->slen - 4;
+    ext.slen = 4;
+   
+    if (pj_stricmp2(&ext, ".wav") == 0)
+    file_format = FMT_WAV;
+    else if (pj_stricmp2(&ext, ".mp3") == 0)
+    file_format = FMT_MP3;
+    else {
+        ...
+    }
+    ...
+    pj_memcpy(path, filename->ptr, filename->slen);
+    path[filename->slen] = '\0';
+    ...
+}
+ext.ptr is set to filename->ptr + filename->slen - 4 and ext.slen is set to 4, later pj_stricmp2 is called with ext in order to compare the extension of the file against “.wav” or “.mp3”.
+The issue disclosed as CVE-2021-43302 is that pjsua_recorder_create doesn’t check if the length of filename is at least 4. If filename is shorter than 4, pj_stricmp2 will cause a read out-of-bounds while comparing the strings.
+CVE-2021-43300 is similar to CVE-2021-43299: filename->ptr is being copied with memcpy to the path stack variable without checking that filename->slen is at most the path allocated size which is PJ_MAXPATH (260).
+CVE-2021-43301 is another similar stack overflow vulnerability that was found in pjsua_playlist_create (OO wrapper – AudioMediaPlayer::createPlaylist) which creates a file playlist media port and automatically adds the port to the conference bridge.
+
+pjsua_playlist_create calls pjmedia_wav_playlist_create with the file_names argument mapped as file_list:
+PJ_DEF(pj_status_t) pjmedia_wav_playlist_create(pj_pool_t *pool,
+                        const pj_str_t *port_label,
+                        const pj_str_t file_list[],
+                        int file_count,
+                        unsigned ptime,
+                        unsigned options,
+                        pj_ssize_t buff_size,
+                        pjmedia_port **p_port)
+{
+    ...
+    char filename[PJ_MAXPATH];  /* filename for open operations.    */
+    ...
+    /* Be sure all files exist  */
+    for (index=0; index<file_count; index++) {
+ 
+        PJ_ASSERT_RETURN(file_list[index].slen < PJ_MAXPATH, PJ_ENAMETOOLONG); pj_memcpy(filename, file_list[index].ptr, file_list[index].slen); filename[file_list[index].slen] = '\0'; /* Check the file really exists. */ if (!pj_file_exists(filename)) { PJ_LOG(4,(THIS_FILE, "WAV playlist error: file '%s' not found", filename)); return PJ_ENOTFOUND; } } ... /* ok run this for all files to be sure all are good for playback. */ for (index=file_count-1; index>=0; index--) {
+ 
+        pjmedia_wave_hdr wavehdr;
+        pj_ssize_t size_to_read, size_read;
+ 
+        /* we end with the last one so we are good to go if still in function*/
+        pj_memcpy(filename, file_list[index].ptr, file_list[index].slen);
+        filename[file_list[index].slen] = '\0';
+        ...
+    }
+    ...
+}
+The function copies each file name from file_list to filename without checking if its length is at most PJ_MAXPATH (260). If the file name length is longer – the copy will overflow the filename variable and trigger a stack overflow.
+CVE-2021-43303 is a buffer overflow vulnerability in pjsua_call_dump – a function that dumps call statistics to a given buffer:
+PJ_DEF(pj_status_t) pjsua_call_dump( pjsua_call_id call_id,
+                     pj_bool_t with_media,
+                     char *buffer,
+                     unsigned maxlen,
+                     const char *indent)
+{
+    ...
+    char tmp[128];
+    ...
+    /* tmp is being populated here */
+    ...
+    len = (int)pj_ansi_strlen(tmp);
+    pj_ansi_strcpy(buffer, tmp);
+    ...
+}
+The function uses tmp in order to store the statistics temporarily and then copies it to the output argument buffer without validating that maxlen is at most len (which can be up to 128).
+This can lead to a buffer overflow if the capacity of the given buffer parameter is smaller than len.
+Fixing the vulnerabilities
+In order to fully fix these vulnerabilities, we recommend upgrading PJSIP to version 2.12.
+Acknowledgement
+We would like to thank the PJSIP maintainers for quickly verifying the reported vulnerabilities and fixing them.
+Finding vulnerable versions with JFrog Xray
+In addition to exposing new security vulnerabilities and threats, JFrog provides developers and security teams easy access to the latest relevant information for their software – including the use of PJSIP open-source library versions and associated CVEs – with automated security scanning by JFrog Xray SCA tool.
+pjsua_player_create
+pjsua_recorder_create
+pjsua_playlist_create
+pjsua_recorder_create
+pjsua_call_dump
+pjsua_player_create
+filename
+pjsua_recorder_create
+filename
+pjsua_playlist_create
+file_names
+pjsua_call_dump
+buffer
+pjsua_player_create
+AudioMediaPlayer::createPlayer
+filename->ptr
+path
+filename->slen
+path
+PJ_MAXPATH<c/ode> (260). Therefore, passing a filename longer than 260 characters will cause a stack overflow.
+filename
+pjsua_recorder_create()
+AudioMediaRecorder::createRecorder
+ext.ptr
+filename->ptr + filename->slen - 4
+ext.slen
+4
+pj_stricmp2
+ext
+“.wav”
+“.mp3”
+pjsua_recorder_create
+filename
+filename
+4
+pj_stricmp2
+filename->ptr
+memcpy
+path
+filename->slen
+path
+PJ_MAXPATH
+pjsua_playlist_create
+AudioMediaPlayer::createPlaylist
+pjsua_playlist_create
+pjmedia_wav_playlist_create
+file_names
+file_list
+file_list
+filename
+PJ_MAXPATH
+filename
+pjsua_call_dump
+tmp
+buffer
+maxlen
+len
+buffer
+len

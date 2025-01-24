@@ -1,0 +1,53 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214546_312327\Netty863x3001.png
+
+Background
+The JFrog Security research team has recently disclosed two denial of service issues (CVE-2021-37136, CVE-2021-37137) in Netty, a popular client/server framework which enables quick and easy development of network applications such as protocol servers and clients. In this post we will elaborate on one of the issues – CVE-2021-37136.
+Who is actually impacted?
+Netty versions 4.1.0 to 4.1.67 are vulnerable (inclusive).
+The issues only impact applications that use Netty to decompress user-supplied Bzip2 or Snappy data streams, for example:
+public static void main(String[] args) throws Exception {
+    Bzip2Decoder decoder = new Bzip2Decoder(); // Create the decompressor
+    final ByteBufAllocator allocator = new PooledByteBufAllocator(false);
+    FileInputStream file = new FileInputStream("C:\\temp\\100GB.bz2"); // External input
+    int inputChunks = 64 * 1024;
+    ByteBuf buf = allocator.heapBuffer(inputChunks);
+    ChannelHandlerContext ctx = new StubChannelHandlerContext(allocator);
+    while (buf.writeBytes(file, buf.writableBytes()) >= 0) {
+        System.out.println("Input: " + buf.capacity());
+        decoder.channelRead(ctx, buf); // BUG, No internal resource release!
+        buf = allocator.heapBuffer(inputChunks);
+        decoder.channelReadComplete(ctx);
+}
+Technical breakdown – CVE-2021-37136
+Netty uses several decompressors to allow developers to decompress data coming from IO channels, mainly network sockets. The decompressors all export a similar API: a decode function that receives the input buffer and an output list to insert the decompressed data. In most decoders, the decode function stops and returns after each data block, allowing the caller to take care of the decoded block, but in some of the decoders this is not the behavior.
+When examining the Bzip2 decoder, we noticed that it contains code which loops and tries to decompress the whole file before adding it to the output buffer:
+for (;;) { // Loop until EOF - Problematic
+    ...
+    switch (currentState) {
+    …
+    case DECODE_HUFFMAN_DATA:
+        blockDecompressor = this.blockDecompressor;
+        ...
+        final int blockLength = blockDecompressor.blockLength();
+        final ByteBuf uncompressed = ctx.alloc().buffer(blockLength);
+        boolean success = false;
+        try {
+            int uncByte;
+            while ((uncByte = blockDecompressor.read()) >= 0) {
+                uncompressed.writeByte(uncByte); // Read entire block
+            }
+        ...
+        break;
+    case EOF:
+        in.skipBytes(in.readableBytes()); // Return on EOF, not end-of-block
+        return;
+    }
+}
+This behavior allows an attacker to create a Bzip2 zip bomb and crash the system.
+The code was tested with a Bzip2 file that causes a memory usage of 100 GB, triggering a memory exhaustion and eventually crashing the process.
+Fixing the issue and workarounds
+There is no workaround for this issue. Netty users are encouraged to upgrade to version 4.1.68 which fully patches the vulnerabilities.
+The Netty maintainers chose to fix this issue by editing the decoder function and making it return after every chunk, allowing the caller to take the needed action on every small chunk. JFrog was able to verify that after the fix, our PoC was not able to reproduce the crash (without any need to call additional APIs from the user’s side).
+Acknowledgements
+We would like to thank the Netty maintainers for verifying the issues and fixing them promptly.

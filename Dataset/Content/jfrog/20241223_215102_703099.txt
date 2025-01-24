@@ -1,0 +1,61 @@
+
+Many organizations developing software today use Docker in one way or another. If you go to any software development or DevOps conference and ask a big crowd of people “Who uses Docker?”, most people in the room will raise their hands. But if you now ask the crowd, “Who uses Docker in production?”, most hands will fall immediately. Why is it, that such a popular technology that has enjoyed meteoric growth is so widely used at early phases of the development pipeline, but rarely used in production?
+Software Quality: Developer Tested, Ops Approved
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215102_703099\ALM.png
+A typical software delivery pipeline looks something like this (and has done for over a decade!)
+Source: Hüttermann, Michael. Agile ALM. Shelter Island, N.Y.: Manning, 2012. Print.
+At each phase in the pipeline, the representative build is tested, and the binary outcome of this build can only pass through to the next phase if it passes all the criteria of the relevant quality gate. By promoting the original binary we guarantee that the same binary we built in the CI server is the one deployed or distributed. By implementing rigid quality gates we guarantee the access control to untested, tested and production-ready artifacts.
+The unbearable lightness of
+
+$ docker build
+Since running a Docker build is so easy, instead of a build passing through a quality gate to the next phase…
+… it is REBUILT at each phase.
+“So what,” you say? So plenty. Let’s look at a typical build script.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215102_703099\BuildScript1.png
+To build your product, you need a set of dependencies, and the build will normally download the latest versions of each dependency you need.  But since each phase of the development pipeline is built at a different time, …
+…you can’t be sure that the same version of each dependency in the development version also got into your production version.
+But we can fix that. Let’s use:
+Done.
+Or are we?
+Can we be sure that the Ubuntu version 14.04 downloaded in development will be exactly the same as the one built for production? No, we can’t. What about security patches or other changes that don’t affect the version number? But wait; there IS a way. Let’s use the fingerprint of the image. That’s rock solid! We’ll specify the base image as:
+But, what was that version again? Is it older or newer than the one I was using last week?
+You get the picture. Using fingerprints is neither readable nor maintainable, and in the end, nobody really knows what went into the Docker image.
+And what about the rest of the dockerfile? Most of it is just a bunch of implicit or explicit dependency resolution, either in the form of apt-get, or wget commands to download files from arbitrary locations. For some of the commands you can nail down the version, but with others, you aren’t even sure they do dependency resolution! And what about transitive dependencies?
+So you end up with this:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215102_703099\DockerPipeline1.png
+
+Basically, by rebuilding the Docker image at each phase in the pipeline, you are actually changing it, so you can’t be sure that the image that passed all the quality gates is the one that got to production.
+Stop rebuilding, start promoting
+What we should be doing, is taking our development build, and rather than rebuilding the image at each stage, we should be promoting it, as an immutable and stable binary through the quality gates to production.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215102_703099\DockerPipeline2.png
+
+Sounds good. Let’s do it with Docker.
+Wait, not so fast.
+Docker tag is a drag
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215102_703099\DockerTag.png
+This is what a Docker tag looks like:
+The Docker tag limits us to one registry per host.
+How do you build a promotion pipeline if you can only work with one registry?
+“I’ll promote using labels,” you say. “That way I only need one Docker registry per host.” That will work, of course, to some extent. Docker labels (plain key:value properties) may be a fair solution for promoting images through minor quality gates, but are they strong enough to guard your production deployment? Considering you can’t manage permissions on labels, probably not. What’s the name of the property? Did QA update it? Can developers still access (and change) the release candidate? The questions go on and on. Instead, let’s look at promotion for a more robust solution. After all, we’ve been doing it for years with Artifactory.
+Virtual repositories tried and true
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215102_703099\VirtualRepo.png
+Virtual repositories have been in Artifactory since version 1.0. More recently, we also added the capability to deploy artifacts to a virtual repository. This means that virtual repositories can be a single entry point for both upload and download of Docker images. Like this:Here’s what we’re going to do:
+
+Deploy our build to a virtual repository which functions as our development Docker registry
+Promote the build within Artifactory through the pipeline
+Resolve production ready images from the same (or even a different) virtual repository now functioning as our production Docker registry
+This is how it works:
+Our developer (or our Jenkins) works with a virtual repository that wraps a local development repository, a local production repository, and a remote repository that proxies Docker Hub (as the first step in the pipeline, our developer may need access to Docker Hub in order to create our image). Once our image is built, it’s deployed through the docker-virtual repository to docker-dev-local.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215102_703099\deploytovirtual.png
+
+Now, Jenkins steps in again and promotes our image through the pipeline to production.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215102_703099\docker_production13.png
+
+At any step along the way, you can point a Docker client at any of the intermediate repositories, and extract the image for testing or staging before promoting to production.
+
+Once your Docker image is in production, you can expose it to your customers through another virtual repository functioning as your production Docker registry. You don’t want customers accessing your development registry or any of the others in your pipeline. Only the production Docker registry. There is no need for any other repositories, because unlike other package formats, the point of a docker image is that it has everything it needs.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215102_703099\virtualrepo_FTW1.png
+
+So we’ve done it. We built a Docker image, promoted it through all phases of testing and staging, and once it passed all those quality gates, the exact same image we created in development is now available for download by the end user or deployed to production servers, without risk of a non-curated image being received.
+What about setup?
+You might ask if getting Docker to work with all these repositories in Artifactory is easy to setup? Well, it’s now easier than ever with our new Reverse Proxy Configuration Generator. Stick with Artifactory and NGINX or Apache and you can easily access all of your Docker registries to start promoting Docker images to production.

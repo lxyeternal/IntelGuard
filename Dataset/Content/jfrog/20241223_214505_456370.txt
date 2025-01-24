@@ -1,0 +1,184 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214505_456370\863x300new.png
+
+On March 29th, the cyberkendra security blog posted a sensational post about a Log4Shell-equivalent remote code execution (RCE) zero-day vulnerability in Spring Framework, but without any solid details about the vulnerability itself. The security vulnerability was nicknamed “SpringShell” (or “Spring4Shell”) , due to its alleged significance likening the infamous “Log4Shell.” A day later, on March 30th, a 0-day proof-of-concept was dropped on Twitter which got researchers scrambling to verify it and its authenticity. On March 31st, the vulnerability was officially confirmed by the Spring maintainers and given the CVE ID – CVE-2022-22965, fixed versions of the Spring Framework were subsequently released.
+The security vulnerability was officially published as a critical-severity remote code execution issue, on web applications using the Spring Framework, under certain conditions.
+What Causes the SpringShell (Spring4Shell) Vulnerability?
+The SpringShell vulnerability, CVE-2022-22965, lies in the Spring Framework “data binding” mechanism.
+This mechanism takes parameters from the request URL or request body, and assigns them to function arguments or in some cases into Java objects.
+public class Greeting {
+    private long id;
+    private String content;
++
+@GetMapping("/endpoint")
+public String greetingSubmit(@ModelAttribute Greeting greeting, Model model) {
++
+
+http://www.myapp.com/endpoint?id=5&content=hello
+
+=
+greeting.getId() == 5
+greeting.getContent() == "hello"
+When assigning request parameters to Java objects, there is an inherent security risk since some “internal” parameters of the built object should never be externally controlled, this includes the Class, ClassLoader and ProtectionDomain parameters.
+Spring contains specific code that denies attackers from assigning to these internal attributes.
+Unfortunately, starting from Java 9, due to an introduction of a new API (class.getModule) it is possible to bypass Spring’s protection and assign arbitrary values to properties of the ClassLoader attribute – this is the root cause of SpringShell.
+Why is CVE-2022-22965 – SpringShell (Spring4Shell) So Dangerous?
+The Spring Framework is an extremely popular framework for building web applications, and the SpringShell vulnerability lies in the heart of this framework, meaning many web applications that are built using the Spring Framework will be susceptible to this issue.
+Although the security vulnerability is not exploitable for all web applications (see next sections) the prerequisites for exploitation may not be exceedingly rare. For example, one of the basic tutorials published by Spring – “Handling Form Submission” is susceptible to this vulnerability. Due to the fact that many web application developers use these tutorials as templates, this could lead to vulnerable applications in the wild.
+The vulnerability’s impact is the highest possible – remote code execution.
+Furthermore, there are no mitigation techniques in the JDK itself against this type of vulnerability, and the vulnerability is trivial to exploit in a stable manner.
+Notwithstanding all of the above, we do not believe this issue will be as widespread as Log4Shell.
+How is SpringShell (Spring4Shell) Being Exploited Currently?
+There are many ways to exploit the modification of ClassLoader in order to obtain remote code execution, but the original published PoC exploit chose to exploit this security vulnerability with a Tomcat-specific technique – abusing the AccessLogValve to obtain arbitrary file overwrite.
+The exploit works in 2 stages –
+
+Overriding Tomcat-specific ClassLoader attributes, to change the access log filepath to somewhere under the web root directory, and change the log pattern (the data written) to a constant pattern that contains the webshell code. This causes the webshell JSP to be dropped under the web root directory
+Sending a query request to the dropped webshell, to execute an arbitrary shell command
+The webshell is an extremely simple JSP program that executes shell commands passed to it via query parameters –
+<%
+java.io.InputStream in = Runtime.getRuntime().exec(request.getParameter("cmd")).getInputStream();
+int a = -1;
+byte[] b = new byte[2048];
+ 
+while((a=in.read(b))!=-1) {
+    out.println(new String(b));
+}
+%>
+A more detailed writeup of this exploitation technique can be found here.
+When Exactly is the SpringShell (Spring4Shell) Vulnerability Exploitable?
+At a high-level, your web application may be vulnerable if –
+
+Your web application is built on the Spring Framework (for example, using Spring Boot)
+Your web application is running on JDK 9 or any later version
+Your web application uses data binding to bind request parameters to a Java object
+Expanding on the last prerequisite – since the vulnerability is in Spring’s data binding mechanism, only web applications that try to bind request parameters to POJOs (Plain Old Java Objects) are vulnerable.
+In practice, this means the request handler will receive a user-defined class type as its first argument.
+Any of the following annotations, indicate a request handler that might be susceptible –
+@RequestMapping
+@GetMapping
+@PostMapping
+@PutMapping
+@DeleteMapping
+@PatchMapping
+An example of a vulnerable Spring Controller –
+@Controller
+public class HelloController {
+  @GetMapping("/greeting")
+  public String helloWorld(@ModelAttribute SomeClass someClass, Model model) {
+      return "hello";
+  }
+}
+Note the @ModelAttribute annotation, which signifies that data binding will take place.
+The same request handler can also be written without the @ModelAttribute annotation (for the someClass argument), and still be vulnerable –
+@GetMapping("/greeting")
+public String helloWorld(SomeClass someClass, Model model) {
+    return "hello";
+}
+This is due to the fact that non-simple types that do not match well-known classes are resolved as @ModelAttribute by default.
+For reference, note that when using the following parameter types/annotations, the vulnerability cannot be exploited –
+WebRequest
+NativeWebRequest
+ServletRequest
+ServletResponse
+MultipartRequest
+MultipartHttpServletRequest
+HttpSession
+PushBuilder
+Principal
+HttpMethod
+Locale
+TimeZone
+ZoneId
+InputStream
+Reader
+OutputStream
+Writer
+@PathVariable
+@MatrixVariable
+@RequestParam
+@RequestHeader
+@CookieValue
+@RequestBody
+HttpEntity
+@RequestPart
+Map
+Model
+ModelMap
+RedirectAttributes
+SessionStatus
+@SessionAttribute
+@SessionAttributes
+UriComponentsBuilder
+@RequestAttribute
+Notes about current exploit
+Due to the specific exploitation vector chosen by the original PoC exploit (arbitrary file overwrite through AccessLogValve), the exploit imposes two requirements in addition to the above:
+
+The web application must be served by Apache Tomcat
+The web application must be deployed on Tomcat as a WAR. The default deployment method for Spring Boot (executable JAR) is not vulnerable to the exploit.
+However, we suspect upcoming exploits will employ different exploitation vectors and will not be susceptible to these two requirements. It is important to patch against this issue even if you are using a different application server (such as Eclipse Jetty).
+Published Inaccuracies
+Due to this vulnerability being published as a zero-day, and coupled with the FUD-inducing CyberKendra original blog post, there have been many published inaccuracies about SpringShell. Our research team constantly monitors the latest blog posts and publications and would like to clarify some points –
+
+SpringShell is not a deserialization issue, and the Spring commit that was referred to by many blog posts and mentions a deserialization issue is not related to SpringShell (or any other concrete CVE, in fact)
+The vulnerability can be exploited through all HTTP methods, and not just through GET/POST. We can see the PoC exploit working with minor changes on a @PutMapping handler –
+
+
+While the original exploit PoC only works on web applications hosted on Apache Tomcat as a WAR (which is uncommon), the vulnerability itself is relevant regardless of the hosting application server. We fully expect future SpringShell exploits to target different application servers (ex. Eclipse Jetty) and different deployment methods.
+Some advisories and tools regard the base spring-beans package to be vulnerable, but the existence of this specific package is not enough for the remote exploitation of this vulnerability. This is due to the fact that vulnerable handlers must have the @RequestMapping annotation (or an equivalent annotation) and these annotations are available only in the spring-web package.
+How Can I Test For the SpringShell (Spring4Shell) Issue?
+For testing of live endpoints, other than running one of the PoC exploits available, the Randori Attack Team published a simple test using curl –
+If the returned status code is “400” – your endpoint is most likely vulnerable.
+Note that a returned status code which isn’t “400”, does not guarantee that the endpoint is not vulnerable.
+For testing local codebases, JFrog published an OSS tool that scans compiled binary code in order to find vulnerable web applications –
+
+In order to resolve the complexity of matching the actually running applications to their source code, we focused on a tool scanning the compiled binary code directly. In order to filter out irrelevant results, we chose to scan for the feature which provides a robust way to write off a significant fraction of endpoints as non-vulnerable (types to which the endpoints bind the requests), and thus help teams focus on updating the parts of their software which may actually be vulnerable.
+How Can I Completely Fix the SpringShell (Spring4Shell) Vulnerability?
+The best way to fix SpringShell is to upgrade Spring Framework to version 5.2.20 or 5.3.18
+If you are using Spring Boot directly – upgrade to version 2.6.6
+Upgrading Spring Framework can be done as follows –
+Maven
+Edit your pom.xml –
+
+Gradle
+Edit your build.gradle –
+Can I Mitigate the SpringShell (Spring4Shell) Issue Without Upgrading?
+The best course of action is to upgrade Spring Framework (as shown in the last section). If upgrading is currently not possible, the official Spring blog suggests modifying your application code and adding a @ControllerAdvice that blocks assignments to some of the ClassLoader internal fields –
+@ControllerAdvice
+@Order(Ordered.LOWEST_PRECEDENCE)
+public class BinderControllerAdvice {
+ 
+    @InitBinder
+    public void setAllowedFields(WebDataBinder dataBinder) {
+         String[] denylist = new String[]{"class.*", "Class.*", "*.class.*", "*.Class.*"};
+         dataBinder.setDisallowedFields(denylist);
+    }
+ 
+}
+Spring mentions that this workaround is not fail-safe and suggest more possible workarounds, but in general upgrading is the best fix for this issue.
+Is the JFrog platform Vulnerable to SpringShell?
+After conducting an internal research, we can confirm that the JFrog DevOps platform is not vulnerable to SpringShell (CVE-2022-22965) or the recent RCE vulnerability in Spring Cloud Function (CVE-2022-22963).
+Is SpringShell Related to CVE-2022-22963 or CVE-2022-22950?
+Unfortunately, two other Spring CVEs were released at the same time as SpringShell (CVE-2022-22965) which caused a lot of confusion.
+These two additional CVEs are not related to SpringShell, and each of them should be handled separately from SpringShell.
+CVE-2022-22963 is a critical-severity RCE issue (which was originally reported as a medium-severity issue) in Spring Cloud Function. This is a very severe issue, but Spring Cloud Function is less widespread than Spring Framework.
+CVE-2022-22950 is a medium-severity DoS issue in Spring Framework.
+How Can I Use JFrog Xray to Detect the SpringShell Vulnerability?
+JFrog Artifactory and JFrog Xray can detect artifacts vulnerable to the SpringShell vulnerability, for any supported artifact type, and is augmented with detailed research data and mitigations. Read our remediation how-to blog post to learn how to best to use the JFrog Platform to find, fix, and fortify your software supply chain.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214505_456370\SpringShell.png
+
+Stay Up-to-Date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research website and on Twitter at @JFrogSecurity.
+
+ClassLoader
+ClassLoader
+@ModelAttribute
+@ModelAttribute
+someClass
+@ModelAttribute
+spring-beans
+@RequestMapping
+spring-web
+pom.xml
+build.gradle
+@ControllerAdvice
+ClassLoader

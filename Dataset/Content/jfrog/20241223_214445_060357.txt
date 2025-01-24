@@ -1,0 +1,163 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214445_060357\npmpackagehijackingthroughdomaintakeover863x3001.png
+
+When relying on a 3rd-party package from a non-commercial entity, there is always the risk of lack of support, especially when it comes to outdated packages and versions. If the package stops being maintained, nobody will implement a new feature we might need or fix a newly-discovered security vulnerability. Consider, for example, CVE-2019-17571. A critical remote code vulnerability which was never fixed in Log4j 1.x, since it was not supported anymore, and only fixed in Log4j 2.x.
+In this post we will present a more severe case of lack of maintenance, where one of the user accounts assigned to a project (in our case, npm package) becomes “hijackable” due to the account’s email domain expiring. This is not a new attack technique by any means, but it does seem to be the first time where a large public discussion is held with regards to this attack on the npm registry. Armed with access to the project as a maintainer, an attacker can publish a new version of the npm package that contains malicious code and carry out a software supply chain attack.
+We were prompted to start looking at this after the following tweet was published, claiming that the attack was used to hijack an extremely prolific npm package –
+1. Buy expired NPM maintainer email domains.
+
+2. Re-create maintainer emails
+
+3. Take over packages
+
+4. Submit legitimate security patches that include package.json version bumps to malicious dependency you pushed
+
+5. Enjoy world domination.
+— Lance R. Vick ( @lrvick@mastodon.social ) (@lrvick) May 9, 2022
+
+We set out to find out how this software supply chain attack exactly works, how common it is, who exactly is vulnerable and how to defend against it, in the context of the npm package repository.
+How does a domain takeover attack work?
+Before discussing the attack, let’s discuss the relevant building blocks in the npm registry –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214445_060357\1_npmrecoverpassword.png
+
+Every npmjs.com user is registered with an associated email address
+{
+    "scope": {
+        "type": "user",
+        "name": "srmish-jfrog",
+        ...       
+        "email": "foo@jfrog.com"
+        ...
+An npm package can have multiple maintainers (users that are allowed to upload new versions of the package, for example)
+...
+"maintainers": [
+    {
+      "name": "srmish-jfrog",
+      "email": "foo@jfrog.com"
+    },
+    {
+        "name": "my-old-user",
+        "email": "foo@somedomain.sh"
+    },
+  ],
+...
+npm’s “Forgot my password” works by sending a temporary password to the registered email address of the user. Currently, this mechanism doesn’t require additional knowledge other than possession of the email address.
+With that in mind – the attack relies on a package having a maintainer with an associated email address in a custom domain (ex. not @gmail.com) where that domain has expired (for example somedomain.sh from the figure above). This means anyone can purchase this domain through a domain registrar:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214445_060357\2_somedomain.sh_.png
+
+And subsequently make all the emails sent to foo@somedomain.sh arrive at the attacker’s email address.
+This includes the “Forgot my password” email, with the temporary password from npm, which will allow the attacker to hijack the my-old-user account and subsequently any npm package it maintains, by uploading a new, malicious version of the package!
+Thus, with a budget of less than $50 and without any significant effort, it’s theoretically possible to infect tens of thousands of hosts quickly with a single popular package, or even more if targeting multiple packages over time.
+How many npm packages are potentially vulnerable to this hijacking attack?
+After seeing the suggested attack vector, we set out to understand how many packages are actually vulnerable in NPM, by using the NPM APIs to retrieve the relevant data.
+Our results were as follows –
+
+3210 unique packages have at least one maintainer with an available-to-purchase domain, in their latest published version
+
+This is ~0.16% of all npm packages (as reported by modulecounts)
+Out of these, 393 packages are administered by multiple maintainers while 2817 are administered by a single maintainer
+These are only the directly (potentially) vulnerable packages. These numbers do not include packages which depend on one of the potentially vulnerable packages
+There are even more packages with expired domains, which currently cannot be purchased, since the domain is currently pending delete or in a remediation period
+
+This is ~0.16% of all npm packages (as reported by modulecounts)
+Out of these, 393 packages are administered by multiple maintainers while 2817 are administered by a single maintainer
+These are only the directly (potentially) vulnerable packages. These numbers do not include packages which depend on one of the potentially vulnerable packages
+There are even more packages with expired domains, which currently cannot be purchased, since the domain is currently pending delete or in a remediation period
+900 maintainers were found to have an available-to-purchase email domain
+
+This is ~0.17% of all registered npm maintainers
+
+This is ~0.17% of all registered npm maintainers
+The top package that is potentially vulnerable to this attack has a total download count of ~31M downloads (~670k weekly downloads) as reported by npm
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214445_060357\3_PotentiallyVulnerableEntities.png
+
+It’s important to mention that a maintainer with an expired domain name will not be hijackable if two-factor authentication (2FA) is enabled for that maintainer account. Specifically, after performing the hijack and getting a temporary login password, the attacker will have to input the 2FA token, which he/she usually does not possess.
+Since it does not seem possible to detect whether a specific npm user has 2FA enabled (the “tfa” property in the user profile is always set to “null” regardless of the actual value), the real number of vulnerable packages is a subset of the above.
+{
+    "scope": {
+        "type": "user",
+        "name": "srmish-jfrog",
+        "parent": {
+            "tfa": null, // Always null, regardless of whether TFA is enabled
+Also note that a package maintainer can opt-in to require that any user that publishes a new version of the package must enable 2FA.
+We do not intend to release the list of potentially vulnerable packages, for the sake of protecting the relevant npm package maintainers, whom we’ve alerted via a private email message.
+Which security measures in the npm registry help prevent domain takeover attacks?
+Luckily, the npm maintainers have already implemented a few defense mechanisms against this type of software supply chain attack.
+Mandatory 2FA
+Two-factor authentication (2FA) has been long available as an optional security mitigation for diligent package maintainers.
+As mentioned, any maintainer that has 2FA enabled should not be susceptible to this attack since even after getting a temporary login password, the attacker will have to input the 2FA token.
+Critically, since December 2021 the maintainers of top-100 npm packages (by dependents) are forced to enable 2FA. In addition to that, the npm maintainers are looking to enforce 2FA on the top-500 npm packages (by dependents) by the end of Q2 2022.
+In addition to the points above, the npm maintainers are rolling out even more 2FA options, to encourage even more maintainers to enable 2FA –
+Extremely excited to finally have support for WebAuthn on npm bringing us physical security keys and biometrics as 2FA optionshttps://t.co/4DEMVDt3Mi
+— sMyle (@MylesBorins) May 10, 2022
+
+Although these are great measures, it must be noted that a popular package might still be hijacked through its dependencies. For example if a popular package (with enforced 2FA) depends on a less popular package which is hijackable and does not have enforced 2FA, then hijacking the less popular package may lead to the compromise of the popular package as well. This also depends on the types of checks the popular package maintainers perform before updating their dependencies.
+Other Mechanisms
+In the original Twitter thread, it was mentioned that the npm maintainers are actually implementing more account takeover defenses –
+Just had a great chat with @MylesBorins on @npmjs security.
+They are actively implementing account takeover defenses and there is at least some interest in bigger picture solutions like signing and web of trust.
+I’ll try to work with them vs against them moving forward.
+— Lance R. Vick ( @lrvick@mastodon.social ) (@lrvick) May 11, 2022
+
+These mechanisms might block the domain takeover attack, even for maintainers that have 2FA disabled.
+How to protect from npm package hijacking via domain takeover?
+Although there are mitigating factors, it seems that some npm packages could be affected by this attack.
+Guidance for npm package maintainers
+We encourage npm package maintainers to check the full list of maintainers for each of their packages. If you suspect any of the accounts for your specific package may be unneeded or susceptible to domain expiration, we suggest performing one of the following actions:
+
+Remove the account from the maintainers list
+Enable Two-Factor authentication (2FA) for the account
+Switch the account’s email address to a more permanent provider
+As a cautionary measure, we sent a warning email to all npm users that maintained a package which also had an additional maintainer with an expired domain.
+Guidance for developers
+Due to the high potential impact if npm malicious packages make it into your software, we highly recommend that developers check all their dependencies to make sure they are not using packages that are susceptible to domain takeover attacks.
+Although we do not recommend doing this manually, this can be achieved by using the “npm show” command to get the list of package maintainers (ex. for the lodash package) –
+$ npm show lodash
+lodash@4.17.21 | MIT | deps: none | versions: 114
+...
+maintainers:
+- mathias <mathias@qiwi.be>
+- jdalton <john.david.dalton@gmail.com>
+- bnjmnt4n <benjamin@dev.ofcr.se>
+...
+and then querying each email domain (qiwi.be, gmail.com and dev.ofcr.se in the example above) against a WHOIS provider (such as whois.com) or a domain registrar (such as namecheap.com).
+If the WHOIS provider or domain registrar show the domain as expired or available to purchase, you should contact the package maintainers or consider using a more maintained package.
+As mentioned before, having an expired domain does not guarantee 100% that the maintainer and/or package can be hijacked, but since some cases are vulnerable, this is a flaw that should be fixed by the package maintainers.
+This manual process is less recommended since it is tedious and error-prone. For example, the emails listed under maintainers are not always the latest email addresses associated with the maintainer’s npm account.
+To detect this potential vulnerability more easily, we wrote an automated tool that performs this check.
+JFrog Security OSS tool – npm_domain_check – automating domain takeover detection
+To help speed up the process of checking for susceptibility to the domain takeover attack, we are publishing npm_domain_check – an OSS security tool to automatically determine whether a local package (or any of its dependencies) has a maintainer with an expired domain name.
+The tool takes as input a path to the package.json file of your npm package and enumerates all the direct and indirect dependencies of the package. For each dependency, the tool finds its maintainers and validates their email domains. If the domain is available for registration or about to expire, a warning is shown.
+
+Conclusions
+For an attacker who is interested in creating a botnet, it currently seems that this npm package hijacking method can be exploited easily and possibly in an automated manner.
+For an attacker who is interested in a targeted attack, or in very high-value targets (extremely popular packages), this attack seems less feasible due to npm’s mandatory 2FA enforcement and other account takeover defenses.
+We encourage all npm package owners to make sure their maintainer list is up to date and does not contain any inactive maintainers which could become a problem in the future, for example if the maintainer’s domain expires.
+Stay up-to-date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter at @JFrogSecurity.
+{
+    "scope": {
+        "type": "user",
+        "name": "srmish-jfrog",
+        ...       
+        "email": "foo@jfrog.com"
+        ...
+...
+"maintainers": [
+    {
+      "name": "srmish-jfrog",
+      "email": "foo@jfrog.com"
+    },
+    {
+        "name": "my-old-user",
+        "email": "foo@somedomain.sh"
+    },
+  ],
+...
+
+This is ~0.16% of all npm packages (as reported by modulecounts)
+Out of these, 393 packages are administered by multiple maintainers while 2817 are administered by a single maintainer
+These are only the directly (potentially) vulnerable packages. These numbers do not include packages which depend on one of the potentially vulnerable packages
+There are even more packages with expired domains, which currently cannot be purchased, since the domain is currently pending delete or in a remediation period
+
+This is ~0.17% of all registered npm maintainers

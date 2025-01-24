@@ -1,0 +1,233 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163624_448722\ApacheCassandraUserDefinedFunctions863x300w.png
+JFrog’s Security Research team recently disclosed an RCE (remote code execution) issue in Apache Cassandra, which has been assigned to CVE-2021-44521 (CVSS 8.4). This Apache security vulnerability is easy to exploit and has the potential to wreak havoc on systems, but luckily only manifests in non-default configurations of Cassandra.
+Cassandra is a highly scalable, distributed NoSQL database that is extremely popular due to the benefits of its distributed nature. Cassandra is used by enterprises such as Netflix, Twitter, Urban Airship, Constant Contact, Reddit, Cisco, OpenX, Digg, CloudKick, Ooyala, and more. Cassandra is also extremely popular in DevOps and cloud-native development circles, as can be seen by its support in CNCF projects (such as Jaeger).
+
+Some companies even provide cloud-based turnkey solutions based on Cassandra, such as DataStax (a serverless, multi-cloud DBaaS).
+In this blogpost, we present the background on how we discovered the RCE security vulnerability, provide details on a PoC exploit, and share the suggested fix and mitigation options.
+UDFs and Nashorn
+Cassandra offers the functionality of creating user-defined-functions (UDFs) to perform custom processing of data in the database.
+Cassandra UDFs can be written by default in Java and JavaScript. In JavaScript it uses the Nashorn engine in the Java Runtime Environment (JRE) which is a JavaScript engine that runs on top of the Java Virtual Machine (JVM).
+Nashorn is not guaranteed to be secure when accepting untrusted code. Therefore, any service that allows such behavior must always wrap the Nashorn execution in a sandbox¹.
+For example, running the following Nashorn JavaScript code allows execution of an arbitrary shell command:
+java.lang.Runtime.getRuntime().exec("touch hacked")
+Cassandra’s development team decided to implement a custom sandbox around the UDF execution which uses two mechanisms to restrict the UDF code:
+
+A filtering mechanism using a whitelist and a blacklist (only classes that match the whitelist and don’t match the blacklist are allowed):
+private static final String[] allowedPatterns =
+    {
+    "com/google/common/reflect/TypeToken",
+    "java/io/IOException.class",
+    "java/io/Serializable.class",
+    "java/lang/",
+    "java/math/",
+    "java/net/InetAddress.class",
+    "java/net/Inet4Address.class",
+    ...
+ 
+private static final String[] disallowedPatterns =
+    {
+    "com/datastax/driver/core/Cluster.class",
+    "com/datastax/driver/core/Metrics.class",
+    "com/datastax/driver/core/NettyOptions.class",
+    "com/datastax/driver/core/Session.class",
+    "com/datastax/driver/core/Statement.class",
+    "com/datastax/driver/core/TimestampGenerator.class",
+    "java/lang/Compiler.class",
+    "java/lang/InheritableThreadLocal.class",
+    "java/lang/Package.class",
+    "java/lang/Process.class",
+    ...
+Usage of the Java Security Manager to enforce permissions of the executed code (in the default configuration, no permissions are granted)
+¹Some projects such as NashornEscape implement a sandbox to secure Nashorn code execution
+Accessing Java classes through Nashorn
+The Nashorn engine gives access to arbitrary Java classes by using Java.type.
+
+For example: var System = Java.type("java.lang.System") will allow us to access the java.lang.System package by using the System variable.
+Users with sufficient permissions can create arbitrary functions by using the create function query. For example, this function will print its input to the console:
+create or replace function print(name text) RETURNS NULL ON NULL INPUT RETURNS text LANGUAGE javascript AS $$var System = Java.type("java.lang.System"); System.out.println(name);name$$;
+Users can invoke the function using the following SELECT query.
+select print(name) from table;
+When can CVE-2021-44521 be exploited?
+As we were researching the Cassandra UDF sandbox implementation, we realized that a mix of specific (non-default) configuration options could allow us to abuse the Nashorn engine, escape the sandbox and achieve remote code execution. This is the vulnerability that we reported as CVE-2021-44521.
+Cassandra deployments are vulnerable to CVE-2021-44521 when the cassandra.yaml configuration file contains the following definitions:
+enable_user_defined_functions: true
+enable_scripted_user_defined_functions: true
+enable_user_defined_functions_threads: false
+Note that these are the only non-default configuration options required, since when enabling UDFs, all users are allowed to create and execute arbitrary UDFs. This includes anonymous logins, which are enabled by default (authenticator=AllowAllAuthenticator).
+Note that Cassandra is also configurable via the Config.java configuration file, that supports the same flags as above.
+public boolean enable_user_defined_functions = false;
+...
+The first two flags enable UDF support for both Java and JavaScript².
+
+The enable_user_defined_functions_threads is the key for the exploitation of CVE-2021-44521.
+²Cassandra also supports other scripted languages to be used in UDFs such as Python
+Are JFrog products vulnerable to CVE-2021-44521?
+JFrog products are not vulnerable to CVE-2021-44521 since they do not use Apache Cassandra.
+
+Explaining enable_user_defined_functions_threads
+From the source code (Config.java):
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163624_448722\Explainingenable_user_defined_functions_threads.png
+
+enable_user_defined_functions_threads is set to true by default, which means each invoked UDF function will run in a different thread, with a security manager without any permissions – we will present a DoS attack on this default configuration, in a later section.
+When the option is set to false, all invoked UDF functions run in the Cassandra daemon thread, which has a security manager with some permissions. We will show how to abuse these permissions to achieve sandbox escape and RCE.
+Note that the documentation in the source code alludes to the value being unsafe to turn off, but due to denial of service concerns. We will demonstrate that turning off this value directly leads to remote code execution.
+RCE through sandbox escape
+The UDF sandbox will not directly allow us to execute code on the server, for example by invoking java.lang.Runtime.getRuntime().exec().
+
+While researching the sandbox implementation we discovered we can escape the sandbox using at least two ways:
+
+Abusing the Nashorn engine instance
+java.lang.System‘s load and loadLibrary functions
+Since Cassandra’s class filtering mechanism allows access to java.lang.System, both of these methods can be used to escape the sandbox.
+Method 1 – Abusing the Nashorn engine instance
+In order to escape the sandbox completely, we have to:
+
+Disable the class filtering mechanism
+Run without a security manager
+When enable_user_defined_functions_threads is set to false, our UDF code runs in the daemon thread, which specifically has the permission to invoke setSecurityManager! This immediately allows us to turn off the security manager, so now we just need to bypass the class filtering mechanism.
+When running JavaScript code on top of Nashorn we can use this.engine to access the Nashorn instance engine. As documented in the Beware the Nashorn blog, this actually allows us to bypass any class filter by creating a new script engine, which is not restricted by the class filtering mechanism.
+However – newer Java versions (8u191 and later) have received a mitigation which prevents accessing this.engine when a security manager is active.
+
+Luckily for the attacker – as we’ve established before, we can invoke setSecurityManager to disable the security manager, and subsequently access this.engine.
+Putting everything together, a PoC query may look like this:
+create or replace function x.escape_system(name text) RETURNS NULL ON NULL INPUT RETURNS text LANGUAGE javascript AS $$
+var System = Java.type("java.lang.System");System.setSecurityManager(null);this.engine.factory.scriptEngine.eval('java.lang.Runtime.getRuntime().exec("touch hacked")');name $$;
+This query will turn off the security manager by setting it to null and then create a new script engine which is not restricted by the class filtering mechanism, to run an arbitrary shell command on the Cassandra server.
+PoC in action
+The PoC is executed in order to create a new file named “hacked” on the Cassandra server:
+
+Method 2: java.lang.System’s load and loadLibrary functions
+In addition to the Nashorn escape technique, there are more library functions that are not filtered by the class filter and that can be abused for code execution, when the security manager is turned off.
+For example, java.lang.System‘s load method allows us to load an arbitrary shared object by specifying an absolute path.
+Assuming the attacker can somehow upload a malicious shared object file to the vulnerable system (it does not matter what the upload directory is on the victim machine as long as the attacker knows the full path to the uploaded file), the load method can be used to load the library, which may run arbitrary code as part of its entry routine.
+Other noteworthy issues
+During our research we have found and disclosed a few more issues which are worth mentioning, when running Cassandra (and related tools) on some non-default (albeit reasonable) configurations. These options are documented to be insecure, but we wanted to highlight the issues and their exact impact so that vendors are aware not to deploy such configurations in a publicly accessible network.
+Cassandra UDF DoS
+When UDF functions are enabled and the enable_user_defined_functions_threads flag is set to true (the default value) a malicious user can create a UDF that will shut down the Cassandra daemon. This is caused due to the behavior of the UDF timeout mechanism, governed by the user_defined_function_fail_timeout flag.
+If a UDF function runs more than the allotted time, the entire Cassandra daemon will shut down (not just the thread that runs the UDF). Although this is the documented behavior, an attacker can easily DoS the entire database by creating a function which loops forever with while(true).
+We are currently not aware of any direct way to mitigate this issue (changing the user_function_timeout_policy flag from die to ignore may lead to an even more severe DoS) although the issue can be indirectly mitigated by making sure that low-privileged users cannot create arbitrary UDF functions (see “Possible Mitigations” below).
+StressD RCE via unsafe object deserialization
+Cassandra includes a tool called cassandra-stressd which is used to stress-test the database. The tool has been documented by Apache as a “not secured” tool.
+This is a network-facing tool, which by default only listens on the localhost interface.
+However – this tool can be made to listen to any interface by supplying the -h flag and an IP address.
+The input from the socket is directly deserialized by StressServer.java, which means that attackers may supply a serialized “gadget” object that causes arbitrary code execution on deserialization:
+public static class StressThread extends Thread
+    {
+        private final Socket socket;
+        public StressThread(Socket client)
+        {
+            this.socket = client;
+        }
+        public void run()
+        {
+            try
+            {
+		// Arbitrary deserialization!
+           	ObjectInputStream in = new ObjectInputStream(socket.getInputStream()); 
+		...
+The exploitation of this issue depends on the available classes in the classpath of the running Cassandra instance.
+We urge users to make sure they are not running the cassandra-stressd tool with a -h flag that points to an external interface.
+How to remediate CVE-2021-44521?
+We highly recommend that all Apache Cassandra users upgrade to one of the following versions, which resolves CVE-2021-44521:
+3.0.x users should upgrade to 3.0.26
+
+3.11.x users should upgrade to 3.11.12
+
+4.0.x users should upgrade to 4.0.2
+Apache’s fix adds a new flag – allow_extra_insecure_udfs (false by default) which disallows turning off the security manager and blocks access to java.lang.System.
+Users that want their UDFs to interact with elements outside the sandbox (and don’t mind the potential security risk) can turn on the flag to restore the legacy behavior (not recommended!).
+How to mitigate CVE-2021-44521?
+We recommend the following mitigations for users that can’t upgrade their Cassandra instances:
+
+If UDFs are not actively used, they can be completely disabled by setting enable_user_defined_functions to false (which is the default value)
+If UDFs are needed, set enable_user_defined_functions_threads to true (which is the default value)
+Remove the permissions of creating, altering and executing functions for untrusted users by removing the following permissions: ALL FUNCTIONS, ALL FUNCTIONS IN KEYSPACE and FUNCTION for CREATE, ALTER and EXECUTE queries.
+This can be done using the following queries by replacing the role_name to the desired role.
+revoke CREATE ON ALL FUNCTIONS,ALL FUNCTIONS IN KEYSPACE,FUNCTION from <role_name>;
+revoke CREATE ON ALL ALL FUNCTIONS IN KEYSPACE from <role_name>;
+revoke CREATE ON FUNCTION from <role_name>;
+revoke ALTER ON ALL FUNCTIONS,ALL FUNCTIONS IN KEYSPACE,FUNCTION from <role_name>;
+revoke ALTER ON ALL ALL FUNCTIONS IN KEYSPACE from <role_name>;
+revoke ALTER ON FUNCTION from <role_name>;
+revoke EXECUTE ON ALL FUNCTIONS,ALL FUNCTIONS IN KEYSPACE,FUNCTION from <role_name>;
+revoke EXECUTE ON ALL ALL FUNCTIONS IN KEYSPACE from <role_name>;
+revoke EXECUTE ON FUNCTION from <role_name>;
+Conclusion and Acknowledgements
+To conclude, we highly recommend upgrading your Cassandra to the latest version, in order to avoid possible exploitation of CVE-2021-44521.
+We would like to thank Cassandra’s maintainers for validating and fixing the issue in a timely manner and for responsibly creating a CVE for the issue.
+Finding vulnerable versions with JFrog Xray
+In addition to exposing new security vulnerabilities and threats, JFrog provides developers and security teams easy access to the latest relevant information for their software – including the use of Apache Cassandra open-source library versions and associated CVEs – with automated security scanning by JFrog Xray SCA tool.
+private static final String[] allowedPatterns =
+    {
+    "com/google/common/reflect/TypeToken",
+    "java/io/IOException.class",
+    "java/io/Serializable.class",
+    "java/lang/",
+    "java/math/",
+    "java/net/InetAddress.class",
+    "java/net/Inet4Address.class",
+    ...
+ 
+private static final String[] disallowedPatterns =
+    {
+    "com/datastax/driver/core/Cluster.class",
+    "com/datastax/driver/core/Metrics.class",
+    "com/datastax/driver/core/NettyOptions.class",
+    "com/datastax/driver/core/Session.class",
+    "com/datastax/driver/core/Statement.class",
+    "com/datastax/driver/core/TimestampGenerator.class",
+    "java/lang/Compiler.class",
+    "java/lang/InheritableThreadLocal.class",
+    "java/lang/Package.class",
+    "java/lang/Process.class",
+    ...
+Java.type
+var System = Java.type("java.lang.System")
+java.lang.System
+System
+create function
+authenticator=AllowAllAuthenticator
+enable_user_defined_functions_threads
+enable_user_defined_functions_threads
+true
+false
+java.lang.Runtime.getRuntime().exec()
+java.lang.System
+load
+loadLibrary
+java.lang.System
+enable_user_defined_functions_threads
+false
+setSecurityManager
+this.engine
+this.engine
+setSecurityManager
+this.engine
+null
+java.lang.System
+load
+enable_user_defined_functions_threads
+true
+user_defined_function_fail_timeout
+while(true)
+user_function_timeout_policy
+die
+ignore
+cassandra-stressd
+-h
+cassandra-stressd
+-h
+allow_extra_insecure_udfs
+java.lang.System
+enable_user_defined_functions
+false
+enable_user_defined_functions_threads
+true
+ALL FUNCTIONS
+ALL FUNCTIONS IN KEYSPACE
+FUNCTION
+CREATE
+ALTER
+EXECUTE
+role_name

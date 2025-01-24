@@ -1,0 +1,199 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214515_592799\ClickHouseDBMS863x3001.png
+
+The JFrog Security research team constantly monitors open-source projects to find new vulnerabilities or malicious packages and share them with the wider community to help improve their overall security posture. As part of this effort, the team recently discovered seven new security vulnerabilities in ClickHouse, a widely used open-source Database Management System (DBMS) dedicated to online analytical processing (OLAP). ClickHouse was developed by Yandex for the Yandex.Metrica, a web analytics tool often used to get visual reports and video recordings of user actions, as well as track traffic sources to help evaluate the effectiveness of online and offline advertising. The JFrog Security team responsibly disclosed these vulnerabilities and worked with ClickHouse’s maintainers on verifying the fixes.
+The vulnerabilities require authentication, but can be triggered by any user with read permissions. This means the attacker must perform reconnaissance on the specific ClickHouse server target to obtain valid credentials. Any set of credentials would do, since even a user with the lowest privileges can trigger all of the vulnerabilities. By triggering the vulnerabilities, an attacker can crash the ClickHouse server, leak memory contents or even cause remote code execution (RCE).
+Following are the seven vulnerabilities the JFrog Security team discovered:
+
+CVE-2021-43304 and CVE-2021-43305 – heap buffer overflow vulnerabilities in LZ4 compression codec
+CVE-2021-42387 and CVE-2021-42388 – heap out-of-bounds read vulnerabilities in LZ4 compression codec
+CVE-2021-42389 – divide by zero in Delta compression codec
+CVE-2021-42390 – divide by zero in Delta-Double compression codec
+CVE-2021-42391 – divide by zero in Gorilla compression codec
+
+
+CVE-2021-43304	Heap buffer overflow in LZ4 compression codec when parsing a malicious query	RCE	8.8
+CVE-2021-43305	Heap buffer overflow in LZ4 compression codec when parsing a malicious query	RCE	8.8
+CVE-2021-42387	Heap out-of-bounds read in LZ4 compression codec when parsing a malicious query	Denial of Service or Information Leakage	7.1
+CVE-2021-42388	Heap out-of-bounds read in LZ4 compression codec when parsing a malicious query	Denial of Service or Information Leakage	7.1
+CVE-2021-42389	Divide-by-zero in Delta compression codec when parsing a malicious query	Denial of Service	6.5
+CVE-2021-42390	Divide-by-zero in DeltaDouble compression codec when parsing a malicious query	Denial of Service	6.5
+CVE-2021-42391	Divide-by-zero in Gorilla compression codec when parsing a malicious query	Denial of Service	6.5
+Technical Background
+The ClickHouse server allows a user to compress its queries. A user can pass a compressed query by supplying the decompress=1 URL query string parameter to its web interface, like so:
+cat query.bin | curl -sS --data-binary @- 'http://serverIP:8123/?user=guest1&password=1234&decompress=1'
+Where serverIP is the IP address of the ClickHouse server that has a user “guest1” with password “1234” set up. This user can also be configured with a “readonly” policy.
+The query’s content (query.bin) should be in the following format:
+struct {
+    uint128_t hash; // Google’s CityHash128
+    uint8_t compress_method;
+    uint32_t size_compressed_without_checksum; // the length (in bytes) of the entire struct (including compressed_data contents) minus the first 16bytes hash field. 
+    uint32_t decompressed_size; // the expected decompressed output size 
+    char compressed_data[0]; // the compressed data bytes (variable length)
+};
+The client supplies the entire struct to the server and thus controls all of its contents.
+The compressed data is consumed by constructing a CompressedReadBuffer instance with the struct as its input.
+CompressedReadBuffer’s code calls readCompressedData which reads the struct and extracts its length values, calculates the CityHash128 over the struct contents (excluding the hash field), and verifies it against the struct’s hash field. It then resizes (basically realloc()’s) the initially allocated memory buffer used to hold the decompressed data. Then, through ICompressionCodec::decompress, the selected codec’s doDecompressData is called.
+In CVE-2021-42387, CVE-2021-43304, CVE-2021-42388 and CVE-2021-43305 the LZ4 codec calls LZ4::decompress(source, dest, source_size, dest_size, ..) with the ‘compressed_data’ as source, its length as source_size, the resized memory buffer as dest, and the struct’s ‘decompressed_size’ value as dest_size. LZ4::decompress eventually calls LZ4::decompressImpl(source, dest, dest_size) that does the actual LZ4 decompression in a loop –copying different parts of the compressed input in user-controlled lengths and offsets (supplied as part of the compressed_data bytes) to the decompressed output memory buffer. It defines pointer variables for tracking the current location in the source (ip) and the dest (op).
+CVE-2021-43304  – a heap buffer overflow vulnerability
+Here is the code of LZ4::decompressImpl() that is relevant for CVE-2021-43304:
+template 
+void NO_INLINE decompressImpl(
+     const char * const source,
+     char * const dest,
+     size_t dest_size)
+{
+    ...
+    while (true)
+    {
+        ... 
+        wildCopy(op, ip, copy_end);    /// Here we can write up to copy_amount - 1 bytes after buffer.
+ 
+        ip += length;
+        op = copy_end;
+ 
+        if (copy_end >= output_end)
+            return;
+        ...
+    }
+}
+ip is a pointer that points to the compressed buffer and op is a pointer that points to the allocated destination buffer, which is allocated with a size of the given decompressed_size that is passed in the header. copy_end is a pointer that points to the end of the copy area.
+copy_amount is the parameter of the template, which can be 8, 16 or 32. The copy area is being copied in chunks that each one of them is in size of copy_amount. For example, this is the implementation of wildCopy16:
+inline void wildCopy16(UInt8 * dst, const UInt8 * src, const UInt8 * dst_end)
+{
+    /// Unrolling with clang is doing >10% performance degrade.
+#if defined(__clang__)
+    #pragma nounroll
+#endif
+    do
+    {
+        copy16(dst, src);
+        dst += 16;
+        src += 16;
+    } while (dst < dst_end);
+}
+Since the user controls decompressed_size and the compressed buffer, an attacker can take advantage of this situation by preparing compressed data with a header that contains a decompressed_size which is smaller than the actual size of the compressed data. Note that the lengths of the overflow, as well as source’s allocation size and the overflowing byte contents are fully controlled by the user, which greatly facilitates exploitation.
+Also note that the existing size check of “if (copy_end >= output_end)” does not prevent this vulnerability as it appears after the copy operation. CVE-2021-43305 is similar to CVE-2021-43304, but involves a different copy operation (whose source is a controlled offset of the destination buffer).
+Exploiting CVE-2021-43304
+In order to prove the exploitability of CVE-2021-43304, we created a specially crafted compressed file and sent it as previously explained. The query.bin file is comprised of the following header:
+
+hash = the matching calculated Cityhash
+compress_method = 0x82 (LZ4 method)
+size_compressed_without_checksum = 0xc80a
+decompressed_size = 0x1
+And for the compressed data we’ve used ‘\xff’ (repeating 200 times) ‘A’ (repeating 5100 times). These are arbitrary values. The resulting malformed compressed file:
+
+00000000  26 fc 61 db c0 83 bb 0a  db 58 5a f0 34 e1 30 f6  |&.a......XZ.4.0.|
+
+00000010  82 0a c8 00 00 01 00 00  00 f0 ff ff ff ff ff ff  |................|
+
+00000020  ff ff ff ff ff ff ff ff  ff ff ff ff ff ff ff ff  |................|
+
+*
+
+000000e0  ff ff 41 41 41 41 41 41  41 41 41 41 41 41 41 41  |..AAAAAAAAAAAAAA|
+
+000000f0  41 41 41 41 41 41 41 41  41 41 41 41 41 41 41 41  |AAAAAAAAAAAAAAAA|
+
+*
+
+0000c81a
+
+The 200 0xff’s are being used in the loop inside LZ4::decompressImpl():
+template 
+void NO_INLINE decompressImpl(
+     const char * const source,
+     char * const dest,
+     size_t dest_size)
+{
+    ...
+    while (true)
+    {
+        ...
+        size_t length;
+ 
+        auto continue_read_length = [&]
+        {
+            unsigned s;
+            do
+            {
+                s = *ip++;
+                length += s;
+            } while (unlikely(s == 255));
+        };
+ 
+        /// Get literal length.
+ 
+        const unsigned token = *ip++;
+        length = token >> 4;
+        if (length == 0x0F)
+            continue_read_length();
+        
+        /// Copy literals.
+ 
+        UInt8 * copy_end = op + length;
+ 
+        ...
+ 
+        wildCopy(op, ip, copy_end);    /// Here we can write up to copy_amount - 1 bytes after buffer.
+        ...
+    }
+}
+That will increase length by 0xff * 200 = 51000, which is exactly the size of the rest of the data.
+So although the decompressed size is 1, a much larger size will be copied to the destination.
+By sending the query to a vulnerable ClickHouse server, while debugging the server’s process, we managed to periodically get the following crash, proving control of the instruction pointer register, since the code branches to an address taken from the RAX register, which has been overwritten with our “A” values:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214515_592799\debuggingtheserverprocess.png
+
+Although this specific crash is statistical, we believe that with proper heap shaping techniques, a stable exploit can be developed.
+CVE-2021-42388 and CVE-2021-42387 – heap OOB read vulnerabilities
+In LZ4::decompressImpl():
+template 
+void NO_INLINE decompressImpl(
+     const char * const source,
+     char * const dest,
+     size_t dest_size)
+{
+    ...
+    while (true)
+    {
+        ...
+        const UInt8 * match = op - offset;
+        ...
+        if (length > copy_amount * 2)
+            wildCopy(op + copy_amount, match + copy_amount, copy_end);
+        ...
+    }
+}
+As part of the LZ4::decompressImpl() loop, a 16-bit unsigned user-supplied value (‘offset’) is read from the compressed_data. it is subtracted from the current op and stored in match pointer (op is a pointer that starts as dest and moves forward). There is no verification that the match pointer is not smaller than dest. Later, there’s a copy operation from match to output pointer – possibly copying out of bounds memory from before the ‘dest’ memory buffer. Accessing memory outside of the buffer’s bounds can expose sensitive information or lead in certain cases to a crash of the application due to segmentation fault.
+CVE-2021-42387 is a similar vulnerability to CVE-2021-42388, which exceeds the upper bounds of the compressed buffer (source) as part of the copy operation.
+CVE-2021-42389, CVE-2021-42390 and CVE-2021-42391 – Divide by zero vulnerabilities
+These are divide-by-zero vulnerabilities in various codecs supported by ClickHouse. They are based on setting the first byte of the compressed buffer (described in the “Technical Background” section above) to zero. The decompression code reads the first byte of the compressed buffer and performs a modulo operation with it to get the remainder:
+UInt8 bytes_size = source[0];
+UInt8 bytes_to_skip = uncompressed_size % bytes_size;
+In most of the cases the modulo operation in Intel x86-64 is performed by a DIV instruction, which, apart from dividing the numbers, also keeps the remainder in a register. So in case bytes_size is 0, it will end up dividing by zero.
+These vulnerabilities were found by “smart fuzzing” the decompression mechanism. Smart fuzzing leverages the knowledge of the input format for generating input data which (relatively) adheres to the expected protocol schema, instead of completely random data.
+Fixes and Workarounds
+In order to fix the issues, update ClickHouse to the v21.10.2.15-stable version or later.
+If upgrading is not possible, add firewall rules in the server that will restrict the access to the web port (8123) and the TCP server’s port (9000) to specific clients only.
+Are JFrog products vulnerable?
+JFrog products are not vulnerable to this issue, since they do not use the ClickHouse DBMS
+Acknowledgement
+We would like to thank the ClickHouse Inc. team for promptly and professionally handling this issue.
+Learn More
+In addition to exposing new security vulnerabilities and threats, JFrog provides developers and security teams easy access to the latest relevant information for their software with automated security scanning. Explore how JFrog Xray can be of help to you.
+Questions? Thoughts? Contact us at research@jfrog.com for any inquiries.
+00000000  26 fc 61 db c0 83 bb 0a  db 58 5a f0 34 e1 30 f6  |&.a......XZ.4.0.|
+
+00000010  82 0a c8 00 00 01 00 00  00 f0 ff ff ff ff ff ff  |................|
+
+00000020  ff ff ff ff ff ff ff ff  ff ff ff ff ff ff ff ff  |................|
+
+*
+
+000000e0  ff ff 41 41 41 41 41 41  41 41 41 41 41 41 41 41  |..AAAAAAAAAAAAAA|
+
+000000f0  41 41 41 41 41 41 41 41  41 41 41 41 41 41 41 41  |AAAAAAAAAAAAAAAA|
+
+*
+
+0000c81a

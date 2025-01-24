@@ -1,0 +1,164 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214515_699731\CriticalSambaVulnerability863x300w.png
+
+Recently, a critical out-of-bounds vulnerability, assigned to CVE-2021-44142, was disclosed in Samba versions prior to 4.13.17. The Samba vulnerability carries a critical CVSS of 9.9 and allows attackers to remotely execute code on machines running a Samba server with a vulnerable configuration. The vulnerability was disclosed as part of the Pwn2Own Austin competition where researchers are challenged to exploit widely-used software and devices with unknown vulnerabilities. This year researchers from STAR Labs won $45,000 for exploiting this bug on the Western Digital My Cloud Home Personal Cloud NAS.
+Samba is an implementation of SMB protocol that provides file and printer interoperability for Windows platforms over the network. It does not ship with Ubuntu or Debian distributions by default but it is a widely installed software package and many Linux-based IoT and network devices include publicly open SMB services by default.
+The disclosure consists of three vulnerabilities that reside in adouble.c – a heap out-of-bounds read, a heap out-of-bounds write, and a heap-based buffer overflow. These vulnerabilities can be triggered when the fruit VFS module is enabled in the Samba configuration.
+The vfs_fruit  module provides enhanced compatibility with Apple SMB clients and interoperability with Netatalk. Netatalk is a free open-source implementation of Apple Filing Protocol (AFP) that allows a Unix-like OS to operate as a file server for macOS. The module enables communication between Samba and Netatalk file servers, as well as visibility of shared files for Apple clients.
+CVE-2021-44142 technical summary
+The vfs_fruit module enables the use of alternate data streams (ADS) for a share, and handles all access to the streams :AFP_AfpInfo and AFP_Resource, which are used by Apple’s AppleDouble file format. Accessing a file’s :AFP_AfpInfo stream allows an attacker to read and write its Netatalk’s metadata, which is stored in a adouble structure, and is initialized by the ad_get and ad_fget functions.
+The disclosure points out 3 distinct vulnerabilities. In the pwn2own competition, unauthenticated remote code execution was achieved with a combination of two of them. The first vulnerability is a heap out-of-bounds read in the fruit_pread_meta_adouble function, which is called by the function fruit_pread_meta when reading a file’s metadata stored in the AFP_AfpInfo data stream of an adouble file. More specifically, it is caused due to lack of validation of the Finder information stored by the AppleDouble file format, stored in the ADEID_FINDERI metadata structure entry, which can be controlled by the attacker.
+static ssize_t fruit_pread_meta_adouble(vfs_handle_struct *handle,
+                 files_struct *fsp, void *data,
+                 size_t n, off_t offset)
+{
+ 
+…
+ 
+    ad = ad_fget(talloc_tos(), handle, fsp, ADOUBLE_META);
+    if (ad == NULL) {
+     nread = -1;
+     goto fail;
+    }
+ 
+    p = ad_get_entry(ad, ADEID_FINDERI);
+    if (p == NULL) {
+     DBG_ERR("No ADEID_FINDERI for [%s]\n", fsp_str_dbg(fsp));
+     nread = -1;
+     goto fail;
+    }
+ 
+    memcpy(&ai->afpi_FinderInfo[0], p, ADEDLEN_FINDERI);
+ 
+    nread = afpinfo_pack(ai, afpinfo_buf);
+    if (nread != AFP_INFO_SIZE) {
+     nread = -1;
+     goto fail;
+    }
+ 
+    memcpy(data, afpinfo_buf, n);
+    nread = n;
+ 
+fail:
+    TALLOC_FREE(ai);
+    return nread;
+}
+In the code snippet above it can be seen that the call to ad_fdget, which creates an adouble structure with attacker controlled data, is followed by a call to ad_get_entry which loads the value of the manipulated ADEID_FINDERI pointer, and can make the pointer p point to the end of the adouble data buffer. The last call to memcpy can then be used to read past the allocated buffer, dumping data from the heap. Although the exploit code has not been published yet, it is safe to assume this OOB read was used in order to bypass the ASLR mechanism and build a stable remote exploit.
+The second vulnerability that was used is a heap-based buffer overflow in the ad_setdate function, caused due to lack of validation of a file’s date information entry.
+int ad_setdate(struct adouble *ad, unsigned int dateoff, uint32_t date)
+{
+    bool xlate = (dateoff & AD_DATE_UNIX);
+    char *p = NULL;
+ 
+    p = ad_get_entry(ad, ADEID_FILEDATESI);
+    if (p == NULL) {
+     return -1;
+    }
+ 
+    dateoff &= AD_DATE_MASK;
+    if (xlate) {
+     date = AD_DATE_FROM_UNIX(date);
+    }
+ 
+    if (dateoff > AD_DATE_ACCESS) {
+     return -1;
+    }
+ 
+    memcpy(p + dateoff, &date, sizeof(date));
+ 
+    return 0;
+}
+Since the ADEID_FILEDATESI entry is not validated, it can be used to overflow the target buffer, pointed to by pointer p, when the memcpy call is executed. The combination of these two vulnerabilities was used to perform stable remote code execution.
+The patch released for CVE-2021-44142 by Samba introduces the function ad_entry_check_size, which is used to validate the sizes of the entries in the AppleDouble file format. In addition to this function, an extended file attribute called AFPINFO_EA_NETATALK was introduced in order to prevent attackers from setting extended Netatalk file attributes, a required step for triggering the mechanism in which these vulnerabilities were found.
+How exploitable is CVE-2021-44142?
+To trigger this vulnerability, an attacker needs to upload a new file to the Samba share, which requires write permissions for that share. Depending on the configuration of the Samba server, this may be allowed for either unauthenticated or authenticated users (or even not at all). One way to allow unauthenticated exploitation of this issue is by specifying both the writable and guest ok settings in the Samba configuration on a specific directory.
+The other requirement, perhaps the more substantial one, is the inclusion of the vfs_fruit module in the Samba configuration. Despite this module being disabled by default, there are NAS vendors that intend to support Apple clients and enable this module by default.
+Enabling the module is done by specifying fruit in the vfs objects configuration key in smb.conf : (note that this key may contain multiple values)
+vfs objects = fruit
+The vfs_fruit module also has a configuration of its own. Unfortunately, the vulnerability is exploitable in the default configuration of the vfs_fruit module (again, assuming the module is enabled, which is usually not the default case).
+The relevant default configuration parts of the vfs_fruit module are fruit:metadata=netatalk and fruit:resource=file.
+When transferring an OS X formatted file, the file contains 2 forks, resource and data. These forks are basically sections of the file: the resource fork is used to contain bitmaps, the window size, and icons while the data fork is used to store structured and unstructured data. fruit:metadata=netatalk and fruit:resource=file declare where these streams are stored. If either of these default values is changed in the Samba configuration, then the vulnerability cannot be exploited.
+The vulnerability has been proven to be exploitable but the exploit has not been published yet.
+How can you detect exposure to CVE-2021-44142 vulnerability?
+The vulnerability exists in Samba versions prior to 4.13.17.
+As can be seen in the previous section, for the CVE to be exploitable, it is required that the vfs_fruit module is registered in the vfs objects section of smb.conf. Furthermore, it is necessary that the fruit:metadata and fruit:resource configuration are set to netatalk and file, respectively (note – this is the default configuration).
+You can use the following command to check if the vfs_fruit module is in use. As mentioned this is not the only dependency for the vulnerability, but it is the most distinguishing one –
+grep 'vfs objects\s*=.*\bfruit\b' /etc/samba/smb.conf
+If a non-empty result is returned from the grep command, we highly recommend upgrading your Samba package to one of the fixed versions.
+Remote detection of the vfs_fruit module’s presence may be done by testing whether extended attributes or Alternate Data Streams can be written to a Samba share. Writing a file with a malformed data structure as its :AFP_AfpInfo ADS will result in a failure if the vfs_fruit module is loaded, but will be written successfully if the streams_xattr module is loaded by itself, since the latter doesn’t aim to handle these special AFP extended attributed.
+How can you remediate CVE-2021-44142?
+The recommended solution for resolving the vulnerability is a software upgrade.
+Many major Linux distributions have released patched Samba versions. See the relevant upgrade instructions for Ubuntu, Red Hat, and Debian (at the time of writing, no fix is available in Debian yet).
+For users running outside a managed distribution, the vulnerability was fixed in the vanilla Samba codebase in versions 4.13.17, 4.14.12 and 4.15.5. It is recommended to perform a software update to one of these versions or alternatively apply the vulnerability patch according to the relevant branch – 4.15.5, 4.14.12, or 4.13.17 and rebuild Samba.
+What CVE-2021-44142 mitigation options are available?
+For users who cannot upgrade their Samba package, there are a few ways to mitigate this vulnerability –
+
+In case support for Apple client devices is not required, the vulnerable vfs_fruit module may be removed from the configuration file at /etc/samba/smb.conf. Vulnerable configuration lines start with vfs object and include the fruit module, such as the following configuration line:
+
+vfs objects = somemodule fruit someothermodule
+
+Removing fruit will disable the vfs_fruit module.
+Since the attacker must be able to write a file to the Samba share in order to exploit this issue, making sure that only trusted users can write files is paramount. First, make sure that guest users do not have write permissions on any directory. This can be verified by checking that no directory is configured with both of these flags –
+
+writable = yes
+
+guest ok = yes
+In addition to the above, minimize the amount of writable Samba directories and make sure strong authentication is set up for each of these directories
+Conclusion
+While Samba’s CVE-2021-44142 introduces a critical out-of-bounds vulnerability with a CVSS score of 9.9, there are several nontrivial preconditions that need to be met for successful exploitation. This includes the configuration of a shared resource with write-access enabled and the inclusion of the vulnerable vfs_fruit module. Since the module is not loaded by default in common Linux distros or in a default configuration of Samba, we do not expect widespread exploitation of this issue outside of vulnerable-by-default NAS devices.
+Stay up-to-date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter at @JFrogSecurity.
+Find vulnerable versions with JFrog Xray
+In addition to exposing new security vulnerabilities and threats, JFrog provides developers and security teams easy access to the latest relevant information for their software – including the use of Samba versions and associated CVEs – with automated security scanning by JFrog Xray SCA tool.
+adouble.c
+vfs_fruit
+vfs_fruit
+:AFP_AfpInfo
+AFP_Resource
+:AFP_AfpInfo
+AFP_AfpInfo
+adouble
+ADEID_FINDERI
+ad_fdget
+adouble
+ad_get_entry
+adouble
+memcpy
+ADEID_FILEDATESI
+p
+memcpy
+ad_entry_check_size
+AFPINFO_EA_NETATALK
+writable
+guest ok
+vfs_fruit
+fruit
+vfs objects
+smb.conf
+vfs objects = fruit
+vfs_fruit
+vfs_fruit
+vfs_fruit
+fruit:metadata=netatalk and fruit:resource=file
+fruit:metadata=netatalk and fruit:resource=file
+vfs_fruit
+vfs objects
+smb.conf
+fruit:metadata and fruit:resource
+netatalk
+file
+vfs_fruit
+grep
+vfs_fruit
+:AFP_AfpInfo
+vfs_fruit
+streams_xattr
+vfs_fruit
+/etc/samba/smb.conf
+vfs object
+vfs objects = somemodule fruit someothermodule
+fruit
+vfs_fruit
+writable = yes
+guest ok = yes
+vfs_fruit

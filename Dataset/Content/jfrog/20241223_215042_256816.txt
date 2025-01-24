@@ -1,0 +1,97 @@
+
+Recently, we’ve heard a lot of discussion about the trust we place in public binary repositories. For example, Maven Central, a popular legacy repository maintained by Sonatype, was recently compromised by a successful MITM attack. In response, Sonatype set up an https access to central (removing the demand for a $10 donation to the Apache Foundation for using SSL). This has no impact on millions of maven installations in the world, which will continue access Maven Central via http unless manually reconfigured, but the interesting question is – is that enough?
+While SSL is important in guaranteeing the integrity of downloaded files, it doesn’t say anything about the integrity of the files in the repository itself. The only(!) verification mechanism in the repository itself that Maven Central and other legacy repositories suggest you blindly trust, is the set of signature files uploaded with the files. Interestingly enough, modern repositories such as RubyGems.org, npm-registry and Bintray don’t force you to sign your files at all. Let’s try to understand why.
+Here’s tl;dr if you need one.
+Is SSL access enough for us to feel secure?
+To answer this question, let’s consider Maven Central. This is a repository that works with SSL and “secures” the files with PGP signatures. In theory, these signature files strongly identify the signer (assuming that both the jar files and the signatures are served over SSL). But do they really?
+Let’s see how it works:
+
+The author uses a gpg tool to generate a keypair for identification.
+The author then uploads the public key to a trusted key server (one of MIT, SKS OpenPGP Public Key Server or PGP Global Directory).
+Anyone who wants to download a package and verify its integrity runs a signature check against one of the servers, and gets the unique and verified identity of the author.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215042_256816\9edecorly.png
+
+Let’s run a couple of experiments, and see how securely the “secured” Maven Central is really maintained.
+Here’s one of Sonatype’s latests jars: nexus-core-2.8.1-01.
+Let’s download it see what’s the signature says, after importing the signer’s public key:
+Whoa! What happened?! “There is no indication that the signature belongs to the owner”?!
+Wait a second. Does that mean that anyone can generate a keypair for Sonatype, Inc. “(Sonatype release key) <dev@sonatype.com>” pretending to be the Sonatype release team?
+Here’s an amazing picture for you:
+
+
+According to the “trusted” key server, all those signatures belong to the German poet Heinrich Heine. Well, I would say that’s quite unlikely since he passed away quite some time ago1.
+Let’s run a couple of more tests (go figure, maybe it’s only Sonatype who can’t generate a “truly trusted” signature):
+Here’s a signed Eclipse artifact:
+Same again!
+Here’s Oracle’s OpenJDK tool:
+Whoa, who’s Evgeny Mandrikov? An Oracle employee? Nope. Why does he use gmail? Let’s see, maybe Sonatype pre-verified him when they gave him access to Maven Central? Did he establish a relationship with Oracle or something? Nothing, not a single question. “I have nothing to do with Oracle, but still want to publish OpenJDK artifacts!” “OK, go ahead”. Can you trust him to provide you with authentic OpenJDK artifacts? Not sure2.
+You get the picture. You can’t trust those self-generated key-pairs. And the Trusted Key Servers themselves acknowledge it! Here’s a quote from the Key Verification Policy of PGP Global Directory:
+…there is always a risk that the verified key in the PGP Global Directory is not actually owned by the person who appears to own it. While the verification mechanisms in the directory are suitable for many purposes, you should endeavor to use additional mechanisms…
+That’s exactly what modern repositories, like Bintray and GitHub do. But we’ll get to that shortly.
+But what about WoT?
+“Ah,” one can say, “that’s because you don’t have a clue about how pgp signatures work! You need to establish a Web of Trust with the signer and voila, the message is gone!”
+While technically correct, this makes very little sense in our context.
+WoT works for the original usage of pgp signatures – authenticating content from people that you know directly, or indirectly through your contacts. For example, it works great for signing emails. You are likely to get email from people in your first, second or third circle of connections, but almost never from complete strangers. With packages from an Internet repository, this concept breaks completely. Chances that a developer personally knows the creator of a package, even if its indirectly to one or two levels, are close to zero. Same works for the creators of a package. As an author, you have no idea who is going to use your package. You can only hope that they’ll be a bunch of strangers that you don’t know :-D.
+I am intrigued. Show me how can I maliciously upload a forged artifact to Maven Central without even using MITM!
+Tedious, but straight forward:
+
+Invent a fake identity (with a fake, but functional email address).
+Generate a keypair for it.
+Upload to a public key server (that’s where your email is needed).
+Follow the guide. The trickiest part is faking a story about your artifact to get your account set up in oss.sonatype.org through the Sonatype JIRA. Well, be creative!
+Within a couple of hours (or days) your artifact will get to Maven Central. If the description you invented  looks realistic enough, no questions will be asked. Somewhere during  the process of uploading and releasing files, Sonatype will check that the signatures with which you signed your artifacts match the email you used for your oss.sonatype.org account. But of course, they match.
+Mazal Tov! Your fake artifacts are now in Maven Central. From there they will be securely(!) downloaded over SSL to your victim computers by Maven.
+Easy? Well, not really. Looks like the MITM attack was easier. But that’s what it takes to add a jar to Maven Central.
+
+Doable? Absolutely.
+But how is Bintray different?
+Well, we realize that in the modern world, where identity theft is one of the more popular crimes, you can’t blindly trust an online identity. So, like many other services, we recommend that you assess how trustable any particular content is (a jar in our case), based on the credit the community gives to the Internet identity of the author.
+Here’s what I mean:
+Let’s say you want to download Groovy. Here it is. Let’s see how can you establish trust in Groovy binaries:
+
+You can see the links to a website and GitHub.
+You can see that this package belongs to an organization: Groovy. You can clearly see the list of members, and check each and every one of them.
+Here’s Guillaume Laforge.
+Check out his twitter account – almost 8.5K followers.
+Here’s his blog, all around Groovy.
+LinkedIn? Looks good.
+So, can you trust him? Probably. He’s an admin of the Groovy organization, so his reputation is the guarantee that the organization and the files in it are authentic. You’re good to go. Or not?
+But Maven just goes out there and brings stuff!
+To create a safe build you must use an in-house binary repository manager:
+
+Install it.
+Configure a “dirty” and a “clean” repository.
+
+The dirty repository should be able to proxy a remote source of artifacts that gives you a good insight on artifact producers’ identities (not just a pile of files with self-generated signatures).
+
+Consider proxying Bintray’s JCenter instead of Maven Central. JCenter is a superset of Maven Central, so finding packages won’t be a problem.
+The clean repository is a local repository with no Internet access.
+
+The dirty repository should be able to proxy a remote source of artifacts that gives you a good insight on artifact producers’ identities (not just a pile of files with self-generated signatures).
+
+Consider proxying Bintray’s JCenter instead of Maven Central. JCenter is a superset of Maven Central, so finding packages won’t be a problem.
+The clean repository is a local repository with no Internet access.
+Configure your build tool (Maven?) to be able to build against either of them.
+Use a “sandbox” (e.g. a vm) to run a “dirty” build against the dirty repository. Its cache will be populated with all the artifacts needed for the build.
+Examine the identities of the publishers of those artifacts (remember to select a binary repository that can generate a list of dependencies used for every build) against the information you have about them (as you understood, it’d better be more than self-signed signatures).
+Promote the artifacts that you trust to the clean repository (remember to select a binary repository with deduplicated storage that gives you free and immediate “move” operations).
+Now you can safely build against the clean repository!
+Here’s the summary (a.k.a. tl;dr):
+
+SSL is an important way to verify that the files you trust get safely from a server to your machine.
+Don’t let SSL give you a false sense of trust in the origin or author of the files.
+Don’t blindly trust self -issued signatures. One can generate a signature for any identity, sign any file with it and upload it to Maven Central.
+Go with a platform that enables and encourages web identity verification. Check the author and decide for yourself.
+Use a binary repository manager to discover and control the artifacts needed (and select it wisely).
+Learn more about how JFrog and Sonatype compare.
+1A gpg tool to work with pgp signatures was developed in Heinrich Heine University of Dusseldorf. In honor of the late poet after which the university was named, all defaults in the tool were initialized to Heinrich Heine, with the expectation that people would replace them their own details. Apparently, that didn’t work. People just enter-enter-enter through the settings generating dozens of key-pairs for the poor German, illustrating the absurdity of  “authentic”, self generated key-pairs.
+
+Thank you, Heinrich!
+2Actually, you can. Oracle do not distribute binaries of OpenJDK, and Evgeny volunteered, and was empowered by OpenJDK committers to do it for them.
+
+But can you know without being personally familiar with Evgeny?! No, you can’t.
+
+The dirty repository should be able to proxy a remote source of artifacts that gives you a good insight on artifact producers’ identities (not just a pile of files with self-generated signatures).
+
+Consider proxying Bintray’s JCenter instead of Maven Central. JCenter is a superset of Maven Central, so finding packages won’t be a problem.
+The clean repository is a local repository with no Internet access.

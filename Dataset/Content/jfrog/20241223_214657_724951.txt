@@ -1,0 +1,103 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214657_724951\863_300Python.jpg
+
+Recently, a novel supply chain attack was published by security researcher Alex Birsan, detailing how dependency confusion (or “namesquatting“) in package managers can be misused in order to execute malicious code on production and development systems.
+Background – dependency confusion & Birsan’s attack
+In short, most package managers such as pip and npm do not distinguish between internal packages (hosted on internal company servers) and external ones (hosted on public servers).
+Thus, a simple command such as pip install my-package would happily grab my-package either from an internal or public server.
+Note that this issue is distinct from the well-known typosquatting attack since in Birsan’s attack there is no reliance on the victim making typographical errors (ex. pip install my-packkage)
+Birsan’s research focused on the following two facts:
+
+Anybody can upload malicious code to these public servers, without much oversight.
+The package manager might prefer taking a specific package from the public server, if it is available, instead of from the internal server. For example, if the package version is newer on the public server.
+This creates a situation where an attacker can cause an existing pip command to act maliciously and execute arbitrary code, just by uploading a package with a conflicting name to a public package repository.
+When Birsan published his “malicious” packages on the Python Package Index (PyPi), he chose to publish source packages, since those can execute code without user intervention, immediately upon installation:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214657_724951\1_PythonPackageIndexPyPi.png
+
+We can see that this package was targeted at Netflix, by using the internal prefix nflx and using a very high version 6969.99.99 to supersede any real (internal) version number.
+In this blog post, we will:
+
+Briefly explore the difference between a source distribution and a built distribution (with regards to executing malicious code as early as possible).
+Present a new technique for abusing Python wheels in order to run malicious code, even when the installed package is not directly invoked.
+Present a lightweight solution that prevents the namesquatting attack on PyPi.
+Source vs. Built distributions
+Python supports two distribution types:
+
+Source distribution (sdist)– A source distribution contains the module’s source code (.py files or .c/.cpp for binary modules) and a setup.py file with information about the module, such as the module version, license, and dependencies. The result is a cross-platform archive that can be used in arbitrary operating systems (ex. Windows and Linux) and architectures (ex. x86 and ARM). The archive is installed by running the steps specified in setup.py, usually compiling the source code files and copying the built code to the relevant folders.
+Built distribution (bdist) – A built distribution contains only the module’s built code (.pyc files or .so/.dll/.dylib for binary modules) and forgoes the setup.py file. In a built distribution, the package metadata (such as license, dependencies, etc.) is saved in a textual format (referenced here) alongside the built code. The result is an archive that can be used on a single platform and version of Python only (ex. Linux-x86_64-Python3.7). The archive is installed simply by extracting it to the relevant folder.
+There are a few types of built distributions (such as Eggs and Wheels), but in this article, we will focus on the Python Wheel since that is the most contemporary type.
+Running code early in Source and Built distributions
+In source distributions, it is trivial to execute arbitrary code in install time, since the user-supplied setup.py script from the distribution is executed by pip on install time.
+For example, in Birsan’s research packages, we can see that the setup.py script imports the main module:
+Which causes the “malicious” code to run from the module’s __init__.py script:
+This code simply “pings” a specified DNS server, but in a real attack scenario, this could have executed malicious arbitrary code.
+In built distributions, the situation is quite different.
+Wheel installations (see PEP 427), as opposed to previous installation methods, do not run developer-provided code at install-time. Instead, they follow the steps provided here (more on that later).
+This means that usually, the earliest possible moment to run a wheel’s code is when the module included in the wheel is imported since the module provider can write arbitrary Python code in the module’s __init__.py script.
+Let’s explore the possibility of running arbitrary code on install time, in specific scenarios.
+Hijacking a Python wheel early
+Let’s look at the wheel installation steps and focus specifically on step “Spread.2”:
+
+Move each subtree of distribution-1.0.data/ onto its destination path
+Each subdirectory of distribution-1.0.data/ is a key into a dict of destination directories, such as distribution-1.0.data/(purelib|platlib|headers|scripts|data)
+The initially supported paths are taken from distutils.command.install
+Inherently, there is no problem with this step, but on Linux installations, it may be problematic.
+Files and directories under distribution-1.0.data/lib will be moved to the same directory containing the Python lib files. A common layout is as follows:
+The location of the lib root directory is different for venv and regular installs, and is different when running as root. However, on standard Linux distributions, when running pip as root, the path will be /usr/local/lib, which means that the wheel file can freely overwrite files in that directory.
+As a proof of concept, we have built a “malicious” wheel file – broken_wheel-1.0.0-py3-none-any.whl, which when installed will replace os.py. In our example, we have opted to just break the os module, but in a real-world scenario an attacker could replace or backdoor any built-in Python module, thus effectively running malicious Python code even before the intended module from the wheel is imported.
+To see the PoC at work, you can run it on a docker instance:
+(don’t install the wheel on your host machine, since it breaks the Python instance)
+As a result, you will see that the os module was indeed replaced, the “malicious” payload has run, and Python is now broken:
+As mentioned, this hijacking method is limited to executions of pip as root, which is not uncommon when running pip outside of venv.
+Mitigating the namesquatting issue
+pip itself contains several options that can partially mitigate the presented namesquatting attack but currently does not provide any holistic solution.
+For example – running pip with the --only-binary flag will reject any source distributions from being installed, denying code execution on install time:
+That being said, this is not a complete solution since the attacker may still set up a built distribution as well, and rely on the victim to import the malicious module at some point in time, which will run the malicious code.
+A more comprehensive solution – piproxy
+To remediate this issue more thoroughly, we have developed piproxy – a small proxy server for <code>pip</code>, which modifies <code>pip</code> behavior to install external packages (ex. from PyPi) only if the package is not found on any internal repository. This fixes the namesquatting issue in <code>pip</code>, which currently prefers the package that has the newer version (regardless of whether it comes from an internal or external repository)
+To use <code>piproxy</code>, first execute it as a background process:
+And then run pip as follows:
+As long as all required internal packages exist in the internal repositories (and the internal repositories are available), this will render the namesquatting issue obsolete.
+The presented solution is of course rudimentary and can be further improved/hardened – for example by adding a blacklist/whitelist of approved internal/external packages, or defining exclude patterns in remote repositories. This kind of mechanism can also help with the aforementioned typosquatting attacks.
+Breach detection using static analysis
+In the last sections, we have presented ways to deal with this issue via mitigation and prevention, but we believe that a full solution would also employ some way to detect whether a breach has already happened.
+To address that, Vdoo (now part of JFrog) has developed specific automatic scanners to detect malicious behavior in Python code (either source or bytecode) such as DNS domain generation that was used in Birsan’s attack and is already widespread among binary-based malwares as well. This Vdoo technology is planned for integration into the JFrog platform during 2022.
+Summary
+It seems that Birsan has struck a nerve here by showing that some of our basic development infrastructure was not planned with a security-centric approach.
+Regarding pip specifically, It seems there is an open ticket from 2017 that touches upon this subject (with no security mentions), but there hasn’t been a consensus about the proper way that this should be fixed.
+This is fine and somewhat expected, but we here at JFrog hope that this new spotlight on the issue will encourage the relevant package manager maintainers to fix this issue from within the package manager codebase, instead of developers having to rely only on external tools & mitigations.
+Questions? Thoughts? Contact us at research@jfrog.com for any inquiries related to security vulnerabilities.
+Learn more about how you can protect your organization from software supply chain attacks.
+Attachment #1: piproxy.py
+Attachment #2: broken_wheel-1.0.0-py3-none-any.whl
+pip
+npm
+pip install my-package
+my-package
+pip install my-packkage
+6969.99.99
+sdist
+.py
+.c/.cpp
+setup.py
+setup.py
+bdist
+.pyc
+.so/.dll/.dylib
+setup.py
+__init__.py
+__init__.py
+distribution-1.0.data/
+distribution-1.0.data/
+distutils.command.install
+distribution-1.0.data/lib
+lib
+/usr/local/lib
+os.py
+pip
+pip
+venv
+pip
+pip
+--only-binary
+pip

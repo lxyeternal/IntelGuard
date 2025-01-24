@@ -1,0 +1,62 @@
+
+Overiew
+One of the greatest features of Artifactory 2.1 is the support for artifacts staging and promotion.
+
+The idea behind this feature is that in many environments, before exposing a new release for public consumption, the release needs to go through a well-known life-cycle – the release is first made available in a staging environment where it is validated and undergoes final QA, only then it is moved or ‘promoted’ to a place where it can be found and used by clients.
+In the world of releasing artifacts this means that when to-be-released artifacts are built and deployed into Artifactory, you want them to first to be accessible only by a selected group (staging). It is only when the artifacts have been ‘blessed’ and found to be release-ready, that you can change their access-level and make them available for download by a wider audience (promotion).
+There are two problems with managing staging and promotion. The first problem is around identification – how can we manage and identify a group of artifacts deployed to Artifactory by the same build, in order to promote them later on as a single unit.
+
+The second problem is about promotion composition – once to-be-promoted artifacts can be identified, what is the best way to collect them and change their visibility. Also, what if you wish to be picky about promotion. For example – what if you want to sieve test artifacts from the release or remove by hand an internal artifact that was originally part of the deployed files?
+The solution described here takes advantage of one of Artifactory’s coolest features – the ability to attach properties on artifacts and the ability to compose and operate on search results. It uses some features found in the Artifactory Add-ons Power Pack, but with some additional setup it can also be adapted to the open source version of Artifactory.
+Identifying Artifacts Deployed as a Group
+The Quarantine Way
+
+One way of identifying same-build artifacts is by creating isolation: you create a “quarantine repository” per-build and deploy your artifacts to it. This guarantees that artifacts are isolated in a confined place where they can be identified. The next step is to make the quarantine repository visible to your staging clients.
+
+The main problem with this approach is that it somewhat a heavyweight solution:
+
+You need to create a pseudo repository on-the-fly, usually using a cryptic handle (such as a time stamp and the originating IP address) which makes it complicated to remember and identify later on.
+For each such temporary repository you need to configure how it will be exposed under a more user-friendly repository and who will have permissions to view it.
+You need to manage the repository and decide when to close it and how long it needs to be kept.
+So, we decided we don’t want to go this way of creating a quarantine area and introducing unnecessary maintenance efforts. Moreover, the whole concept of creating an on-the-fly repository for the sake of supporting promotion, just felt unnatural to us! What we really wanted to do instead is to be able to deploy our artifacts to a normal managed repository accessible by the QA users. Then, we wanted to find in this repository all the artifacts that were deployed by the same build and promote them as one unit to a different repository. If we could also have a way to do some manual artifacts filtering before promotion this would also be nice.
+Meet Artifacts Tagging
+
+Artifactory supports attaching properties to artifacts (and folders). You can search for property values and retrieve artifacts that were tagged with properties. So, if we could somehow attach properties to our build artifacts at build-time in a simple manner, then we can use these properties to locate and identify the deployed artifacts originated from the same build for the sake of promoting them later on.
+
+Properties can be attached to artifacts in many ways: via the UI (the Artifactory Properties add-on allows you to attach custom strongly-types properties), via REST API using PUT requests and as a piggy-back to artifacts PUT requests using matrix parameters.
+
+We are going to use the last method to transparently tag our artifacts as they are deployed to Artifactory by the build process. To accomplish this, all we need to do is add matrix parameters to the deployment URL, as part of our POM’s ‘distributionManagement‘ section:
+Matrix parameters are a set of key-value pairs separated by semicolon (;) and are a standard HTTP way for specifying parameters (in addition to query parameters and path parameters).
+In our example, we added two parameters to the deployment URL: buildNumer and revision, both will be replaced by Maven in deployment time with dynamic values from our project properties (e.g. by using the Maven build-number plugin). When building a multi-module project all the artifacts deployed from the parent project will end up having the same buildNumber and revision values. When Artifactory sees the values as part of the URL it automatically attaches new properties with the supplied key/values to the deployed artifacts.
+
+This mechanism works with any Artifactory 2.1+, without having to install any add-on. It also works with any REST client, which means you do not have to customize Maven or use a Maven plugin – it just works out-of-the-box.
+The artifacts in this example are deployed to the ‘qa-releases’ local repository, which is our common place for staging artifacts before they undergo final testing and approval by the QA team.
+Composing And Promoting Artifacts
+The Goal – Search and Move
+
+So, we managed to have all our build artifacts tagged with properties and deployed into the staging area. Next the QA team has gone through all known issues and approved our artifacts for further distribution to clients. We now need to find a way to copy or move our artifacts to another area where they can be downloaded by these clients. In fact, we can think of ‘promotion’ as a fancy term for moving (or copying) artifacts to a different place where different access rules apply.
+So, what we really need to do is search for our recently deployed artifact by their build number property and then move the result to another repository.
+
+One way to do this is via REST API – search for artifacts by metadata (properties are stored internally as XML metadata) and send DAV MOVE requests to move the results one by one. This will require writing a small external script to send the relevant HTTP queries and can be done using the basic open source Artifactory version. However, there is a much simpler and more powerful way to do this inside Artifactory itself, which involves the ‘Smart Searches’ and ‘Properties’ add-ons.
+Finding To-Be-Promoted Artifacts – Meet Smart Searches and Properties
+
+The idea behind smart searches is as follows:
+
+You collate artifacts by searching – start with performing a search, then save the search results found into a named ‘search result’. A ‘search result’ is merely a collection of found items. You can now perform additional searches, and for each search you can choose whether to create new search results or, more interestingly, add or subtract the items found to/from any previously saved search result. You can combine artifacts from any search type (simple, GAVC, class, XML etc.) – the combinations are really unlimited!
+In our case we will simply run a property search for all artifacts deployed with a certain build number (tagged in deployment with the buildNumber property). For this, we will use the Properties search user interface:
+We will then save our results as a new search result called ‘to-be-promoted’. We can perform other searches to add or remove artifacts from the saved results.
+We can even manually tweak our saved results by discarding specific artifacts – say one artifact in the build needs to be closed source, we can discard the sources form the results (if we wanted to discard all sources we could do this easily by subtracting the results of a GAVC search for the ‘sources’ classifiers – see the screenshot below).
+Once we are happy with our saved search results, we can go on and promote them!
+Promotion – Just Move It!
+
+Promotion is super easy – we just move the saved search results artifacts to a target, more open, repository, thus making them available for public consumption. We can choose whether to move the original artifacts or create a copy of them in the destination repository.
+We can even perform a ‘dry run’ to see that everything moves fine and we have no errors or warnings (for example, the destination repository might not accept some artifacts due to it snapshots/releases policy, security policies or include/exclude path patterns).
+Finally, we can also export the search result artifacts to the file system if we wish to use them elsewhere outside Artifactory.
+
+When search results are copied ro moved they maintain their original metadata and properties, so any valuable information you might have on your artifacts is kept.
+Wrapping Up
+
+Artifactory is taking a unique approach towards staging and promotion – instead of artificially requiring artifact to be deployed into a quarrantine area, we simply tag artifacts with metadata upon deployment and have them deployed to a central staging repository that is accessible internally to the development and the QA team members. This process is cheap, doesn’t require complicated setup and is natural to both developers and testers. If we wish to avoid double-deployments to the staging repository we can easily do it using permissions (using the delete privilege) – there no need to manually close the whole repository for this.
+
+Once we are happy with the staging build artifacts, we can collect them by searching and simply move or copy them to another target repository where they are publicly available. In this example we tagged our artifact with a buildNumber property which we searched for later, but we could attach any properties to our artifacts and perform many kind of searches to control our promotion source (by combination of property values, by GAVC etc.) – with metadata on artifacts we are not limited by the physical repository our artifacts were deployed into!
+Enjoy!

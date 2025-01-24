@@ -1,0 +1,75 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214404_345475\InvisiblenpmMalware_863x300.png
+
+The npm CLI has a very convenient and well-known security feature – when installing an npm package, the CLI checks the package and all of its dependencies for well-known vulnerabilities –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214404_345475\1_Checkingdependenciesforwellknownvulnerabilities.png
+
+The check is triggered on package installation (when running npm install) but can also be triggered manually by running npm audit.
+This is an important security measure that warns developers against using packages with known vulnerabilities.
+Recently, we encountered an unexpected behavior by the npm tools that may have security implications – both npm install and npm audit fail to show advisories for packages with certain version formats, putting the developers using these packages at risk of potentially introducing critical vulnerabilities or malware into their systems and/or as indirect dependencies to their npm packages.
+In this blog post we will further explain this issue, how it can be leveraged by attackers for evading security checks of their published malicious packages, and suggest how developers can avoid being confused by it.
+An unexpected result
+While working with some npm packages, we noticed an interesting discrepancy between vulnerabilities that were reported by the npm CLI and by JFrog Xray.
+When installing a specific package, namely cruddl 2.0.0-update.2, we received different vulnerability indications from npm and Xray –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214404_345475\3_XrayidentifiesXrayCVE202236084vulnerability.png
+
+For the same package, npm found 0 vulnerabilities but Xray found a single vulnerability (CVE-2022-36084). We set out to discover if this is a possible bug, or something else…
+Triaging the issue
+After several attempts and package installations, we realized that this discrepancy only happens when the installed package version contains a dash/hyphen character (ex. 1.2.3-a). So – why is this happening?
+When uploading a package, NPM allows for a strict version format that conforms to Semantic Versioning and must be parsable by node-semver. Here are two examples of perfectly valid versions: 5.6.7, 5.6.7-a.
+The npm-install/audit tools gather all the dependent packages and their versions into a json dictionary and send it to an npm API endpoint named the Bulk Advisory endpoint. The endpoint goes over each package and version, trying to find relevant advisories by matching the version to that of the advisories’ affected range. It appends all these relevant advisories to a list that’s returned by the API endpoint.
+We’ve identified that the bulk advisory endpoint fails to retrieve security advisories for packages whose version includes a hyphen (-) followed by additional characters.
+What are these hyphenated versions anyways?
+According to Semantic Versioning specification, a version’s format is MAJOR.MINOR.PATCH. E.g. 5.6.7. However, as stated in clause 9 pre-release versions can be specified by “appending a hyphen and a series of dot separated identifiers immediately following the patch version.”. E.g. 5.6.7-a
+Guessing the source of this behavior
+As the npm endpoint’s code is closed-source, we could only guess where this issue stems from.
+Each advisory (see example) has an Affected versions field that holds logical expressions (e.g. > 6.6.0) for describing the range of affected versions. If a certain version satisfies any of the logical expressions, it is considered vulnerable.
+According to node-semver‘s documentation (and possibly semver implementations in other programming languages), there are special rules while comparing versions that have prerelease tags (see Prerelease Tags section in the documentation).
+For example, by default:
+semver.satisfies("1.2.3-a", "> 0")
+returns false, which may be quite unexpected since the advisory’s writer’s intention was to cover all versions of the package (for example, when creating an advisory for a malicious package).
+The documentation also states that this behavior could be suppressed (treating all prerelease versions as if they were normal versions, for the purpose of range matching) by setting the includePrerelease flag on the options object.
+So, running the same check with the flag set:
+semver.satisfies("1.2.3-a", "> 0", {"includePrerelease":1})
+returns true.
+Enabling this flag in the Bulk Advisory endpoint should have eliminated the inconsistency between regular npm package versions and pre-release versions.
+Following a disclosure from JFrog, we learned from the NPM maintainers that this functionality is the expected behavior, therefore we do not expect this behavior to change.
+Proof of Concept
+Let’s take cruddl, a real package that had a critical vulnerability (CVE-2022-36084).
+When installing cruddl version 2.0.0, the output shows (as expected!) that a critical vulnerability was found:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214404_345475\4_Criticalsercurityvulnerabilityfound.png
+
+If instead of the above, we choose to install a prerelease version of the same package:
+
+The output (erroneously!) shows that no vulnerabilities were found, even though version 2.0.0-update.2 is also affected by CVE-2022-36084 (the fixed version is 2.7.0).
+How can attackers abuse this behavior?
+Threat actors could exploit this behavior by intentionally planting vulnerable or malicious code in their innocent-looking packages which will be included by other developers due to valuable functionality or as a mistake due to infection techniques such as typosquatting or dependency confusion (see our previous blog post for some example).
+As explained above, if the threat actor uses package versions that are in the prerelease version format, even if such code is reported as malicious/vulnerable and an advisory is created, developers relying on the malicious/vulnerable package would be left without any notification as the npm CLI will not report about the existence of such advisories.
+What can developers do to avoid this issue?
+Our recommendation to developers and DevOps engineers is to never install npm packages with a prerelease version, unless they are 100% certain that the package is coming from an extremely reputable source. Even in that case, we recommend moving back to a non-prerelease version of the package as soon as possible.
+You can use the following command line to determine if you currently have an npm package installed with a prerelease version –
+For Linux:
+npm list -a | grep -E @[0-9]+\.[0-9]+\.[0-9]+-
+For Windows:
+npm list -a | findstr -r @[0-9]*\.[0-9]*\.[0-9]*-
+Stay up-to-date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter at @JFrogSecurity.
+npm install
+npm install
+npm audit
+cruddl 2.0.0-update.2
+1.2.3-a
+5.6.7
+5.6.7-a
+5.6.7-a
+Affected versions
+> 6.6.0
+node-semver
+semver
+false
+includePrerelease
+true
+cruddl
+cruddl
+2.0.0-update.2
+2.7.0

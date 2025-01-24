@@ -1,0 +1,69 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214556_432790\YAMLSecurityVulnerability863x3001.png
+
+Background
+JFrog security research team (formerly Vdoo) has recently disclosed a code injection issue in Yamale, a popular schema validator for YAML that’s used by over 200 repositories. The issue has been assigned to CVE-2021-38305.
+The injection issue
+An attacker that can control the contents of the schema file that’s supplied to Yamale (-s/--schema command line parameter), can provide a seemingly valid schema file that will cause arbitrary Python code to run. Note that the schema file is one of the two mandatory parameters to Yamale (the other one being the YAML file to validate).
+The issue lies in the parser.parse function:
+In our case, validator_string is the user’s input coming from the schema file.
+We can see that arbitrary input is flowing to eval, which generally can be manipulated for code injection.
+In this case, eval has been nerfed and the globals parameter has been blanked out, save for the True, False and None builtins. This means that an attacker cannot easily run malicious code, since code like __import__('os').system('evil_command') will fail because the __import__ builtin will not be available. As we explain below, however, a vulnerability still exists.
+Bypassing eval protections
+Does emptying the builtins prevent attackers from running arbitrary code?
+The answer is NO, and actually even a completely empty builtins will not help.
+The underlying issue is that through Python reflection, an attacker can “claw back” any needed builtin and run arbitrary code.
+For example, the following string will run the Python HTTP server, even with an emptied builtins:
+There have been many writeups regarding this subject, but the short answer is – if you are passing completely unsanitized input to eval (regardless of builtins) then you are susceptible to arbitrary code injection.
+Let’s see how it is still possible to use eval without opening ourselves to code injection.
+Yamale’s fix and sanitizing eval()
+
+Yamale’s maintainers chose to sanitize the input string before it’s passed to eval via a whiltelist.
+
+If the eval’d string contains any substring that’s not on the whitelist, the operation fails.
+
+This is a perfectly acceptable solution, as long as the whitelist is restrictive enough.
+
+Note that we do not recommend using a blacklist, since attackers can usually find some combination of values that will evade the blacklist while still performing something malicious.
+If possible, we highly recommend using ast.literal_eval instead of eval.
+
+literal_eval can only handle simple expressions, but should be sufficient for a lot of simple use cases, without exposing the code to any vulnerabilities.
+Can we exploit it remotely?
+As mentioned, an attacker needs to be able to specify the contents of the schema file in order to inject Python code.
+This can be exploited remotely, if some piece of vendor code allows an attacker to do that, for example:
+However, this situation is a bit contrived and would probably not occur in production code in a remote/network context.
+A more likely situation is the exploitation of such issues (vulnerabilities triggered through command line parameters) via a separate parameter injection issue.
+Imagine the following vendor code –
+Although the code above will successfully stop command injection attempts, the fact that the space and - characters are allowed, can allow the attacker to inject arbitrary flags. For example imagine the following path:
+The full cmdstr would be:
+Note that the multiply-defined -s parameter will behave differently according to the argument parser used (and the parsing options specified) but in Yamale’s case (argparse with default options) the latter option will be taken, which means the attacker can unexpectedly control the schema file and perform the code injection attack remotely.
+Also note that parameter injection attacks can even be achieved in some cases when the space character is not allowed, by using various escape mechanisms
+Conclusion and Acknowledgements
+To conclude, we recommend using one of the above methods to sanitize eval, and if possible avoiding use of eval entirely by replacing it with a more specific API for your required task.
+We would like to thank Yamale’s maintainers, for validating and fixing the issue in record time and for responsibly creating a CVE for the issue after the fixed version was available.
+Questions? Thoughts? Contact us at research@jfrog.com for any inquiries related to security vulnerabilities.
+In addition to researching and disclosing new software security vulnerabilities, JFrog provides developers and security teams easy access to the latest relevant vulnerability information with automated security scanning. For more details – click here.
+-s/--schema
+parser.parse
+validator_string
+eval
+eval
+globals
+True
+False
+None
+__import__('os').system('evil_command')
+__import__
+builtins
+eval
+builtins
+eval
+eval
+ast.literal_eval
+eval
+literal_eval
+-
+cmdstr
+-s
+eval
+eval

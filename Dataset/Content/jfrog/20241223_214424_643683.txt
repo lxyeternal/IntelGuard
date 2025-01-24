@@ -1,0 +1,160 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214424_643683\CVE202138297863x3001.png
+
+The JFrog Security Research team continuously monitors reported vulnerabilities in open-source software (OSS) to help our customers and the wider community be aware of potential software supply chain security threats and their impact. In doing so, we often notice important trends and key learnings worth highlighting. The following analysis of a vulnerability discovered in the Golang (“Go”) programming language last October is intended to underscore the importance of having proper CVE rating and the appropriate context when evaluating the risk facing your enterprise systems.
+Although this Go vulnerability isn’t new, the JFrog Security Research team determined there are many new Docker containers that are still vulnerable to this exploit. Additionally, while this vulnerability received a critical severity score from both NVD (9.8 CVSS) and GitHub, there was no subsequent public exploit or technical write-up published for this issue – leading us to speculate about the real-world impact of this vulnerability.
+In this blog post, we will elaborate on the prerequisites for exploiting the Go vulnerability, which allows an attacker to override an entire Wasm (WebAssembly) module with its own malicious code and achieve WebAssembly code execution, and explore mitigation strategies for developers that cannot upgrade their Go instance(s) to one of the fixed versions (1.16.9, 1.17.2 or later).
+What is WebAssembly?
+WebAssembly (abbreviated Wasm) defines a portable binary-code format for executable programs for simplifying interactions between such programs and their host environment.
+WebAssembly makes it possible to run high-performance applications on web pages.
+A regular program written in C/C++ or other programming languages can be compiled to Wasm and later can be loaded into the web browser. This is in lieu of the “usual way” to execute code in the browser – JavaScript. The Wasm program runs in a sandbox, so it does not have access to the host filesystem or the ability to execute code outside of the web browser.
+How can CVE-2021-38297 be exploited?
+This CVE only affects users of the Go programming languages in versions before 1.16.9 or 1.17.2.  Users of any of those versions must specifically load a Wasm module compiled by Go, and accept either command line parameters or environment variables from external sources.
+Specifically, the Go compiler supports building Wasm modules that are written in Go, which can be easily done by running the compiler as follows –
+GOOS=js GOARCH=wasm go build -o main.wasm
+After the Wasm module is compiled, it can be executed by a JavaScript engine in two distinct scenarios –
+1. Wasm execution through the web browser
+The following JS client-side code demonstrates how to load a Go Wasm module, while sending command line parameters (argv) to the module. This code is vulnerable to CVE-2021-38297 since the command-line parameters sent to the Go module (go.argv) are influenced by external input (the external_argument query parameter) –
+<script src="wasm_exec.js"></script>
+<script>
+   const params = new URLSearchParams(window.location.search)
+   const go = new Go();
+   WebAssembly.instantiateStreaming(fetch("main.wasm"),go.importObject).then((result) => {
+      go.argv = ['js', 'foo', params.get('external_argument')]; 
+      go.run(result.instance);
+   }); 
+</script>
+Triggering the vulnerability in the above example can be achieved by surfing to a URL such as –
+https://test.com/?external_argument=AAAAAA...{repeat 4096 times}...
+2. Wasm execution through Node.js
+In several scenarios, it is desirable to run a Golang-built Wasm module in the Node.js environment, which can be done as follows –
+node wasm_exec.js main.wasm arg1 arg2 ...
+(wasm_exec.js is provided by the Golang distribution)
+Running Go-Wasm through Node.js is useful for communicating via JavaScript to libraries that were written in Go. This option is mentioned in the official Readme and there are some packages, such as nodejs-golang which simplifies the process of running Go-Wasm.
+In this scenario, if an attacker has control of one of the arguments (arg1, arg2 etc.) or control of any environment variable passed to the node process, then the attacker can specify a long string value which will trigger the overflow.
+What is the impact of exploiting CVE-2021-38297?
+Wasm execution through the web browser
+When the Wasm module is run from a client-side environment (ex. Loaded through the web browser), the impact of exploiting the issue is MEDIUM, since the attacker’s code will run in the browser’s JavaScript (Wasm) sandbox. This means the impact is the same as loading an attacker-controlled Wasm module, or alternatively the same impact as an XSS attack on the vulnerable web page. For example – page cookies can be stolen, but arbitrary code execution cannot be directly achieved.
+Wasm execution through Node.js
+When the Wasm module is run from a server-side environment (ex. Run through Node.js), the impact of attackers being able to exploit the issue is HIGH, since the Node.js environment permits access to the filesystem and allows the execution of arbitrary OS-level commands. Therefore – full “remote code execution” can be achieved in this case.
+Technical analysis of CVE-2021-38297
+In the event an attacker can manipulate one of the parameters passed to the Wasm module command line, or any environment variable (when running through Node.js), the entire command line may exceed 4096 characters, which will cause a buffer overflow in the Wasm process. The attacker can use this buffer overflow in order to replace the entire contents of the compiled Wasm module and achieve arbitrary Wasm code execution.
+When calling go.run() the command line stored in go.argv is loaded in the Wasm module at address 0x1000:
+async run(instance) {
+    ...
+    let offset = 4096;
+ 
+    const strPtr = (str) => {
+        const ptr = offset;
+        const bytes = encoder.encode(str + "\0");
+        new Uint8Array(this.mem.buffer, offset, bytes.length).set(bytes);
+        offset += bytes.length;
+        if (offset % 8 !== 0) {
+            offset += 8 - (offset % 8);
+        }
+        return ptr;
+    };
+ 
+    const argc = this.argv.length;
+ 
+    const argvPtrs = [];
+    this.argv.forEach((arg) => {
+        argvPtrs.push(strPtr(arg));
+    });
+    argvPtrs.push(0);
+ 
+    const keys = Object.keys(this.env).sort();
+    keys.forEach((key) => {
+        argvPtrs.push(strPtr(`${key}=${this.env[key]}`));
+    });
+    argvPtrs.push(0);
+ 
+    const argv = offset;
+    argvPtrs.forEach((ptr) => {
+        this.mem.setUint32(offset, ptr, true);
+        this.mem.setUint32(offset + 4, 0, true);
+        offset += 8;
+    });
+ 
+    this._inst.exports.run(argc, argv);
+    ...
+}
+When entering the Wasm’s main() function, the memory layout will look as follows:
+
+
+0x1000	“js” + “\0” * 6
+0x1008	go.argv[1] + “\0” padded to 8 bytes and encoded to utf8
+0x1008 + padded length of go.argv[1]	go.argv[2] + “\0” padded to 8 bytes and encoded to utf8
+…	…
+	first environment variable (key=value) + “\0” padded to 8 bytes and encoded to utf8
+	second environment variable (key=value) + “\0” padded to 8 bytes and encoded to utf8
+	…
+	Wasm module bytecode
+When a large enough command-line parameter (or environment variable) is passed to the Wasm module – it will override the data of the actual Wasm module passed to the process.
+In the exploitation, the attacker needs to overcome an obstacle – the UTF-8 encoding. During the copying of argv and the environment variables, wasm_exec.js will first encode them as UTF-8 strings. That means any input byte above 0x7F will be encoded in the output by two or more bytes.  However, the attacker doesn’t necessarily need to override the Wasm module with another “full” compiled Wasm module. It is possible to write a shellcode in Wasm instructions, which provides a useful payload to the attacker (such as running an arbitrary shell command) while only using Wasm binary opcodes in the allowed range of 0x00 – 0x7F.
+How was CVE-2021-38297 patched?
+The official CVE-2021-38397 patch checks if an override occurred by adding the following simple check to wasm_exec.js:
+// The linker guarantees global data starts from at least wasmMinDataAddr.
+// Keep in sync with cmd/link/internal/ld/data.go:wasmMinDataAddr.
+const wasmMinDataAddr = 4096 + 4096;
+if (offset >= wasmMinDataAddr) {
+    throw new Error("command line too long");
+}
+
+this._inst.exports.run(argc, argv);
+However, for the patch to be effective, the first section must start at address 0x2000 (or further). This is also handled by the patch, by modifying the function Link.address():
+// address assigns virtual addresses to all segments and sections and
+ // returns all segments in file order.
+ func (ctxt *Link) address() []*sym.Segment {
+@@ -2339,10 +2344,14 @@ func (ctxt *Link) address() []*sym.Segment {
+ 	order = append(order, &Segtext)
+ 	Segtext.Rwx = 05
+ 	Segtext.Vaddr = va
+-	for _, s := range Segtext.Sections {
++	for i, s := range Segtext.Sections {
+ 		va = uint64(Rnd(int64(va), int64(s.Align)))
+ 		s.Vaddr = va
+ 		va += s.Length
++
++		if ctxt.Arch.Family == sys.Wasm && i == 0 && va < wasmMinDataAddr {
++			va = wasmMinDataAddr
++		}
+ 	}
+How can CVE-2021-38297 be fixed in my environment?
+To fully remediate CVE-2021-38297, we recommend upgrading to Go version 1.16.9, 1.17.2 or any later version.
+How can CVE-2021-38297 be mitigated in my environment?
+If upgrading to a later version of Go is not possible in your environment, CVE-2021-38297 can be mitigated by passing arguments with global variables instead of command-line or environment variables via the syscall/js package.
+For example, a global variable named config can be added to the JS code that runs the compiled Go web-assembly binary:
+config = {
+    fieldA: "fieldA config data"
+}
+In the Go code, add the following for accessing config.fieldA:
+js.Global().Get("config").Get("fieldA").String()
+Even if the attacker can modify these global variables, setting them at arbitrary lengths will not cause a buffer overflow.
+Is the JFrog Platform vulnerable to CVE-2021-38297?
+After conducting a comprehensive internal inspection, we concluded that the JFrog DevOps Platform is not vulnerable to CVE-2021-38297, since the Golang-compiled Wasm modules are not used.
+Find vulnerable versions with JFrog Xray
+In addition to exposing new security vulnerabilities and threats through our research team, our JFrog Xray SCA tool provides developers and security teams easy access to the latest relevant security insights for their software with automated security scanning.
+For example, the above vulnerability has been downgraded in terms of severity and rated as a MEDIUM severity issue.
+Additionally, JFrog Xray offers Contextual Analysis, which allows customers to more precisely determine the threat level and relevance of CVEs, leading to more rapid and accurately-prioritized remediation. Together with JFrog Artifactory, JFrog Xray provides a holistic, automated, scalable solution for quickly detecting, replacing, prioritizing, and recovering from hazardous CVEs.
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter @JFrogSecurity.
+GOOS=js GOARCH=wasm go build -o main.wasm
+go.argv
+external_argument query parameter
+https://test.com/?external_argument=AAAAAA...{repeat 4096 times}...
+node wasm_exec.js main.wasm arg1 arg2 ...
+arg1
+arg2
+node
+go.run()
+go.argv
+main()
+go.argv[1]
+go.argv[1]
+go.argv[2]
+argv
+wasm_exec.js
+Link.address()
+config
+config.fieldA
+js.Global().Get("config").Get("fieldA").String()

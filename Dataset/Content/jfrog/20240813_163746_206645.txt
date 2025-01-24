@@ -1,0 +1,144 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163746_206645\863_300Typosquatting.jpg
+
+Reviewers:
+
+Shachar Menashe, Sr. Director Security Research
+Itay Vaknin, Threat Intelligence Researcher
+The complexity of the modern software development process and its reliance on large community-maintained codebases introduces a risk for developers to inadvertently include malicious code into the project. The implications can be severe: in many cases, it can mean a complete takeover of the developed program or device by an attacker.
+Attackers attempt to generate this scenario in several ways, among them trying to introduce malicious or vulnerable code into open-source projects and using Typosquatting – adding malicious code into software repositories such as PyPI and npm under names which could be included in a project by mistake (such as misspelled names of legitimate software packages).
+In this blog post, we present our own additional research done on top of a novel detection by Sonatype, where a few PyPI packages were detected as malicious packages, packing a crypto-miner payload that mines Ethereum or Ubiq for the attacker.
+Specifically, we will:
+
+Discuss additional methods for automatically detecting these malicious packages which may indicate a possible supply chain attack
+Present an easy way to deobfuscate the attacker’s packages
+Analyze a newer variant of one of the attacking packages
+Present actionable solutions that developers may use to detect and prevent such attacks on their machines
+The flow of the attack
+The typosquatting attack flow of the malicious published packages can be summarized in the following way:
+
+The attacker published six malicious packages into PyPI –
+
+Maratlib, maratlib1, mplatlib, matplatlib-plus – Typosquatting packages alluding to the popular matplotlib or mplotlab
+learninglib, mllearnlib – Typosquatting packages alluding to learnlib and mllearn
+Some of the above packages were just proxy packages, which included an actual malicious package as part of their dependencies
+
+Maratlib, maratlib1, mplatlib, matplatlib-plus – Typosquatting packages alluding to the popular matplotlib or mplotlab
+learninglib, mllearnlib – Typosquatting packages alluding to learnlib and mllearn
+Some of the above packages were just proxy packages, which included an actual malicious package as part of their dependencies
+The malicious packages download and execute a payload shell script
+The payload shell script downloads and executes a 3rd party crypto miner, either T-Rex for mining Ethereum or ubqminer / PhoenixMiner for mining Ubiq. The funds are transferred into several mining pools, including:
+
+Kryptex 0x510aec7f266557b7de753231820571b13eb31b57
+Kryptex 0xbaef4a87e8a92ad5911bc5b0a2a02ed9867c0124
+Daggerhashimoto.usa-east.nicehash.com
+daggerhashimoto.eu-north.nicehash.com
+
+Kryptex 0x510aec7f266557b7de753231820571b13eb31b57
+Kryptex 0xbaef4a87e8a92ad5911bc5b0a2a02ed9867c0124
+Daggerhashimoto.usa-east.nicehash.com
+daggerhashimoto.eu-north.nicehash.com
+Or, in diagram form –
+
+
+A brief overview of Typosquatting
+Typosquatting is the practice of obtaining (or “squatting”) a popular name with a slight typographical error. For example – buying the domain name “gogle.com” (instead of the legitimate “google.com”) hoping that users will occasionally make typing errors and reach the illegitimate domain. This can then further be used for Phishing and code injection attacks. The practice applies to many different resources, such as web pages, software package names, and even executable names. In this case, the typosquatting attack was performed on PyPI, while ensnaring any developer that misspelled the “matplotlib” package name when using pip install.
+The Python payload – Naïve Typosquatting vs. a trojan package
+In the case of this attack, the Python payload was extremely short and simple –
+(Excerpt from maratlib package, version 0.6)
+Since this is the entire Python payload, it is elementary to detect using automated methods since a “download and execute” command (especially while using the shell via subprocess) is highly malicious.
+Some of the previous supply chain attacks were much more subtle and introduced a “trojan library” – meaning a library that was actually of some use, but had a small piece of hidden malware code inside it. For example, in a previous attack, a malicious npm package provided colorful logging features for the console, along with a hidden credential stealer.
+matplatlib-plus – a slight variation on the above
+The matplatlib-plus payload is slightly different than maratlib, which was researched in Sonatype’s article. From a high-level perspective, it operates similarly – namely downloading the T-Rex crypto miner from its GitHub repository and running it, but there are a couple of differences:
+This version uses a SOCKS5 proxy based at – 23.105.226.116:2016 to download the payload and for all T-Rex communications:
+Additionally, the obfuscation technique used here is a bit more sophisticated, and all arithmetic operations are replaced with lambdas:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163746_206645\2_lambdas.png
+
+The code also periodically connects to one of these popular URLs, probably to check for network connectivity:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163746_206645\3_popularURLs.png
+
+The shell script “dropper”
+As shown before, the Python payload will download and execute a dropper script.
+The dropper is specifically a shell script named aza.sh or aza2.sh, which is extremely naive and raises suspicions even on a cursory first glance:
+As we can see, the dropper just downloads and executes a crypto miner, in this case PhoenixMiner, and sends the results to a hardcoded Kryptex wallet.
+No obfuscation efforts were made here, and this shell script is also something that can be easily detected, if only due to the use of a well-known crypto miner tool.
+Overcoming the package’s obfuscation
+The attackers used obfuscation to protect the malicious logic from manual analysis and automated static analyzers.
+In the original article, the obfuscation was “skipped” by finding an older version of the malicious “maratlib” package, but as we will show here – dealing with the obfuscation of the newer versions (for example, maratlib 1.0) is pretty straightforward as well.
+The code may appear highly obfuscated at first – the first 400 lines of code are gibberish, including base64 strings and arithmetic operations –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163746_206645\4_Overcomingthepackageobfuscation1.png
+
+But more careful analysis shows that most of the variables and operations are “garbage code” aimed to mislead manual investigation and not actually used in the malware’s logic. The rest of the code is a lot clearer, but still challenging to read:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163746_206645\5_Overcomingthepackageobfuscation2.png
+
+As we can see from the figure above, the attackers based the obfuscation mainly on string encryption. The function l1ll1ll11_lol_ takes an encrypted string as the parameter and returns the original one.
+The obfuscation can be easily reversed by printing out the output of the function in the interpreter. This can be done, for example, by grepping for all invocations of the obfuscator function and wrapping them with print(…) and then re-running inside a safe environment (ex. virtual machine):
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163746_206645\6_Overcomingthepackageobfuscation3.png
+
+After automating this task through a suitable script, we will get the actual malicious code, which in this case downloads and executes a shell script seo.sh:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163746_206645\7_Overcomingthepackageobfuscation4.png
+
+Typosquatting conclusions – detection & prevention
+Automatically detecting obfuscated packages
+In our case, the JFrog security research team (formerly Vdoo) detected these packages as potentially malicious due to the obfuscation that was used. Specifically, we can see that eval-based obfuscation was used in maratlib and maratlib1:
+using eval in Python scripts (especially ones that are published through PyPI) is something that immediately raises suspicion since:
+
+Suppose the eval input is coming from an external source (ex. network input). In that case, this operation could be a dynamic code loading attack, which is meant to mask the module’s real code (obfuscation) or as a dormant backdoor that can load a malicious payload sent by the attacker sometime later.
+If the eval input is static (like in this case), this operation could be used for obfuscation purposes
+Coupled with the suitable filters to avoid false positives, the usage of eval is a powerful indicator of malicious activity.
+Automatically detecting Typosquatting attacks
+Some of the properties that facilitate this kind of attack (from the attacker’s perspective) can be actually leveraged against the attacker. The targeted package necessarily needs to be highly visible: to be located in a widely used repository and be sufficiently widespread. The selected misspelled name should be close enough to the name of the targeted package, which is easy to quantify using well-known metrics (Levenshtein or edit distance). Thus, even from very shallow metadata (package names and usage statistics), one can easily find candidates for Typosquatting by selecting packages that have a short edit distance from another popular package. Using this as a first-order filter, one can then study the source code of the suspicious packages (either manually or automatically) and look for other indicators of malicious behavior, such as network interfaces, use of cryptographic API, or any of the malicious indicators that were previously mentioned.
+Developer actions to prevent Typosquatting and Dependency Confusion
+Developers can take matters into their own hands to avoid these sort of attacks:
+
+To prevent Typosquatting – Inspect all your Python dependencies, by checking all requirements.txt files, and passing all dependencies to a script such as pypi-scan that can identify existing Typosquatting candidates currently on PyPI. Make sure none of these candidates are marked as a dependency in your various codebases.
+To prevent Dependency Confusion – Manage the way that repositories are queried and artifacts are pulled when resolving dependencies in the build process, for example by setting up exclusion rules to prevent searches for internal private artifacts in remote repositories, or defining the order in which varied repositories are searched in order to resolve a dependency. More information is available in our recent blog post.
+Maintainer actions to prevent Typosquatting attacks on popular package repositories
+Some of the package managers maintainers decided to take a more active approach to hinder these attacks, for example, on PyPI, other than deleting malicious packages, there are several users that deliberately reserve “Typosquatting-prone” names, so that they cannot be maliciously used (for example the user htdge has done this for a few packages).
+The npm maintainers take an active role themselves and have reserved thousands of packages under the description “Security holding package”.
+Appendix – IOCs
+Python packages:
+
+maratlib
+
+maratlib1
+
+mplatlib
+
+matplatlib-plus
+
+learninglib
+
+mllearnlib
+IPs:
+
+23.105.226.116 (SOCKS5 proxy)
+Domains:
+
+daggerhashimoto.usa-east.nicehash.com (stratum mining pool)
+daggerhashimoto.eu-north.nicehash.com (stratum mining pool)
+Questions? Thoughts? Contact us at research@jfrog.com for any inquiries related to security vulnerabilities.
+In addition to discovering and responsibly disclosing vulnerabilities as part of our day-to-day activities, the JFrog security research team works to enhance software security by empowering organizations to discover vulnerabilities through automated security analysis. For more information and updates on JFrog DevOps Platform security features – click here.
+
+Maratlib, maratlib1, mplatlib, matplatlib-plus – Typosquatting packages alluding to the popular matplotlib or mplotlab
+learninglib, mllearnlib – Typosquatting packages alluding to learnlib and mllearn
+Some of the above packages were just proxy packages, which included an actual malicious package as part of their dependencies
+Maratlib
+maratlib1
+mplatlib
+matplatlib-plus
+learninglib
+mllearnlib
+
+Kryptex 0x510aec7f266557b7de753231820571b13eb31b57
+Kryptex 0xbaef4a87e8a92ad5911bc5b0a2a02ed9867c0124
+Daggerhashimoto.usa-east.nicehash.com
+daggerhashimoto.eu-north.nicehash.com
+Kryptex 0x510aec7f266557b7de753231820571b13eb31b57
+Kryptex 0xbaef4a87e8a92ad5911bc5b0a2a02ed9867c0124
+Daggerhashimoto.usa-east.nicehash.com
+daggerhashimoto.eu-north.nicehash.com
+matplatlib-plus
+l1ll1ll11_lol_
+print(…)
+eval

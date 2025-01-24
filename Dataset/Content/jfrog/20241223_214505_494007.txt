@@ -1,0 +1,77 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214505_494007\ApacheRCEandDoSvulnerabilities863x3001.png
+
+A few days ago it was reported that the new Apache version 2.4.53 contains fixes for several bugs which exposed the users of the well known HTTP server to attacks: CVE-2022-22719 relates to a bug in the mod_lua modules which may lead to Denial of Service after reading from a random memory Area, CVE-2022-22720 exposes the server to HTTP Smuggling attacks, CVE-2022-22721 exposes the server to a buffer overflow when handling large XML input, and CVE-2022-23943 is a vulnerability in the mod_sed module, which when triggered can lead to DoS and possibly RCE. This post will focus on the latter.
+mod_sed is an Apache module that provides the same functionality as GNU’s stream editor tool, sed, allowing the manipulation of streams. It can be used as an input filter in order to modify HTTP POST requests’ bodies, or alternatively as an output filter that modifies the server’s responses before they’re sent to the client.
+In this blog post we provide an overview of the Apache CVE-2022-23943 vulnerability and guidance on how to remediate the issue, as well as a mitigation option we’ve discovered as part of our research on this vulnerability.
+This research also fuels our development of contextual analysis scanners, which automatically detect vulnerable configurations and applied mitigations to determine whether a CVE is exploitable in a specific application.
+What is CVE-2022-23943?
+CVE-2022-23943 is a Denial of Service vulnerability in the mod_sed module of the Apache HTTP server. The vulnerability affects all Apache 2.4 versions up to 2.4.52 (inclusive), given the mod_sed filter is used for request or response editing.
+This Apache vulnerability is caused due to mishandling of buffers, potentially allowing an Out-of-Bounds Write when requests or responses which contain large amounts of data are edited by the module.
+Who is affected by CVE-2022-23943?
+CVE-2022-23943 affects all 2.4.x versions of the Apache HTTP server up to and including version 2.4.52, when running with a non-default configuration where the mod_sed filter module is used for editing either requests or responses.
+When configuring mod_sed, it is possible to add two types of filters –
+
+AddInputFilter – This filter will process data received from the client, before forwarding it to the Apache server
+AddOutputFilter – This filter will process data about to be sent from the Apache server, before forwarding it to the client
+A vulnerable instance of Apache will have a configuration file with a Sed input or output filter on one of its Routeor Directory directives.
+The following example illustrates a vulnerable configuration, where all requests to html files will be processed by mod_sed, which in turn will replace each character in the request’s body with the letter Z –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214505_494007\1handlingofallrequestmethodstohtmlfiles.png
+
+(the actual replacement logic does not affect the exploitability of this vulnerability)
+Due to the fact that data from the client is usually untrusted (unlike data that already exists from the server), any server that adds an input filter (AddInputFilter) is much more likely to be affected by this issue.
+Technical summary of CVE-2022-23943
+Like the original GNU stream editor, mod_sed enables using regular expression patterns for input and output stream modifications.
+Since the fixing commit revolves around changing int types (4 byte signed) to apr_size_t types (4 or 8 byte unsigned), triggering this issue involves sending very large packets, either sized at 2GB (to cause an integer signedness issue) or 4GB (to cause an integer overflow issue).
+The vulnerability is triggered when the appendmem_to_linebuf function, which is found in sed1.c, invokes the memcpy function in order to write to the evaluated stream buffer.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214505_494007\2appendmem_to_linebuffunction.png
+
+There are actually two scenarios in which we were able to trigger the vulnerability. In the first one 4GB of data was sent to the server, which resulted in a crash when the function sed_eval_buffer was still processing the stream. The function’s call to appendmem_to_linebuf resulted in an out-of-bounds write, due to a miscalculation of the buffer’s size:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214505_494007\3appendmem_to_linebuf.png
+
+In the second scenario, the vulnerability was triggered using 2GB of data that was sent to the server. Since Apache supports request body sizes of up to 2GB, in this case the vulnerability was triggered when trying to finalize the stream buffer’s processing. This instance can be found in the call to appendmem_to_linebuf which is invoked by sed_finalize_eval calling append_to_linebuf in order to guarantee a null terminator is added to the end of the buffer:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214505_494007\4appendmem_to_linebuf.png
+
+What is the impact of CVE-2022-23943?
+The vulnerability can be easily exploited by sending large amounts of data in the request’s body, if the mod_sed filter module is required to process said data, causing a Denial of Service and a short downtime for one of the HTTP server’s processes. If an attack were to be carried out by making multiple requests to the server over a long period of time, a complete Denial of Service can occur, causing all the server’s processes to shut down repeatedly.
+How can you remediate CVE-2022-23943?
+To remediate this Apache vulnerability, we recommend upgrading Apache to the latest version, which is currently 2.4.53. If it is not possible to upgrade, we highly recommend applying the patch which fixes this vulnerability in the mod_sed filter module.
+What mitigation options are available for CVE-2022-23943?
+In case upgrading Apache to the latest version or applying the patch aren’t possible, it is required to limit the POST method’s body size so that the vulnerability can’t be triggered. In order to do so, you’ll need to use the LimitRequestBody directive in Apache’s configuration file.
+The directive can be used to set a limit to the request size starting from 0 and up to 2GB of data.
+For example to limit POST to 1GB of data, the following line can be added to httpd.conf:
+LimitRequestBody 1073741824
+This mitigation only provides protection against attacks by malicious client requests, and not in the case where mod_sed is used to modify large files (>2GB) that already exist on the vulnerable server.
+Find vulnerable versions with JFrog Xray
+In addition to exposing new security vulnerabilities and threats, JFrog provides developers and security teams easy access to the latest relevant information for their software with automated security scanning by JFrog Xray SCA tool.
+JFrog Xray performs automated Contextual Analysis of CVEs, accelerating time to resolution of vulnerabilities that are actually exploitable in production. Stay tuned for future enhancements, including detection of CVEs’ applicability based on software configurations.
+Stay up-to-date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter at @JFrogSecurity.
+mod_lua
+mod_sed
+mod_sed
+mod_sed
+mod_sed
+mod_sed
+AddInputFilter
+AddOutputFilter
+Route
+Directory
+mod_sed
+AddInputFilter
+mod_sed
+int
+apr_size_t
+appendmem_to_linebuf
+memcpy
+sed_eval_buffer
+appendmem_to_linebuf
+appendmem_to_linebuf
+sed_finalize_eval
+append_to_linebuf
+mod_sed
+mod_sed
+LimitRequestBody
+httpd.conf
+LimitRequestBody 1073741824
+mod_sed

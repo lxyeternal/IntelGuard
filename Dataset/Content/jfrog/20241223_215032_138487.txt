@@ -1,0 +1,33 @@
+
+In a previous blog post we talked about the importance of a Continuous Integration (CI) process for docker images and how to set up private Docker registries in Artifactory to support a promotion pipeline. The configuration looks a little bit like this:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215032_138487\ArtifactoryDockerPipeline.jpg
+
+This picture has a Jenkins CI butler in it.  We often say that you should build and promote your Docker containers via automation, but what does this really look like?  In this post, I will outline the core principles for setting up a robust Docker pipeline to develop secure automated releases of docker images into a secure production Docker registry.  In a future post, I will discuss an implementation in Jenkins Pipelines with the Jenkins Artifactory Plugin.  Of course, Jenkins isn’t the only thing you can promote with.  Any tool that can call the REST API whether it be a CI tool like Jenkins, Bamboo, Travis etc. or even an orchestration tool like Ansible, Chef or Puppet can promote from one Docker registry to another.
+A Separation of Layers
+Here are a few principles you should follow when setting up your pipeline:
+
+No Docker image/tag should be able to reach a production Docker registry without being tested as built.
+The deployed application should be run using Docker.
+Nevertheless, we still want a lifecycle which allows us to update base layers of the Docker image easily to receive security updates.
+To do this, we should think of our Docker images as containing two sets of layers each of which may have multiple layers. The first set of layers is a framework layer which my application is installed on top of, and the second set of layers is the layer in which an application is installed and configured.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215032_138487\ourlayers736.jpg
+
+For example, I may be running an application which is a .war file on top of tomcat. The framework image will be a base OS image (such as ubuntu:trusty), and then on top of that I will install a JDK and Tomcat.  This will be referred to as the “framework image” (of course, in this case, I could just use the base Tomcat Docker container, but the point is to show how to build a framework layer for your needs.)
+On top of that, we add the “application layer”. In this example we simply add in the WAR file and any configuration files it requires to create the “application image”.
+The Framework Layer
+The framework image is where most of your security updates are found.  You want this to be updated regularly, but you also want to make sure that a security update doesn’t break your build.  Because this image has to be tested before being injected into the application development pipeline, the critical aspect of this is that you own it. In our experience there’s usually at least some minor modification of an image before it is used for application installation, but even if you aren’t making any changes other than to test it works, own it!  This makes the minimal dockerfile for a framework image:
+In this case, all we are doing is pulling it from the docker-dev virtual Docker registry, which will, in turn, retrieve the latest tag of the official Ubuntu image from Docker Hub, and then we can add an ownership label (so someone knows who to call to ask about the test process) and push it out to a local Docker registry as belonging to you, and then test it and promote it to the docker-prod registry.
+The Application Layer
+The application image looks like this:
+So in this case, I am getting the “prod approved” framework Docker container from the production Docker registry, and adding to it my latest “releasable” WAR file in the staging directory using the RELEASE keyword from Artifactory.  This is not the latest known good war file, because I don’t “know” if it is good until it has been tested in its production environment (in this case, my Docker container in a “known good” framework)
+When testing the framework, I might instead use a dockerfile that looks like this:
+This is absolutely identical, except we are using the dev version of the framework pulled from the development Docker registry before it’s approved (since this is the acceptance test) and the last known good release version of the WAR.  So our promotion pipeline looks like this:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_215032_138487\pipeline.png
+
+
+Sandwich Anyone?
+This promotion pipeline implements a sandwich testing approach combining top-down testing of the application and bottom-up testing of the framework simultaneously. By having independent test and production pipelines of the framework vs. the application, you not only have the opportunity to re-use the framework, but you separate security update concerns from application development.
+We trigger the framework pipeline whenever we want to update the framework, that is, whenever there is either a.) a security fix; or b.) a need to change the infrastructure components of our framework or their configuration. In this case that would mean whenever ubuntu:trusty is updated, or whenever there is a new JDK or Tomcat release that we want to take, or if we need to change the dockerfile for whatever reason. We trigger the application pipeline when there is either an updated framework image released to the production Docker registry, or when there is a code change in the application.
+With these triggers in place, the only thing that can “freeze” the CI/CD process – that is, break development such that manual intervention other than fixing code in one pipeline or the other is required, since they are cross-dependent – is if there is a change to the infrastructure that requires a code change that is not backwards-compatible. That is to say, the code change at the application level to adjust to the infrastructure change will not run on the old infrastructure, and the old code will not run on the new infrastructure. I won’t say it never happens this way, but it is a fairly rare edge case in the modern world for well-supported frameworks. When it DOES happen, you will need to manually promote the WAR file or the framework build to release status to “prime the pump” of this CI/CD process (and the first time you run, of course.)
+So that’s the pattern. In a future post, we will discuss the more detailed implementation using Jenkins Pipelines to manage the flow of images between Docker registries.
+Are you ready to start managing your container lifecycles with Artifactory?

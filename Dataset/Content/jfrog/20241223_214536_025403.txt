@@ -1,0 +1,112 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_025403\ScaleupwithKubernetesJFrogArtifactory863x300w.png
+
+There are many benefits to working with JFrog Artifactory as your private Docker registry, allowing you to store, share and deploy your binary artifacts in a single source of truth.
+This blog post will focus on using Artifactory in Kubernetes. Specifically, we’ll walk through the steps for configuring Kubernetes to pull images from Artifactory and most importantly – scale up! It will also describe how you can enable cluster-wide authenticated access to Artifactory behind the scenes.
+When Artifactory meets Kubernetes
+Once you’ve got your Artifactory all set-up and configured as a private Docker Registry, pushed some Docker images into your registry from your favorite CI tool, everything is now ready to be deployed on your Kubernetes cluster.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_025403\JFrogArtifactoryDocker.jpg
+
+1. Setting up Artifactory for a single Kubernetes namespace
+We’ll start by deploying some pods from one of our Artifactory Docker registry images using the following commands.
+➜  ~ kubectl create namespace my-app-ns
+namespace/my-app-ns created
+
+➜  ~ kubectl create deployment my-app -n my-app-ns --image my-artifactory.jfrog.io/default-docker-virtual/my-app:1.0.1
+deployment.apps/my-app created
+
+➜  ~ kubectl get pods -n my-app-ns
+NAME                        READY   STATUS         RESTARTS   AGE
+my-app-6f6b796547-2ttcz   0/1     ErrImagePull   0          9s
+ErrImagePull? Let’s find out why:
+➜  ~ kubectl describe pod -n my-app-ns my-app-6f6b796547-2ttcz
+...
+Events:
+  Type          Reason         Age                                      From                         Message
+  ------            ----------         -----                                       ------                            ------------
+  Normal     Scheduled  8m22s                                  default-scheduler  Successfully assigned my-app-ns/my-app-6f6b796547-2ttcz to ip-192-168-121-179.ec2.internal
+  Normal     Pulling         6m58s (x4 over 8m22s)    kubelet                    Pulling image "my-artifactory.jfrog.io/default-docker-virtual/my-app:1.0.1"
+  Warning    Failed          6m58s (x4 over 8m22s)    kubelet                    Failed to pull image "my-artifactory.jfrog.io/default-docker-virtual/my-app:1.0.1": rpc error: code = Unknown desc = Error response from daemon: Get https://my-artifactory.jfrog.io/v2/default-docker-virtual/my-app/manifests/1.0.1: unknown: Authentication is required
+  Warning    Failed          6m58s (x4 over 8m22s)    kubelet                    Error: ErrImagePull
+  Warning    Failed          6m33s (x6 over 8m21s)    kubelet                    Error: ImagePullBackOff
+  Normal     BackOff       3m11s (x21 over 8m21s)  kubelet                   Back-off pulling image "my-artifactory.jfrog.io/default-docker-virtual/my-app:1.0.1"
+Oh yeah, we need to authenticate with the private Docker registry. How do we do that in Kubernetes?
+2.  Authenticating Kubernetes with the private Docker registry
+We’ll now create a Kubernetes secret of type docker-registry. The Kubernetes secret must be created in the same namespace as the pods we are deploying and needs to include the credentials to authenticate against our Artifactory Docker registry.
+➜  ~ kubectl create secret docker-registry regcred \
+--docker-server=my-artifactory.jfrog.io \
+--docker-username=read-only \
+--docker-password=my-super-secret-pass \
+--docker-email=johndoe@example.com \
+-n my-app-ns
+
+secret/regcred created
+Now we need to instruct Kubernetes to use the secret credentials we just created when pulling images for our pods in this namespace. There are 2 options to do this:
+
+Add an imagePullSecrets section to the pod spec. For example,
+➜  ~ kubectl edit deployment my-app -n my-app-ns
+apiVersion: apps/v1
+kind: Deployment
+...
+spec:
+  ...
+  template:
+    spec:
+      containers:
+      - image: my-artifactory.jfrog.io/default-docker-virtual/my-app:1.0.1
+      imagePullSecrets:
+      - name: regcred
+Patch the default service account to include the imagePullSecrets section.
+
+By default a service account named default automatically gets created with each namespace and all workloads will automatically use it. You can also patch a custom service account to include the imagePullSecrets section and configure your workload to use it instead of the default.
+➜  ~ kubectl edit serviceaccount default -n my-app-ns
+apiVersion: v1
+kind: ServiceAccount
+imagePullSecrets:
+- name: regcred
+...
+The second option is usually preferred. This way all workloads in that namespace that their image is pulled from the private Docker registry (ex. my-artifactory.jfrog.io) will be able to do so without having to explicitly configure the imagePullSecrets for each workload.
+After we’ve configured our imagePullSecrets using one the options above, let’s check on our deployment:
+➜  ~ kubectl get pods -n my-app-ns
+NAME                        READY   STATUS    RESTARTS   AGE
+my-app-57db67b7d5-nr8db   1/1     Running   0          5m
+Much better! We got a new pod in a Running state.
+Bonus points – Scale up any namespace!
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214536_025403\Bonus.jpg
+
+But what if we are planning to use our Artifactory Docker registry for pulling only trusted production images for pods across multiple namespaces, or even all namespaces?
+Does that mean we need to repeat the same process of creating the secret and updating the default service account with that secret in every namespace?!
+Well yeah… but that sounds tedious. Can we do better? YES WE CAN!
+If you’re using EKS and Artifactory, JFrog’s integration with AWS AssumeRole enables seamlessly pulling images from the JFrog Docker private registry, thereby tightening access control mechanisms to ensure fluid integration that aligns with established industry practices.
+If you are interested in making the move from vulnerable manual secret handling to secure automated secret management, then your journey towards a more secure and seamless containerized future begins here.
+See how quickly this powerful capability can be deployed by checking out our step-by-step installation and configuration guide.
+As an alternative solution, we recommend using the imagepullsecrets-patcher open source tool created by Titansoft, which is “a simple Kubernetes client-go application that creates and patches imagePullSecrets to service accounts in all Kubernetes namespaces to allow cluster-wide authenticated access to private container registry.”
+Configure Once, Run Everywhere
+In short, using the imagepullsecrets-patcher tool you’ll create the image-pull-secret-src secret file in the imagepullsecret-patcher namespace and in the imagepullsecret-patcher deployment set the CONFIG_ALLSERVICEACCOUNT environment variable to true.
+Using this environment variable will allow any workload in any namespace using any service account within our Kubernetes cluster, the ability to pull images from Artifactory without editing our workloads spec.
+Note: Alternatively, starting from Kubernetes v1.20, the kubelet can dynamically retrieve credentials for a container image registry using exec plugins. You may be interested in using this capability if storing registry credentials on disk or in imagePullSecrets is not acceptable, so kubelet can pull these credentials as runtime from an external service. This feature is still in alpha state in the latest Kubernetes version (v1.23 currently).
+Learn More
+Start a free trial and try out the JFrog Software Supply Chain Platform for yourself, or join our weekly group demo to see it in action.
+➜  ~ kubectl edit deployment my-app -n my-app-ns
+apiVersion: apps/v1
+kind: Deployment
+...
+spec:
+  ...
+  template:
+    spec:
+      containers:
+      - image: my-artifactory.jfrog.io/default-docker-virtual/my-app:1.0.1
+      imagePullSecrets:
+      - name: regcred
+
+➜  ~ kubectl edit serviceaccount default -n my-app-ns
+apiVersion: v1
+kind: ServiceAccount
+imagePullSecrets:
+- name: regcred
+...
+image-pull-secret-src
+imagepullsecret-patcher
+imagepullsecret-patcher
+CONFIG_ALLSERVICEACCOUNT

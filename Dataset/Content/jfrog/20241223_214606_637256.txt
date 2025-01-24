@@ -1,0 +1,184 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214606_637256\UseArtifactorywithanAirGap_863x300.png
+
+Virtually all development organizations need access to remote public resources such as Maven Central, NuGet Gallery, npmjs.org, Docker Hub etc., to download dependencies needed for a build. One of the big benefits of using Artifactory is its remote repositories which proxy these remote resources and cache artifacts that are downloaded. This way, once any developer or CI server that has requested an artifact for the first time, it is cached and directly available from the remote repository in Artifactory on the internal network. This is the usual way to work with remote resources through Artifactory.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214606_637256\1_WorkingwithremoteresourcesJFrogArtifactory.png
+
+There are, however, organizations such as financial institutions and military installations, that have stricter security requirements in which such a setup, exposing their operations to the internet, is forbidden.
+Air gap to the rescue
+To accommodate these use cases, we recommend a setup with at least two Artifactory instances; one on the DMZ and another on the internal network, a setup commonly known as an air gap.
+We normally see one of two scenarios:
+
+No network connection
+One-way connection
+No network connection
+In this scenario, the two Artifactory instances have no network connection between them. To get dependencies from the internet, the external instance has to download them, export them to an external device (such as a hard drive or USB flash drive), and then the internal instance has to import them for use by the developers and CI servers.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214606_637256\2_Workingwithoutanetworkconnection.png
+
+
+Getting Dependencies
+Here are two ways you could get dependencies from remote repositories:
+
+Dependencies Declaration
+
+Strip down your code, leaving only the dependencies declaration. Install the stripped-down code on a virtual machine on the DMZ which has the tools needed to run it (for example, if you’re developing npm packages, you would need the npm client installed on the DMZ machine). The corresponding client requests the dependencies you need through Artifactory which recursively downloads them, as well as any nth level dependencies that they need too.
+Dedicated Script
+
+Implement a script or mechanism that iterates through all the packages you need and sends “head requests” to Artifactory so it downloads those packages from the remote resource. For example, the following bash example maintains a hash map where the keys represent the artifact paths in maven central, and the values are artifact file versions needed to be cached.
+declare -A dependencies=(
+  ['junit/junit']="4.13.2/junit-4.13.2.pom 4.13.2/junit-4.13.2.jar"
+  ['org/webjars/jquery']="2.1.1/jquery-2.1.1.jar 3.6.0/jquery-3.6.0.jar 2.1.3/jquery-2.1.3.jar"
+)
+
+for d in "${!dependencies[@]}"
+do
+  echo -e "caching dependency  : $d, based on versions: ${dependencies[$d]}"
+  for v in ${dependencies[$d]} 
+  do 
+  	curl -s -o /dev/null -LI -w "%{http_code}\n" -uadmin:password https:///artifactory/tal-maven-maven-remote/$d/$v 
+  done
+done
+This hashmap can be extended to support more and more requested artifacts.
+Certain technologies might require different metadata, properties or API requests. For example, the following bash script caches a collection of tomcat and alpine versions based on the docker client:
+declare -A dependencies=(
+  ['alpine']="3.14 3.14.1"
+  ['tomcat']="latest jdk8-openjdk jdk11"
+)
+
+docker login .jfrog.io -u admin -p password
+
+for d in "${!dependencies[@]}"
+do
+  echo -e "caching dependency  : $d, based on versions: ${dependencies[$d]}"
+  for v in ${dependencies[$d]} 
+  do 
+    docker pull .jfrog.io/docker-remote/$d:$v
+  done
+done
+
+
+Export and Import
+Here are two ways you could export new dependencies (i.e. those downloaded since the last time you ran an export) and then import them to the internal folder.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214606_637256\4_Importrepository.png
+
+UI & Import REST API
+
+A straightforward approach could be simply exporting the necessary repository:
+
+
+
+And importing it to the internal artifactory:
+
+
+
+REST API endpoint is also exposed for importing repository content for automation purposes.
+Using JFrog CLI
+
+Since exporting is basically copying files from one location to another, JFrog CLI is the perfect tool to accomplish that. What we’re looking to do is to download all the new packages from the repository in the external Artifactory instance, and then upload them to the internal instance. The most straightforward way to download the new files is with the following command:
+jfrog rt dl generic-local-archived NewFolder/
+
+“But wait,” you say. “Doesn’t that download all the files?” Well, it looks like it, but since JFrog CLI is checksum aware, it only downloads new binaries that were added since our last download. Under the hood, JFrog CLI actually runs an AQL query to find the files you need, so your response looks something like this:
+[Info:] Pinging Artifactory...
+[Info:] Done pinging Artifactory.
+[Info:] Searching Artifactory using AQL query: items.find({"repo": "generic-local-archived","$or": [{"$and": [{"path": {"$match":"*"},"name":{"$match":"*"}}]}]}).include("name","repo","path","actual_md5","actual_sha1","size")
+[Info:] Artifactory response: 200 OK
+[Info:] Found 2 artifacts.
+[Info:] [Thread 0] Downloading generic-local-archived/jerseywar.tgz
+[Info:] [Thread 1] Downloading generic-local-archived/plugin.groovy
+[Info:] [Thread 1] Artifactory response: 200 OK
+[Info:] [Thread 0] Artifactory response: 200 OK
+[Info:] Downloaded 2 artifacts from Artifactory.
+
+Now you can take “NewFolder” to your internal instance and upload its content, again, using JFrog CLI:
+jfrog rt u NewFolder/ generic-local-archive
+
+And since JFrog CLI uses checksum deploy (similar to the case of downloading), binaries that already exist at the target in the internal instance will not be deployed. The output below shows that only one new file is checksum deployed, apex-0.3.4.tar.
+[Info:] Pinging Artifactory...
+[Info:] Done pinging Artifactory.
+[Info:] [Thread 2] Uploading artifact: https://localhost:8081/artifactory/generic-local-archived/plugin.groovy
+[Info:] [Thread 1] Uploading artifact: https://localhost:8081/artifactory/generic-local-archived/jerseywar.tgz
+[Info:] [Thread 0] Uploading artifact: https://localhost:8081/artifactory/generic-local-archived/apex-0.3.4.tar
+[Info:] [Thread 1] Artifactory response: 201 Created
+[Info:] [Thread 2] Artifactory response: 201 Created
+[Info:] [Thread 0] Artifactory response: 201 Created (Checksum deploy)
+[Info:] Uploaded 3 artifacts to Artifactory.
+A simple way to formulate complex queries in a filespec
+But life isn’t always that simple. What if we don’t want to move ALL new files from our external instance to our internal one, but rather, only those with some kind of “stamp of approval”. This is where AQLs ability to formulate complex queries opens up a world of options. Using AQL, it’s very easy to create a query that, for example, only downloads files created after October 15, 2020 and are annotated with a property workflow.status=PASSED, from our generic-local-archived repository into out NewFolder library. And since JFrog CLI can accept parameters as a filespec, we create the following AQL query in a file called newandpassed.JSON:
+{
+  "files": [
+    {
+      "aql": {
+        "items.find": {
+          "repo": "generic-local-archived",
+          "created" : {"$gt" : "2020-10-15"},
+          "@workflow.status" : "PASSED"
+        }
+      },
+      "target": "NewFolder/"
+    }
+  ]
+}
+…and now feed it to JFrog CLI:
+jfrog rt dl --spec NewAndPassed.json
+Now we just upload the contents of NewFolder to the internal instance like we did before.
+One-way connection
+Some high-security institutions, while requiring a separation between the internet and their internal network, have slightly more relaxed policies and allow a one way connection. In this case, the internal Artifactory instance may be connected to the external one through a proxy or through a secure, unidirectional HTTP network connection. This kind of setup opens up additional ways for the internal instance to get dependencies:
+
+Using a smart remote repository
+Using pull replication
+Smart Remote Repositories
+A remote repository in Artifactory is one that proxies a remote resource. A smart remote repository is one in which the remote resource is actually a repository in another Artifactory instance.
+Here’s the setup you can use:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214606_637256\5_Smartremoterepositories.png
+
+The external instance on the DMZ includes:
+
+Local repositories which host whitelisted artifacts that have been downloaded, scanned and approved
+A remote repository that proxies the remote resource from which dependencies need to be downloaded
+A virtual repository that aggregates all the others
+The internal instance includes:
+
+Local repositories to host local artifacts such as builds and other approved local packages
+A remote repository – actually, a smart remote repository that proxies the virtual repository in the external instance
+A virtual repository that aggregates all the others
+Here’s how it works:
+
+A build tool requests a dependency from the virtual repository on the internal Artifactory instance
+If the dependency can’t be found internally (in any of the local repositories or in the remote repository cache), then the smart remote repository will request it from its external resource, which is, in fact, the virtual repository on the external instance
+The virtual repository of the external instance tries to provide the requested dependency from one of its aggregated local repositories, or from its remote repository cache. If the dependency can’t be found, then the remote repository downloads it from the remote resource, from which it can then be provisioned back to the internal instance that requested it.
+There’s a small setting you need to remember. The virtual repository on your internal instance must have the Artifactory Requests Can Retrieve Remote Artifacts checkbox set.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214606_637256\6_ArtifactoryRequestsCanRetrieveRemoteArtifacts.jpg
+
+Pull Replication
+In this method, you download dependencies to the external Artifactory instance (in the DMZ) using either of the methods described above. Now all you have to do is create a remote repository in your internal instance and configure it to invoke a pull replication from the “clean” repository in your external instance according to a cron job to pull in all those whitelisted dependencies to the internal instance.
+COMING SOON… Part 2 is available now! securing your your software binaries in an air gapped environment. Part 3 will be next… We’ll learn how to deliver immutable releases in an air gap setup.
+Related Resources
+
+Using JFrog Xray with an Air Gap – Part II
+Air gap distribution in 3 steps
+Cheat Sheet: JFrog CLI Made Easy
+
+jfrog rt dl generic-local-archived NewFolder/
+“But wait,” you say. “Doesn’t that download all the files?” Well, it looks like it, but since JFrog CLI is checksum aware, it only downloads new binaries that were added since our last download. Under the hood, JFrog CLI actually runs an AQL query to find the files you need, so your response looks something like this:
+[Info:] Pinging Artifactory...
+[Info:] Done pinging Artifactory.
+[Info:] Searching Artifactory using AQL query: items.find({"repo": "generic-local-archived","$or": [{"$and": [{"path": {"$match":"*"},"name":{"$match":"*"}}]}]}).include("name","repo","path","actual_md5","actual_sha1","size")
+[Info:] Artifactory response: 200 OK
+[Info:] Found 2 artifacts.
+[Info:] [Thread 0] Downloading generic-local-archived/jerseywar.tgz
+[Info:] [Thread 1] Downloading generic-local-archived/plugin.groovy
+[Info:] [Thread 1] Artifactory response: 200 OK
+[Info:] [Thread 0] Artifactory response: 200 OK
+[Info:] Downloaded 2 artifacts from Artifactory.
+Now you can take “NewFolder” to your internal instance and upload its content, again, using JFrog CLI:
+jfrog rt u NewFolder/ generic-local-archive
+And since JFrog CLI uses checksum deploy (similar to the case of downloading), binaries that already exist at the target in the internal instance will not be deployed. The output below shows that only one new file is checksum deployed, apex-0.3.4.tar.
+[Info:] Pinging Artifactory...
+[Info:] Done pinging Artifactory.
+[Info:] [Thread 2] Uploading artifact: https://localhost:8081/artifactory/generic-local-archived/plugin.groovy
+[Info:] [Thread 1] Uploading artifact: https://localhost:8081/artifactory/generic-local-archived/jerseywar.tgz
+[Info:] [Thread 0] Uploading artifact: https://localhost:8081/artifactory/generic-local-archived/apex-0.3.4.tar
+[Info:] [Thread 1] Artifactory response: 201 Created
+[Info:] [Thread 2] Artifactory response: 201 Created
+[Info:] [Thread 0] Artifactory response: 201 Created (Checksum deploy)
+[Info:] Uploaded 3 artifacts to Artifactory.

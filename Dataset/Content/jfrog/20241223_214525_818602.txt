@@ -1,0 +1,66 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214525_818602\CVE20220185LinuxKernelVulnerability863x3001.png
+
+Last week, a critical vulnerability identified as CVE-2022-0185 was disclosed, affecting Linux kernel versions 5.1 to 5.16.1. The security vulnerability is an integer underflow in the Filesystem Context module that allows a local attacker to run arbitrary code in the context of the kernel, thus leading to privilege escalation, container environment escape, or denial of service.
+The vulnerability was found as part of Google’s KCTF bug bounty program – a Kubernetes-based CTF that encourages researchers to find new exploitable vulnerabilities in all GKE (Google Kubernetes Engine) dependencies, that can lead to the compromise of the underlying Kubernetes node. This naturally includes Linux kernel privilege escalation vulnerabilities such as CVE-2022-0185, for which the researchers were awarded $31,337.
+In this blog post, we provide a short technical overview of this newly discovered Linux kernel vulnerability and describe recent developments that have increased the likelihood of exploitation. We also share details on how the security vulnerability impacts the self-managed deployments of the most commonly used Kubernetes engines including Amazon EKS, Azure AKS and Google GKE.
+CVE-2022-0185 Technical Summary
+The vulnerability is caused by an integer underflow in legacy_parse_param. This function fills the configuration received into the buffer ctx->legacy_data and relies on the buffer size ctx->data_size (named as size in the following code snippets) later to perform a memory copy.
+Unfortunately, the calculation of the maximum bytes that can be written can underflow when size is 4095 or greater, which leads to a restriction bypass along with a huge copy size later.
+if (len > PAGE_SIZE - 2 - size)
+	return invalf(fc, "VFS: Legacy: Cumulative options too large");
+ if (strchr(param->key, ',') ||
+    (param->type == fs_value_is_string &&
+     memchr(param->string, ',', param->size)))
+	return invalf(fc, "VFS: Legacy: Option '%s' contained comma",
+		      param->key);
+ if (!ctx->legacy_data) {
+	ctx->legacy_data = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!ctx->legacy_data)
+		return -ENOMEM;
+ }
+In line 551 it can be seen that when size is 4095 or greater, the calculation of PAGE_SIZE - 2 - size will result in a huge positive value since PAGE_SIZE is 4Kb. Then there will be an out-of-bounds write (in line 566):
+ctx->legacy_data[size++] = ',';
+ len = strlen(param->key);
+ memcpy(ctx->legacy_data + size, param->key, len);
+ size += len;
+ if (param->type == fs_value_is_string) {
+	ctx->legacy_data[size++] = '=';
+This out-of-bounds write can be leveraged for arbitrary code execution. Although the exact method of exploitation is out of scope for this blog, we highly recommend the technical writeup for more details.
+How Exploitable is CVE-2022-0185 Vulnerability?
+The exploit chain of this vulnerability includes privileged system calls, such as fsopen(), requiring the attacker to possess the CAP_SYS_ADMIN capability (in any namespace) for exploiting this vulnerability. This capability is granted, for example, when the container is executed in privileged mode. Luckily, Docker and other containerization solutions have this setting disabled by default, unless it is enabled specifically by using the --privileged flag or by configuring it in the security context section of the Pod’s CustomResourceDefinition (CRD) in Kubernetes.
+Although the existence of CAP_SYS_ADMIN capability might seem like a hard prerequisite for exploitation, it is possible for the attacker to achieve it in any user namespace, including in unprivileged containers. This is a gamechanger for this vulnerability, making it possible to exploit in common Kubernetes environments. In this attack scenario, the attacker can achieve CAP_SYS_ADMIN capability on a new namespace, by calling unshare functionality of the guest container, to enter a new namespace where this capability is available. While in the Docker environment this action is blocked by default by the seccomp filter, in Kubernetes deployments the filter is disabled by default.
+A few days ago, an exploit of this vulnerability was published, including an extensive technical writeup by the CTF team “Crusaders of Rust” who found this vulnerability. Soon after, another researcher published another exploit and a technical writeup. These publications make this vulnerability likely to be exploited in the wild.
+How Can You Detect CVE-2022-0185?
+For detecting this vulnerability, the Linux kernel version and configuration should be examined.
+The vulnerable vanilla kernel versions are 5.1 to 5.16.1. In known Kubernetes engines, specific kernel patches might be applied by the vendor. See fixed engine node versions below.
+The vulnerability can be exploited by nonprivileged users, only when the “User namespaces” (CONFIG_USER_NS) feature is enabled in the kernel. Note that there are additional prerequisites for exploiting this vulnerability for container escape. See the Exploitability section above.
+How Can You Remediate CVE-2022-0185 on Self-Managed Kubernetes?
+Amazon EKS, Azure AKS and Google GKE are currently the most popular Kubernetes engines in use. These engines automate deployment, scaling, and management of containerized applications.
+This container breakout vulnerability may lead to a large-scale breach due to the lateral movement between the breached container and the host (node) . This is especially true for companies that host their own self-managed Kubernetes engines.
+For self-managed environments, the environment administrator needs to update the underlying engine node image manually. These are the relevant engine images that fix CVE-2022-0185:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214525_818602\gke250.png
+
+
+	AKS – Upgrade the node images to version 2022.01.24. Instructions for upgrading AKS node image can be found here. More information is available in this AKS issue.
+	GKE – Currently, there are no versions of the GKE that contain a fix for this issue. While fixed versions of the Google Container-Optimized OS were already created, namely – cos-85-13310-1366-24, cos-89-16108-604-3, cos-93-16623-102-4, these operating systems are not yet available in any GKE channel. We highly recommend applying the mitigation methods outlined in the “Mitigations” section below. We will update this blogpost when a fixed version is available in GKE, stay tuned.
+How Can You Remediate CVE-2022-0185 Outside of Kubernetes?
+The recommended solution for resolving the vulnerability is a software upgrade.
+Many major Linux distributions have released a fixed kernel. See the relevant upgrade instructions for Ubuntu, Debian or Red Hat.
+For users running outside a managed distribution, the vulnerability was fixed in the vanilla Linux kernel in version 5.16.2. It is recommended to perform a kernel update to this version or alternatively apply the vulnerability patch to your kernel source code and rebuild the kernel.
+What Are Mitigations for CVE-2022-0185?
+If upgrading or patching the kernel is not possible, it is highly important to narrow down the number of privileged containers to the minimum possible. Also as mitigation for unprivileged containers, it is recommended to disable Linux unprivileged user namespaces with the following command:
+Stay Up-to-Date with Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter at @JFrogSecurity.
+legacy_parse_param
+ctx->legacy_data
+ctx->data_size
+PAGE_SIZE - 2 - size
+PAGE_SIZE
+fsopen()
+CAP_SYS_ADMIN
+--privileged
+CAP_SYS_ADMIN
+CAP_SYS_ADMIN
+unshare
+seccomp

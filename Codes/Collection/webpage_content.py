@@ -21,6 +21,7 @@ import subprocess
 import requests
 from selenium import webdriver
 # from Configs.config import HEADER
+from selenium.common import TimeoutException
 from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup, Tag
 from selenium.webdriver.chrome.service import Service
@@ -300,9 +301,14 @@ class WebPageContent:
         element_html = element.get_attribute('outerHTML')
         soup = BeautifulSoup(element_html, 'html.parser')
 
-        # Process all tags recursively
-        for tag in soup.find_all(recursive=True):
-            process_tag(tag)
+        # Check if the element contains any of the specified tags
+        if soup.find('p'):
+            # Process all tags recursively
+            for tag in soup.find_all(recursive=True):
+                process_tag(tag)
+        else:
+            # If no specified tags are found, extract the text directly
+            page_content = soup.get_text().strip()
 
         return page_content
 
@@ -317,19 +323,24 @@ class WebPageContent:
     def aabbcc_content(self):
         driver = webdriver.Chrome(service=self.service, options=self.options)
         driver.implicitly_wait(5)
-        timestamp = "checkmarx1"
-        # page_url = "https://snyk.io/blog/securing-artifactory-using-snyk/"
-        page_url = "https://www.sonatype.com/blog/npm-packages-caught-exfiltrating-kubernetes-config-ssh-keys"
-        print(timestamp, page_url)
-        web_name = 'checkmarx'
-        driver.get(page_url)
-        time.sleep(3)
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.ID, "hs_cos_wrapper_post_body")))  # 等待页面元素加载
-        article_content = driver.find_element(By.ID, "hs_cos_wrapper_post_body")  # 定位文章内容元素
-        page_content = self.parse_elements(driver, article_content, web_name, timestamp)
-        print(page_content)
+        timestamp = "thehackernews_test"
+        page_url = "https://thehackernews.com/2020/09/cisco-issue-warning-over-ios-xr-zero.html"
+        # page_url = "https://blog.sonatype.com/what-is-owasp"
+        print('aabbcc', timestamp, page_url)
+        web_name = 'thehackernews'
+        driver.get(page_url)  # 打开指定的网页
+
+
+        time.sleep(3)  # 等待页面加载
+        try:
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "articlebody")))
+            # 如果找到元素，继续执行后续代码
+            print("find element")
+            post_content = driver.find_element(By.ID, "articlebody")
+            webpage_content = self.parse_elements(driver, post_content, web_name, timestamp)
+            print(webpage_content)
+        except TimeoutException:
+            print("在指定时间内没有找到ID为'articlebody'的元素")
 
     def medium_content(self):
         driver = webdriver.Chrome(service=self.service, options=self.options)
@@ -340,7 +351,7 @@ class WebPageContent:
             if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
                 print("medium processed:", timestamp)
                 continue
-            print(page_url)
+            print('medium', page_url)
             try:
                 filename = timestamp + ".txt"
                 count += 1
@@ -426,10 +437,11 @@ class WebPageContent:
                 print("qianxin processed:", timestamp)
                 continue
 
+            print("qianxin", page_url)
+            driver.get(page_url)
+            time.sleep(3)  # 等待页面加载
+            filename = timestamp + ".txt"
             try:
-                print("qianxin", page_url)
-                driver.get(page_url)
-                filename = timestamp + ".txt"
                 WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "post-content")))
                 post_content = driver.find_element(By.CLASS_NAME, "post-content")
                 #  递归遍历article_content中的所有标签，直到没有子标签为止，如果子标签是p标签，code标签，h1标签，h2标签，h3标签，则输出标签的内容，如果是table标签的话，就需要单独处理，还原出表格的内容和格式，但是需要注意的是当解析了标签的内容之后，就需要跳过这个标签，以防止输出重复
@@ -439,6 +451,79 @@ class WebPageContent:
                 self.write_collected_pagelinks(timestamp, 'qianxin', postdate, page_url)
             except:
                 print('qianxin', page_url, "------Error-------")
+
+    def sonatype_content(self):
+        driver = webdriver.Chrome(service=self.service, options=self.options)
+        driver.implicitly_wait(5)
+
+        web_name = 'sonatype'
+        for timestamp, postdate, page_url in self.webpage_dict["sonatype"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("sonatype processed:", timestamp)
+                continue
+
+            try:
+                print("sonatype", page_url)
+                driver.get(page_url)
+                time.sleep(3)  # 等待页面加载
+                filename = timestamp + ".txt"
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "hs_cos_wrapper_post_body")))
+                post_content = driver.find_element(By.ID, "hs_cos_wrapper_post_body")
+                webpage_content = self.parse_elements(driver, post_content, web_name, timestamp)
+                print(webpage_content)
+                self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "sonatype"), filename))
+                self.write_collected_pagelinks(timestamp, 'sonatype', postdate, page_url)
+            except:
+                print('sonatype', page_url, "------Error-------")
+
+    def thehackernews_content(self):
+        driver = webdriver.Chrome(service=self.service, options=self.options)
+        driver.implicitly_wait(5)
+
+        web_name = 'thehackernews'
+        for timestamp, postdate, page_url in self.webpage_dict["thehackernews"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("thehackernews processed:", timestamp)
+                continue
+
+            try:
+                print("thehackernews", page_url)
+                driver.get(page_url)
+                time.sleep(5)  # 等待页面加载
+                filename = timestamp + ".txt"
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "articlebody")))
+                post_content = driver.find_element(By.ID, "articlebody")
+                webpage_content = self.parse_elements(driver, post_content, web_name, timestamp)
+                print(webpage_content)
+                self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "thehackernews"), filename))
+                self.write_collected_pagelinks(timestamp, 'thehackernews', postdate, page_url)
+            except:
+                print('thehackernews', page_url, "------Error-------")
+
+    def securityweek_content(self):
+        driver = webdriver.Chrome(service=self.service, options=self.options)
+        driver.implicitly_wait(5)
+
+        web_name = 'securityweek'
+        for timestamp, postdate, page_url in self.webpage_dict["securityweek"]:
+            if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
+                print("securityweek processed:", timestamp)
+                continue
+
+            try:
+                print("securityweek", page_url)
+                driver.get(page_url)
+                time.sleep(3)  # 等待页面加载
+                filename = timestamp + ".txt"
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".zox-post-body.left.zoxrel.zox100")))
+                post_content = driver.find_element(By.CSS_SELECTOR, ".zox-post-body.left.zoxrel.zox100")
+
+                webpage_content = self.parse_elements(driver, post_content, web_name, timestamp)
+                print(webpage_content)
+                self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "securityweek"), filename))
+                self.write_collected_pagelinks(timestamp, 'securityweek', postdate, page_url)
+            except:
+                print('securityweek', page_url, "------Error-------")
 
     def snyk_content(self):
         driver = webdriver.Chrome(service=self.service, options=self.options)
@@ -508,17 +593,17 @@ class WebPageContent:
                 driver.get(page_url)
                 time.sleep(10)
                 filename = timestamp + ".txt"
-                try:
-                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                    WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CLASS_NAME, "article-section")))
-                    # driver.execute_script("window.stop();")  # 立即停止加载其余部分
-                except:
-                    article_section = driver.find_element(By.CLASS_NAME, "article-section")
-                    webpage_content = self.parse_elements(driver, article_section, web_name, timestamp)
-                    print(webpage_content)
-                    self.write_text(webpage_content,
-                                    os.path.join(os.path.join(self.text_dir, "bleepingcomputer_pypi"), filename))
-                    self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
+
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CLASS_NAME, "articleBody")))
+                # driver.execute_script("window.stop();")  # 立即停止加载其余部分
+
+                article_section = driver.find_element(By.CLASS_NAME, "articleBody")
+                webpage_content = self.parse_elements(driver, article_section, web_name, timestamp)
+                print(webpage_content)
+                self.write_text(webpage_content,
+                                os.path.join(os.path.join(self.text_dir, "bleepingcomputer_pypi"), filename))
+                self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
                 print('bleepingcomputer', page_url, "------Error-------")
 
@@ -588,7 +673,7 @@ class WebPageContent:
         # 遍历self.webpage_dict["checkmarx"]中的每个元素，元素为(timestamp, page_url)的元组
         for timestamp, postdate, page_url in self.webpage_dict["checkmarx"]:
             if web_name in self.processed_files and timestamp in self.processed_files[web_name]:
-                print("qianxin processed:", timestamp)
+                print("checkmarx processed:", timestamp)
                 continue
 
             count += 1
@@ -636,13 +721,13 @@ class WebPageContent:
                 driver.get(page_url)
                 time.sleep(3)
                 filename = timestamp + ".txt"
-                print('timestamp:', timestamp, 'page_url:', page_url)
+                print('datadoghq', 'timestamp:', timestamp, 'page_url:', page_url)
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, ".article-content.relative")))
                 article_content = driver.find_element(By.CSS_SELECTOR, ".article-content.relative")
                 webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
-                # print(webpage_content)
+                print(webpage_content)
                 self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "datadoghq"), filename))
                 self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
@@ -659,7 +744,7 @@ class WebPageContent:
                 continue
 
             try:
-                print('timestamp:', timestamp, 'page_url:', page_url)
+                print('socket', 'timestamp:', timestamp, 'page_url:', page_url)
                 filename = timestamp + ".txt"
 
                 count += 1
@@ -760,7 +845,7 @@ class WebPageContent:
                                 os.path.join(os.path.join(self.text_dir, "cybersecuritynews"), filename))
                 self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
-                print("cybersecuritynews Error: ", filename)
+                print('cybersecuritynews', page_url, "------Error-------")
                 # 发生异常时，将空字符串写入文件
                 # self.write_text("", os.path.join(os.path.join(self.text_dir, "cybersecuritynews"), filename))
 
@@ -778,19 +863,21 @@ class WebPageContent:
 
             filename = timestamp + ".txt"
             try:
-                print(timestamp, page_url)
+                print('tuxcare', timestamp, page_url)
                 count += 1
                 driver.get(page_url)
                 time.sleep(3)
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "tcl-m-content")))
-                article_content = driver.find_element(By.CLASS_NAME, "tcl-m-content")
+                # WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "tcl-m-content")))
+                # article_content = driver.find_element(By.CLASS_NAME, "tcl-m-content")
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "single-press-releases_inn")))
+                article_content = driver.find_element(By.CLASS_NAME, "single-press-releases_inn")
                 webpage_content = self.parse_elements(driver, article_content, web_name, timestamp)
                 print(webpage_content)
                 self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "tuxcare"), filename))
                 self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
-                print("tuxcare Error: ", filename)
+                print('tuxcare', page_url, "------Error-------")
                 # self.write_text("", os.path.join(os.path.join(self.text_dir, "tuxcare"), filename))
 
     def reversinglabs_content(self):
@@ -807,7 +894,7 @@ class WebPageContent:
 
             filename = timestamp + ".txt"
             try:
-                print(timestamp, page_url)
+                print('reversinglabs', timestamp, page_url)
                 count += 1
                 driver.get(page_url)
                 time.sleep(3)
@@ -819,7 +906,7 @@ class WebPageContent:
                 self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "reversinglabs"), filename))
                 self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
-                print("reversinglabs Error: ", filename)
+                print('reversinglabs', page_url, "------Error-------")
 
     def fortinet_content(self):
         web_name = 'fortinet'
@@ -835,7 +922,7 @@ class WebPageContent:
 
             filename = timestamp + ".txt"
             try:
-                print(timestamp, page_url)
+                print('fortinet', timestamp, page_url)
                 count += 1
                 driver.get(page_url)
                 time.sleep(3)
@@ -848,7 +935,7 @@ class WebPageContent:
                 self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "fortinet"), filename))
                 self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
-                print("fortinet Error: ", filename)
+                print('fortinet', page_url, "------Error-------")
 
     def securityaffairs_content(self):
         web_name = 'securityaffairs'
@@ -875,7 +962,7 @@ class WebPageContent:
                 self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "securityaffairs"), filename))
                 self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
-                print("securityaffairs Error: ", filename)
+                print('securityaffairs', page_url, "------Error-------")
 
     def phylum_content(self):
         web_name = 'phylum'
@@ -904,7 +991,7 @@ class WebPageContent:
                 self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "phylum"), filename))
                 self.write_collected_pagelinks(timestamp, 'phylum', postdate, page_url)
             except:
-                print("phylum Error: ", filename)
+                print('phylum', page_url, "------Error-------")
 
     def checkpoint_content(self):
         web_name = 'checkpoint'
@@ -921,7 +1008,7 @@ class WebPageContent:
             filename = timestamp + ".txt"
 
             try:
-                print(timestamp, page_url)
+                print('checkpoint', timestamp, page_url)
                 count += 1
                 driver.get(page_url)
                 time.sleep(3)
@@ -933,7 +1020,7 @@ class WebPageContent:
                 self.write_text(webpage_content, os.path.join(os.path.join(self.text_dir, "checkpoint"), filename))
                 self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
-                print("checkpoint Error: ", filename)
+                print('checkpoint', page_url, "------Error-------")
 
     def reddit_content(self):
         self.client_id = ''
@@ -969,8 +1056,8 @@ if __name__ == '__main__':
     webpage_content = WebPageContent()
     webpage_content.read_txt()
     webpage_content.find_processed_files()
-    # webpage_content.qianxin_content()
-    webpage_content.jfrog_content()  # 这个大部分都是Error，看下
+    # webpage_content.qianxin_content()  # 'NoneType' object has no attribute 'find_all'
+    # webpage_content.jfrog_content()
     # webpage_content.tuxcare_content()
     # webpage_content.fortinet_content()
     # webpage_content.datadoghq_content()
@@ -980,7 +1067,7 @@ if __name__ == '__main__':
     # webpage_content.rhisac_content()
     # webpage_content.socket_content()
     # webpage_content.cybersecuritynews_content()
-    # webpage_content.bleepingcomputer_content()  # 这儿有问题，单独看下
+    webpage_content.bleepingcomputer_content()
     # webpage_content.snyk_content()
     # webpage_content.twitter_content()
     # webpage_content.reddit_content()  # 有问题
@@ -988,6 +1075,9 @@ if __name__ == '__main__':
     # webpage_content.medium_content()
     # webpage_content.sonatype_oss_content()
     # webpage_content.checkmarx_content()
-    # webpage_content.medium_recommand_content()  # 许多内容是members only，还有许多是error哈哈哈
+    # webpage_content.medium_recommand_content()
     # webpage_content.phylum_content()
+    # webpage_content.thehackernews_content()  # 20250102_114704_885430 这里后面的内容没包含在 <p> 里，只采集了文本
+    # webpage_content.sonatype_content()
+    # webpage_content.securityweek_content()  # 需要验证是否为真人
     # webpage_content.aabbcc_content()

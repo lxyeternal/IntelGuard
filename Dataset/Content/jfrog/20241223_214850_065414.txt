@@ -1,0 +1,132 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214850_065414\HelmChartBestPractices_862C397E2808A300.png
+
+Kubernetes, the popular orchestration tool for container applications, is named for the Greek word for “pilot,” or the one who steers the ship. But as in any journey, the navigator can only be as successful as the available map.
+An application’s Helm chart is that map, a collection of files that can be deployed from a helm charts repository that describe a related set of K8s resources. Crafting your Helm charts in the most effective way will help Kubernetes maneuver through the shoals when it deploys containers into your production environment.
+But there are other ways to go adrift too, as I found while developing publicly available K8s charts to deploy products. With every pull request, feedback from the Helm community helped steer me to the Helm charts best practices that offered the strongest results for both operating and updating containers.
+Here are some things to consider when writing K8s charts that will be used by the community or customers in production. Among the things you need to think about are:
+
+What dependencies do you need to define?
+Will your application need a persistent state to operate?
+How will you handle security through secrets and permissions?
+How will you control running kubelet containers?
+How will you assure your applications are running and able to receive calls?
+How will you expose the application’s services to the world?
+How will you test your chart?
+This guide offers some best practices to structure and specify your Helm charts that will help K8s deliver your container applications smoothly into dock.
+Getting Started
+Before you start, make sure you are familiar with the essential procedures for developing Helm charts.
+In this guide, we will create a Helm chart that follows the best practices we recommend to deploy a two-tier create, read, update, and delete (CRUD) application for the Mongo database using Express.js.
+You can find the source code of our example application in express-crud in GitHub.
+Creating and filling the Helm chart
+Let’s create our template helm chart using the helm client’s create command:
+This will create a directory structure for an express-crud Helm chart.
+To start, update the chart metadata in the Chart.yaml file that was just created. Make sure to add proper information for appVersion (the application version to be used as docker image tag), description, version (a SemVer 2 version string), sources, maintainers and icon.
+Defining Dependencies
+If your application has dependencies, then you must create a requirements.yaml file in the Helm chart’s directory structure that specifies them. Since our application needs the mongodb database, we must specify it in the dependencies list of the requirements.yaml file we create.
+
+
+
+A requirements.yaml for this example contains:
+Once a requirements.yaml file is created, you must run the dependency update  command in the Helm client:
+Creating deployment files
+The deployment files of your Helm chart reside in the \templates subdirectory and specify how K8s will deploy the container application.
+As you develop your deployment files, there are some key decisions that you will need to make.
+Deployment Object vs StatefulSet Object
+The deployment file you create will depend on whether the application requires K8s to manage it as a Deployment Object or a StatefulSet Object.
+A Deployment Object is a stateless application that is declared in the filename deployment.yaml and specifies the kind parameter as deployment.
+A Stateful Object is for applications that are stateful and used with distributed systems. They are declared in the filename stateless.yaml and species the kind parameter as stateful.
+
+
+Deployments are meant for stateless usage and are rather lightweight.	StatefulSets are used when state has to be persisted. Therefore it uses volumeClaimTemplates on persistent volumes to ensure they can keep the state across component restarts.
+If your application is stateless or if state can be built up from backend-systems during the start then use Deployments.	If your application is stateful or if you want to deploy stateful storage on top of Kubernetes use a StatefulSet.
+
+As this application does not need state to be persisted I am using deployment object.
+
+The deployment.yaml file has already been created by the helm create command.
+We will use AppVersion as the Docker image tag for our application. That allows us to upgrade Helm chart with new version of Application by just changing value in Chart.yaml
+Secret Versus ConfigMap
+You will need to determine which of the credentials or configuration data is appropriate to store as secrets, and which can be in a ConfigMap.
+Secrets are for sensitive information such as passwords that K8s will store in an encrypted format.
+A ConfigMap is a file that contains configuration information that may be shared by applications. The information in a ConfigMap is not encrypted, so should not contain any sensitive information.
+
+
+Putting this information in a secret is safer and more flexible than putting it verbatim in a pod definition or in a docker image;	A ConfigMap allows you to decouple configuration artifacts from image content to keep containerized applications portable
+Used for confidential data	Used for non-confidential data
+Example uses: API Keys, Password, Tokens and ssh keys	Example uses: Log rotators, Configuration without confidential data
+
+In this example, we shall allow Helm to pull docker images from private docker registries using image pull secrets.
+This procedure relies on having a secret available to the Kubernetes cluster that specifies the login credentials for the repository manager. This secret can be created by a kubectl command line such as:
+In the values.yaml file of your Helm chart, you can then pass the secret name to a value:
+You can then make use of the secret to allow Helm to access the docker registry through these lines in deployment.yaml:
+For secrets available to the application, you should add that information directly to values.yaml.
+For example, to configure our application to access mongodb with a pre-created user and database, add that information in values.yaml
+Note that here we do not hardcode default credentials in our Helm chart. Instead, we use logic to randomly generate password when it is not provided via –set flag or values.yaml
+We will use a secret to pass mongodb credentials to our application, through these lines in deployment.yaml.
+You can control the running of kubelet containers either through specialized Init Containers or through Container Lifecycle Hooks.
+
+
+
+InitContainers are specialized Containers that run before app Containers and can contain utilities or setup scripts not present in an app image.	Containers can use the Container lifecycle hook framework to run code triggered by events during their management lifecycle.
+A Pod can have one or more Init Containers, which are run before the app Containers are started.	A Pod can have only one PostStart or PreStop hook
+	PostStart hook executes immediately after a container is created. However, there is no guarantee that the hook will execute before the container ENTRYPOINT. No parameters are passed to the handler.
+
+e.g Moving files mounted using ConfigMap/Secrets to different location.
+	PreStop hook is called immediately before a container is terminated. It is blocking, meaning it is synchronous, so it must complete before the call to delete the container can be sent.
+e.g Gracefully shutdown application
+You can use initContainers to add waits to check that dependent microservices are functional before proceeding.	You can use PostStart hook to updated file in same pod for e.g updating configuration files with Service IP
+
+In our example, add these initContainers specifications to deployments.yaml to hold the start of our application until the database is up and running.
+Adding Readiness and Liveness Probes
+It’s often a good idea to add a readiness and a liveness probe to check the ongoing health of the application. If you don’t, then the application could fail in a way that it appears to be running, but doesn’t respond to calls or queries.
+These lines in the deployment.yaml file will add those probes to perform periodic checks:
+Adding RBAC Support
+These procedures will add role-based access control (RBAC)  support to our chart, when it is required by an application.
+Step 1: Create a Role by adding the following content in a role.yaml file: 
+
+A Role can only be used to grant access to resources within a single namespace.
+Step 2: Create RoleBinding by adding the following content in a rolebinding.yaml file:
+
+A ClusterRole can be used to grant the same permissions as a Role, but because they are cluster-scoped, they can also be used to grant access to:
+
+cluster-scoped resources (like nodes)
+non-resource endpoints (like “/healthz”)
+namespaced resources (like pods) across all namespaces
+Step 3: Create a ServiceAccount by adding the following content in a serviceaccount.yaml file:
+A service account provides an identity for processes that run in a Pod.
+Step 4: Use helper template to set ServiceAccount name.
+
+We will do that by adding following content in _helpers.tpl file
+Adding a Service
+Now it’s time to expose our application to the world through a service.
+A service allows your application to receive traffic through an IP address. Services can be exposed in different ways by specifying a type:
+
+
+NodePort	The service is accessible from outside the cluster through the NodeIP and NodePort.
+LoadBalancer	The service is accessible from outside the cluster through an external load balancer. Can Ingress to the application..
+We will do that by adding the following content to service.yaml:
+Note that in the above, for our service type we reference a setting in our values.yaml:
+Values.yaml Summary
+Defining many of our settings in a values.yaml  file is a good practice to help keep your Helm charts maintainable.
+This is how the values.yaml file for our example appears, showing the variety of settings we define for many of the features discussed above:
+Testing and Installing the Helm Chart
+It’s very important to test our Helm chart, which we’ll do using the helm lint command.
+Use the helm install command to deploy our application using helm chart on Kubernetes.
+Running the above helm install command will produce an External_IP for the Load Balancer. You can use this IP address to run the application.
+This is how our application appears when run:
+
+Wrapping Up
+As you can see from this example, Helm is an extremely versatile system that allows you a great deal of flexibility in how you structure and develop a chart. Doing so in the ways that match the conventions of the Helm community will help ease the process of submitting your Helm charts for public use, as well as making them much easier to maintain as you update your application.
+The completed Helm charts for this example project can be found in the express-crud repo on GitHub, and you may review these functioning files to help you to more thoroughly understand how they work.
+To explore more examples, you can review my sample repository of Helm charts for deploying  products to Kubernetes.
+
+Additional Resources:
+
+Helm repository best practices
+What is Helm in Kubernetes
+Kubernetes Cheat Sheet
+
+
+
+
+e.g Gracefully shutdown application

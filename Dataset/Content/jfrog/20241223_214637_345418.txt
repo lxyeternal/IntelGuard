@@ -1,0 +1,44 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214637_345418\HowWeImprovedOurDBSyncPerformance864x3011.png
+
+TL;DR
+We all want to develop everything super fast. So, when something like a “simple” database sync process takes ages, we need to think outside the box. Here are the solutions we implemented, in JFrog Xray, to improve our DB performance, reducing the sync time from 16 hours to 2 hours!
+What is JFrog Xray
+First, before we dive into the challenge and solution, let’s recap what is JFrog Xray. JFrog Xray is a tool for DevSecOps teams, used to gain insight into the open source components in software applications. Through deep recursive scanning of artifacts stored in JFrog Artifactory repositories, Xray identifies security vulnerabilities and helps assure license compliance with the policies defined for an organization.
+How Xray works today
+To scan vulnerabilities and verify license compliance, Xray uses a big database that contains many public components, vulnerabilities and licenses. When installing Xray for the first time, there is an initial DB sync, that  downloads and stores all the public data that is known to Xray, which is the central knowledgebase of public information.
+Today, the compressed size of this database is approximately 6GB, and it is growing every day. To extract the downloaded data requires 45GB of disk space when saved to the Xray database. To store this data into the Postgres database, Xray extracts 100MB zip files, and analyzes 2000 objects in json files that are in the zip files. This used to take almost 15 hours! with the minimum system requirements.
+* Image credit
+Possible solutions
+To tackle this challenge, the Xray team considered several different solutions that have similar behaviors. The first solution was to distribute the data that’s already there, as database tables, instead of recreating it on the user end. In this case, we end up with much more data to distribute as part of our software. Another option was to use online servers to get information about components and vulnerabilities which could take a lot of time. The third option was a hybrid one, which was to have a central database for components that were being used less and distribute the common components. So, we decided to combine all three solutions.
+Starting with the investigation steps
+To investigate the current state, we used the pprof tool. pprof is a cpu profiler that is part of the gperftools developed by Google for analyzing multi-threaded applications. pprof comes with the ability to generate graphviz visualizations of a program’s call graph. The results showed that Xray was spending a lot of time on database operations. Here’s an example of what a pprof graph looks like:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214637_345418\Examplepprofgraph.png
+
+Example pprof graph
+We found many single entry inserts, instead of batch, such as:
+Where we could use:
+IMPROVEMENT #1: The big challenge was consolidating this improvement into our code, and so we created a small queue to handle a specific duration or size.
+Aggregation
+We Internally aggregated the objects in go channels and drained them every 500 milliseconds or 100 objects.
+This was one of the major improvements we did. Including all the previous changes and this one, we measured an approximate 60% performance improvement over the original time.
+Initial DB Sync vs Daily DB Sync
+Improving the initial database sync was important. Initially, the DB is empty and we know that 99% of the objects are added and not updated. Therefore…
+
+IMPROVEMENT #2: We chose to go with an optimistic approach that tries to insert the data instead of selecting the object and working accordingly. This helped improve the performance a bit more by reducing a few more hours.
+However, the daily sync was a different story, since we already have a DB containing information about components and vulnerabilities (it’s not the first time that we are running it), and we want to make sure that this DB is automatically or manually updated with any new vulnerabilities.
+We love workers
+Today, Xray uses different workers like following three:
+
+Zip file workers
+Json file workers
+Components/vulnerabilities workers (the entities in the json files)
+IMPROVEMENT #3: Xray uses workers to read raw files in parallel rather than reading components on one file in parallel, which helps us to keep the server working. The zip files include 100MB that contains the json files that have 2000 entities.
+Population that help us to reduce the indexing
+Since we insert a large amount of data and are optimistic (remember, we added it only for the initial DB sync), we applied the following method for the biggest table at the end of the process. IMPROVEMENT #4: populating the biggest table by creating the tables with a bulk load of the table’s data, using copy, and afterward we create the indexes that are needed for the table. As you may know index creation of pre-existing data is quicker than updating it incrementally as each row is loaded.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214637_345418\JFrogXraySummaryofPerformanceImprovement1.png
+
+JFrog Xray Summary of Performance Improvement
+To summarize
+Hopefully these improvements help you with similar behaviors that you may be experiencing. Stay tuned for more Xray improvements.
+Want to hear more about our DB improvements? Watch our talk at swampUP, the DevOps user conference >

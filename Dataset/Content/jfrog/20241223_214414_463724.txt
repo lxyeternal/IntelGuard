@@ -1,0 +1,82 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214414_463724\863x300_1.png
+
+How did we get here?
+On October 25th, The OpenSSL team announced that OpenSSL 3.0.7 will contain a fix for a critical severity vulnerability that affects OpenSSL 3.x. The full details about the vulnerability were held in an embargo until November 1st.
+Due to the rarity of an OpenSSL critical-severity issue and the overwhelming popularity of OpenSSL, social media was flooded with messages about this issue, expecting a “Log4Shell”-level event.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214414_463724\messages.png
+
+However, when the vulnerability details were released, it seemed that these issues were not as bad as initially thought.
+Two vulnerabilities instead of one, reduced severity
+As the official advisory came out, we were surprised to see that TWO vulnerabilities were fixed in OpenSSL 3.0.7 –
+
+CVE-2022-3602 – a 4-byte stack-buffer overflow that can be triggered when verifying TLS (X.509) certificates
+CVE-2022-3786 – an arbitrary length stack-buffer overflow that can be triggered when verifying TLS (X.509) certificates, but does not let the attacker control the overflown data
+Even more surprising, both of these vulnerabilities were rated as HIGH severity vulnerabilities, unlike the pre-announcement that pegged at least one of them as a CRITICAL severity issue.
+For CVE-2022-3786, it is clear that the issue cannot cause remote code execution (the attacker does not control the overflown data) and therefore a HIGH severity rating makes sense, but for CVE-2022-3602 this is a harder question to answer.
+Why was the severity for CVE-2022-3602 downgraded?
+Looking at the official blogpost and initial exploitation attempts provided a better answer to this question. It seems that CVE-2022-3602 was initially marked as critical severity because the maintainers were expecting this issue to be exploitable for remote code execution (as a stack overflow should be), but because of this, stack overflow is extremely limited (only a 4-byte overwrite) many vendors could not find a common environment where this issue could actually be exploited.
+This point is discussed even further in a very detailed “Anti-PoC” which demonstrates that this issue cannot be exploited in common Linux configurations, due to the overflow either –
+
+Overwriting padding bytes, which has no effect, or
+Overwriting unimportant variables in the overflown function
+That being said, remote code execution cannot be completely ruled out, since OpenSSL may be compiled in an absurd number of configurations and to a vast number of architectures, one of which may fulfill the prerequisites for exploitation.
+It is also worth noting that any machine that runs OpenSSL 3.x (a fairly new version, as noted) will also likely be using stack-buffer-overflow mitigations such as ASLR & StackGuard. Therefore, an attacker would have to find an additional 0-day infoleak vulnerability in order to overcome these mitigations and achieve a full RCE exploitation.
+Who is vulnerable to these issues?
+The OpenSSL team confirmed that only OpenSSL 3.x versions are affected, specifically OpenSSL 3.0.0 – 3.0.7.
+Fortunately, 3.x is a newer branch of OpenSSL, which was released approx. 1 year ago (Sep. 2021) and hasn’t been widely adopted yet.
+Popular distributions that use OpenSSL 3.x are
+
+Alpine Edge (dev branch)
+CentOS Stream 9 (dev branch)
+Fedora 36
+Kali 2022.3
+Linux Mint 21
+Red Hat Enterprise Linux 9
+Ubuntu 22.04
+Note that there are popular open-source projects that are known to use OpenSSL 3.x, such as Node.js 17 and later, which already announced a security update will be available on Nov. 1st as well, although the exact impact of this issue on Node.js users is not known at this time.
+Also, it has been confirmed that LibreSSL is not affected by this issue.
+There are additional lists of common 3rd-party software that is affected (or unaffected) by this issue, specifically by the NCSC-NL and a crowdsourced list.
+What are the attack scenarios for these issues?
+Since both vulnerabilities require a properly-signed TLS certificate to be verified by OpenSSL 3.x (either an OpenSSL TLS client or TLS server) the most likely attack scenarios are
+
+An OpenSSL 3.x-enabled TLS server accepts client certificates (TLS client authentication is enabled). This is usually a non-default option for TLS servers. If assuming RCE is unlikely, this is the more severe scenario.
+An OpenSSL 3.x-enabled TLS client accesses a malicious TLS server, for example, if a browser follows a link to a malicious website via a Phishing attack.
+How can these issues be remediated?
+The recommended fix for both CVE-2022-3602 and CVE-2022-3786 is to update OpenSSL to version 3.0.7.
+Ubuntu 22.04 users can upgrade the “openssl” package to version 3.0.2-0ubuntu1.7
+Red Hat Enterprise Linux 9 users can upgrade the “openssl” package to version openssl-3.0.1-43.el9_0
+Can these issues be mitigated without upgrading OpenSSL?
+If we currently assume that RCE is impossible (or at least highly unlikely), then the exploitation of CVE-2022-3786 against TLS servers is the only remaining alarming issue, since it will cause a denial of service on active TLS services (using the vulnerability to crash a singular TLS client is less concerning).
+As mentioned, the most likely attack vector would be a malicious client sending a TLS client certificate to an OpenSSL 3.x-based TLS server that is willing to accept a client certificate.
+Fortunately, the vast majority of TLS servers do not accept or verify client certificates by default, therefore, if your specific TLS server is configured to verify client certificates, the vulnerability can be mitigated by temporarily disabling the verification of client certificates.
+This process is different for each TLS server, but for example on a Node.js TLS server –
+var https = require('https');
+var fs = require('fs');
+ 
+var options = {
+  key:    fs.readFileSync('/etc/pki/tls/private/ca.key'),
+  cert:   fs.readFileSync('/etc/pki/tls/certs/ca.crt'),
+ 
+// Enable client certificate authentication!
+  requestCert: true,
+...
+https.createServer(options, ...
+Changing requestCert to false would mitigate the issue.
+How can I check if my servers are affected by these issues?
+Following up on the previous section, TLS servers can be easily queried to check if they require a TLS certificate, by using curl:
+curl https://server-to-test.org 2>&1 | grep "certificate required"
+An answer of “certificate required” strongly hints that the server will try to verify client certificates, making it remotely vulnerable to CVE-2022-3602 and CVE-2022-3786. In this case we strongly recommend upgrading your OpenSSL version to 3.0.7 in order to avoid DoS.
+A negative answer doesn’t guarantee that the server isn’t vulnerable, since the server may accept TLS client certificates but not require them.
+In addition to the above check, it is possible to check if a statically-linked binary contains the vulnerable function with a simple readelf invocation:
+readelf -a [binary] | grep -i ossl_punycode_decode
+How can I use JFrog Xray to detect CVE-2022-3602 and CVE-2022-3786?
+JFrog Xray can detect CVE-2022-3602 and CVE-2022-3786 via the normal vulnerabilities scan and provides extra information about these vulnerabilities directly from our security research team.
+Scanning is supported on Ubuntu, Red Hat, Alpine, and non-distro-specific images.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214414_463724\TITLE.png
+
+As always, scanning with the JFrog CLI or IDE Plugin is fully supported.
+Stay up-to-date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter @JFrogSecurity.
+Find vulnerable versions with JFrog Xray
+In addition to exposing new security vulnerabilities and threats through our research team, our JFrog Xray SCA tool provides developers and security teams easy access to the latest relevant security insights for their software with automated security scanning.

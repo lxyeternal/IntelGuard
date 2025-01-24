@@ -1,0 +1,106 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214718_205222\863_300RAUC.jpg
+
+JFrog’s security research team (formerly Vdoo) are constantly researching leading embedded devices and their supply chain. As part of this research, we discovered CVE-2020-25860, a potentially critical vulnerability with CVSSv3 8.8 score in a Robust Auto-Update Controller (RAUC), an open-source framework for firmware updates. JFrog has responsibly disclosed this vulnerability and have worked closely with the vendor Pengutronix on verifying the fix to the vulnerability. Customers have been notified by Pengutronix that also published a security advisory on the official GitHub repository. This vulnerability exists in all versions of RAUC until 1.5, which contains the patch.
+The vulnerability is a Time-of-Check-Time-of-Use (CWE-367) issue which allows an attacker with access to the firmware update file to overwrite it after it has been verified (but before installation is completed), which consequently allows installing an arbitrary firmware update, bypassing the cryptographic signature check mechanism.
+Effects of this vulnerability
+As always with supply-chain vulnerabilities, it is difficult to estimate exactly how many devices are affected by it. This estimation is even more complex given that this is an open-source tool and it can be used by many different companies who have no relationship with the vendor. As such, Pengutronix can attest to its prevalence based on their customers, which they estimate at up to 100,000 devices in the field, but we believe the numbers are much higher as RAUC provides a core capability that most devices need. We have seen RAUC used in several different devices in multiple verticals such as industrial, smart buildings and medical. As we will elaborate below, this vulnerability also requires certain conditions in order to be exploited, especially remotely. We have seen these conditions met in at least one real-world device. However, currently, to the best of our knowledge, this vulnerability was not exploited in the field, and therefore, did not lead to any concrete privacy violation or security threat to anyone who uses RAUC.
+Background on RAUC
+RAUC is a project that started in 2015 and was developed to be a lightweight tool that performs fail-safe secure image updates for Linux-based embedded devices.
+RAUC allows embedded Linux developers to integrate a robust update client on their embedded device, with minimal effort and while avoiding writing any boilerplate update code. The RAUC framework supports many common bootloaders (U-Boot, grub, etc.)  and storage technologies (ext4, UBIFS, etc.) out of the box, and as such tries to be as close as possible to a “turnkey” solution for embedded device firmware updates.
+RAUC’s key features are safety (atomic, fail-safe update operation), security (cryptographic signature checking) and customizability (adding user hooks in the installation process).
+Technical Deep-Dive
+RAUC uses a bundle file as an archive that holds a new firmware. We found that during the firmware upgrade process this file can be replaced by an attacker (after the initial validation step) and by doing so a malicious firmware will be installed, effectively allowing the attacker to take control over the system.
+When running rauc install bundle.raucb RAUC runs the following internal functions:
+
+check_bundle() – validates the bundle using an openssl library call
+mount_bundle() – mounts the bundle using a “mount” shell invocation
+After these steps, the mounted bundle is extracted and overwrites the current firmware.
+The critical issue is that once check_bundle() finishes running, the bundle file is closed, and the verified data is not retained in any way.
+When mount_bundle() starts running, the mount shell invocation causes a re-read of the bundle data:
+Consequently – an attacker can switch the bundle file between the calls check_bundle() and mount_bundle(). This lets the attacker deploy an arbitrary malicious firmware which essentially provides root privileges on the device:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214718_205222\1_theattackflow.png
+
+Figure 1: the attack flow, by the time the process reaches mount_bundle() the attacker can replace the bundle file so RAUC will mount an unauthorized bundle
+The chances of winning the race condition (replacing the bundle file between the check/mount bundle calls) are very high, since there is a non-negligible amount of code between the two operations including a shell invocation (the “mount” command), which is a very slow operation.
+Observed remote attack scenario
+Although in most cases we believe the vulnerability will be exploitable as a local privilege escalation, we have observed a real-world scenario where the vulnerability was exploitable by a remote attacker, while leveraging a set of default hardcoded credentials.
+The target device used a set of default hard coded credentials (username and password set to “admin”) which were not required to be changed on first login.
+These credentials can be easily extracted by an attacker that has access to the device firmware, or guessed via a simple brute force attack.
+Looking at the device’s attack surface:
+
+The target device exposed an authenticated CGI endpoint upload.cgi which allowed arbitrary file upload to a hardcoded file path – /tmp/rauc/bundle.raucb
+The target device exposed an authenticated CGI endpoint install.cgi which ran the hardcoded shell command – rauc install /tmp/rauc/bundle.raucb
+There was no locking mechanism in place between the two CGI endpoints
+In this case, an attacker can remotely take over the device, simple by invoking:
+
+upload.cgi with a properly signed firmware
+install.cgi
+(very quickly) upload.cgi with a malicious firmware
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214718_205222\2_Observedremoteattackscenario.png
+
+Local attack scenario and PoC
+Assuming the local user has privileges for invoking RAUC (for example, through a sudo configuration that allows only the rauc command), but does not have the private key needed to sign a RAUC bundle, exploitation is trivial:
+Copy a properly signed firmware to some path, for example: ./bundle.raucb
+Invoke RAUC – sudo rauc install ./bundle.raucb
+Quickly replace ./bundle.raucb with a malicious firmware
+This scenario can also be exploited if the local user cannot invoke the RAUC command, assuming that the privileged user that invokes the RAUC command uses a path which the attacker can write to.
+We have developed a proof-of-concept that takes advantage of this exact scenario:
+
+The PoC accepts the full path to the bundle file to be replaced
+The PoC waits for another user to run rauc install by monitoring a default directory (/mnt/rauc) that gets created after the verification step but before the mounting step
+As soon as the verification is over (directory is created) the PoC overwrites the bundle file with arbitrary input
+In a real attack scenario, the attacking bundle file could be moved over the properly signed bundle file (which is quicker than writing a new file in the correct location)
+As a device vendor, how do I know if my device is affected by this vulnerability?
+You can check if your version of RAUC is vulnerable by running this command on your device
+If the reported version is lower than 1.5, then your device contains the vulnerable code.
+In practice, the device is only vulnerable if there is a possibility for a local or remote attacker to modify a bundle file while it is being installed.
+This could happen, for example, in the following scenarios:
+
+An unprivileged user can invoke the rauc command with root privileges, either through the sudo mechanism, setuid mechanism or any other proprietary mechanism. For example, the following line in the /etc/sudoers file would allow the “vdoo” user to invoke RAUC as root:
+
+vdoo ALL=(root) /usr/bin/rauc
+rauc install is invoked at any time with a bundle path that can be modified by unprivileged users. For example:
+
+/usr/bin/rauc install /tmp/mybundle.raucb
+
+Since /tmp is world-writable by default, usually any user can modify the files under it.
+As an asset owner, how do I know if any of my deployed devices are vulnerable?
+Unfortunately, it seems hard to tell if this vulnerability exists and more importantly, applicable just with network tools or without actually looking at the device code.
+Having said that, if your device vendor does provide a software bill of materials (SBOM) for the device, please look for whether RAUC is used and if so you are most likely vulnerable (unless the version is listed explicitly as 1.5) in theory as the vulnerable code is present.
+This doesn’t mean that the vulnerability is exploitable though (see more details above). If the device vendor doesn’t provide a software bill of materials (SBOM), we believe you should ask it to provide one as well their explicit response on the applicability of this vulnerability.
+How do I upgrade RAUC?
+Use this link for examples on integration of RAUC version 1.5 into existing projects based on Yocto/OE, ptxdist and buildroot –
+https://github.com/rauc/rauc-1.5-integration/
+You can also compile the latest version of RAUC by following these instructions:
+https://github.com/RAUC/RAUC#building-from-sources
+How to mitigate the risk if upgrading RAUC is not possible?
+As mentioned above, this is a classic Time-of-Check-Time-of-Use vulnerability, where the attack leverages a non-atomic action that involves a check of the resource and usage of the resource. In this case the check is the signature check and the usage is the mount/upgrade operation.
+The attack can be mitigated by making sure the installation is atomic and happens from a secure path.
+Before running rauc install, copy the bundle file from the world-writable location to a secure location (root-writable only) and run the installation from that path. Use the existence of the secure location as a locking mechanism. This will ensure no unprivileged users (either local or remote) can meddle in the installation process.
+This can be done with this example shell script:
+Please note that changing an installation script may not be significantly easier than switching to a fixed RAUC version when using a build system like Yocto. Please see below for details on how to upgrade. For more mitigation details, we refer you back to the official advisory.
+Acknowledgment
+We would like to thank the Pengutronix team for efficiently and promptly handling this security issue, and for their professional conduct of communication. We hold their conduct in the highest regard and they should set the example for any vendor in terms of conduct during a responsible disclosure process.
+Questions? Thoughts? Contact us at research@jfrog.com for any inquiries related to security vulnerabilities.
+In addition to discovering and responsibly disclosing vulnerabilities as part of our day-to-day activities, the JFrog security research team works to enhance software security by empowering organizations to discover vulnerabilities through automated security analysis. For more information and updates on JFrog DevOps Platform security features – click here.
+rauc install bundle.raucb
+upload.cgi
+/tmp/rauc/bundle.raucb
+install.cgi
+– rauc install /tmp/rauc/bundle.raucb
+upload.cgi
+install.cgi
+
+upload.cgi
+./bundle.raucb
+sudo rauc install ./bundle.raucb
+./bundle.raucb
+rauc install
+/mnt/rauc
+rauc
+/etc/sudoers
+vdoo ALL=(root) /usr/bin/rauc
+rauc install
+/usr/bin/rauc install /tmp/mybundle.raucb
+rauc install

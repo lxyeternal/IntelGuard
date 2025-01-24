@@ -1,0 +1,89 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214434_885429\ApacheDoSVulnerabilityCVE202230522_863x300.png
+
+This past March we posted an analysis of a vulnerability in the Apache HTTP Server mod_sed filter module, CVE-2022-23943, in which a Denial of Service (DoS) can be triggered due to a miscalculation of buffers’ sizes.
+While analyzing this Apache httpd vulnerability and its patch, we suspected that although the fix resolved the issue, it created a new unwanted behavior. Our suspicion turned out to be true: we discovered that another way to cause a DoS was introduced. Although Apache rated this vulnerability’s severity as “low”, the CVSS score given by NVD is 7.5 (high). Our rating for this CVE’s severity is “medium” – due to the high DoS impact on the one hand and the rarity of the mod_sed install base on the other.
+Apache’s mod_sed filter module provides the ability to manipulate input and output streams for requests received by the server, and its responses, basically offering the same functionality as GNU’s stream editor tool, sed. As an input filter it can be used to HTTP POST requests’ bodies, and as an output filter it allows modifying the server’s responses before they’re sent to the client.
+This blog post provides an overview of the Apache HTTP Server CVE-2022-30522 vulnerability and guidance on how to remediate, as well as a mitigation option we’ve discovered as part of our research on this vulnerability.
+What is the Apache httpd vulnerability CVE-2022-30522?
+CVE-2022-30522 is a Denial of Service vulnerability in the mod_sed module of the Apache HTTP server. The vulnerability affects Apache httpd 2.4.53 only (since the vulnerability stems from the incomplete patch for CVE-2022-23943), in cases where a mod_sed filter is used for request or response editing.
+This Apache httpd vulnerability is caused due to an attempt to optimize memory allocations while handling stream buffers. When buffers reach a certain size, they are multiplied to avoid performing many calls to memory allocation functions. When sending large amounts of data, Apache’s memory limit is exceeded, which causes the process to abort, effectively causing a Denial of Service.
+Technical summary of CVE-2022-30522
+The Apache httpd mod_sed filter module enables the use of regular expression patterns for input and output stream modifications, just like the original GNU stream editor. In order to use the module, one must modify the Apache httpd configuration file to add the required filter to the wanted route or directory.
+The example below illustrates how mod_sed can be used to edit all request methods to html files, using a pattern that replaces each character in the request’s body with the letter Z:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214434_885429\1_Example.png
+
+Posting 2GB of data (2147483648 bytes) or more when mod_sed is installed and configured with an input filter, results in the handler process calling ap_abort_on_oom() in util.c due to OUT_OF_MEMORY. This happens due to failure of allocator_alloc, where NULL is returned because the requested allocation size is larger than APR_UINT32_MAX. Afterwards abort_on_oom is invoked. The same chain of events occurs when requesting 2GB of data (or more) from the server, as detailed below.
+This results in a DoS error. The handling process aborts after this type of POST request. Although the single process is restarted by the watchdog, sending multiple requests causes all the handler processes to crash, resulting in a complete DoS and the server is unable to handle requests.
+This happens because grow_buffer multiplies the buffer’s size to avoid the number of reallocations, after which apr_pcalloc is called with a requested buffer size of 4GB:
+/* Avoid number of times realloc is called. It could cause huge memory
+     * requirement if line size is huge e.g 2 MB */
+    if (newsize < *cursize * 2) {
+        newsize = *cursize * 2;
+    }
+ 
+    /* Align it to 4 KB boundary */
+    newsize = (newsize  + ((1 << 12) - 1)) & ~((1 << 12) - 1);
+    newbuffer = apr_pcalloc(pool, newsize);
+(sed1.c:103)
+There are actually two crash flows:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214434_885429\3_Example.png
+
+When posting 2GB of data, copying of the original buffer is successful, and it is required to add a NULL terminator at its end. In this case the call to allocator_alloc with a buffer size of 4GB is the result of trying to increase the buffer’s size by 1 to make room for NULL. This happens in sed_finalize_eval:
+When posting over 2GB of data, i.e. 2GB + 1byte, the same thing happens before the original buffer could be copied in its entirety, when trying to reallocate the target holding buffer. This happens in sed_eval_buffer:
+Note that this issue is also relevant for Output Filters, and the following configuration yields the same result when requesting a >=2GB file from the server:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214434_885429\4_Example.png
+
+The crash flow is the same, except that it originates in the sed_response_filter entry point instead of sed_request_filter:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214434_885429\5_Example.png
+
+Who is affected by CVE-2022-30522?
+CVE-2022-30522 affects version 2.4.53 of the Apache HTTP server, given that the mod_sed filter module is used for editing either requests or responses. The issue was fixed in version 2.4.54.
+
+The most severe effect is when mod_sed is used for editing requests, since in this case an attacker can trigger the vulnerability remotely just by sending large amounts of data to the endpoint that uses the sed filter.
+
+As shown above, this is an example vulnerable configuration –
+
+(The actual sed pattern defined in InputSed does not matter, it just has to be non-empty)
+What is the impact of CVE-2022-30522?
+Exploiting this vulnerability requires sending large amounts of data (2GB or more) in the request’s body, and having the mod_sed configured to process that data. This will cause a DoS and a short downtime for one of the HTTP server’s processes. An attack that is carried out by making multiple requests to the server over time can cause a complete DoS, since all of the server’s processes will shut down repeatedly and any web pages will be inaccessible.
+How can you remediate CVE-2022-30522?
+To remediate this Apache httpd vulnerability, we recommend upgrading Apache httpd to the latest version, which is currently 2.4.54. If it is not possible to upgrade, we highly recommend applying the patch which fixes this vulnerability in the mod_sed filter module.
+What mitigation options are available for CVE-2022-30522?
+In case upgrading Apache HTTP server to the latest version or applying the patch isn’t possible, we recommend limiting the POST method’s body size so that the vulnerability can’t be triggered. In order to do so, you’ll need to use the LimitRequestBody directive in the Apache httpd configuration file.
+The directive can be used to set a limit to the request size starting from 0 and up to 2GB of data. It is recommended that a limit is set to prevent POST request bodies larger than 1GB of data, as such:
+LimitRequestBody 1073741824
+Note this mitigation only provides protection against a DoS caused by client requests, but still leaves the server vulnerable to DoS if mod_sed is used to modify web responses, and an response larger than 2GB is sent to the client.
+Stay up-to-date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter @JFrogSecurity.
+Find vulnerable versions with JFrog Xray
+In addition to exposing new security vulnerabilities and threats through our research team, our JFrog Xray SCA tool provides developers and security teams easy access to the latest relevant security insights for their software with automated security scanning.
+mod_sed
+mod_sed
+mod_sed
+mod_sed
+mod_sed
+mod_sed
+mod_sed
+mod_sed
+ap_abort_on_oom()
+util.c
+OUT_OF_MEMORY
+allocator_alloc
+APR_UINT32_MAX
+abort_on_oom
+grow_buffer
+apr_pcalloc
+allocator_alloc
+sed_finalize_eval
+sed_eval_buffer
+sed_response_filter
+sed_request_filter
+mod_sed
+mod_sed
+InputSed
+mod_sed
+mod_sed
+LimitRequestBody
+LimitRequestBody 1073741824
+mod_sed
