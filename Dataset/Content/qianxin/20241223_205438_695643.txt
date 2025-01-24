@@ -1,0 +1,118 @@
+
+本文通过分析近期出现的具有隐私泄漏行为的Moq包与其依赖包Devlooped.SponsorLink的代码，探索其使用.NET Compiler Platform（“Roslyn”）SDK 提供的分析器自动执行代码的原理。并进一步探讨分析器在软件供应链安全上的隐患以及开发过程中可使用的避免措施。目前天问供应链威胁监测模块通过奇安信技术研究院星图实验室自研的天穹沙箱模拟NuGet包安装行为已可实现对这种攻击的检测。
+天问供应链威胁监测模块是奇安信技术研究星图实验室研发的“天问”软件供应链安全分析平台的子模块，”天问“分析平台对Python、npm等主流的开发生态进行了长期、持续的监测，发现了大量的恶意包和攻击行为。
+1 Moq及其依赖分析
+1.1 Moq事件简介
+Moq[1]是非常流行的开源项目，为.NET应用程序提供模拟库。然而在近期的几次更新中，该开源项目引入了新的依赖 Devlooped.SponsorLink[2]，版本为1.0.0。该依赖在当时的版本是闭源的，它对提供的动态链接库进行了混淆使部分代码不易阅读，通过在一定的条件下获取当前git项目配置的email地址，然后计算email地址的hash值并在编码后传输到第三方云服务器。我们通过查阅NuGet Gallery[3]中包下载量发现，仅在Moq包中包含Devlooped.SponsorLink依赖的版本共计下载了204,440次。由于该包在安装时会执行相应代码，大量开发人员的email地址的hash在不知情的情况下被泄漏。
+1.2 代码分析
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\qianxin\20241223_205438_695643\collect.png
+
+下面是Moq:4.20.0的代码的部分截图，在SponsorLinker类的上方有特性 [DiagnosticAnalyzer()] ，表示该类作为 DiagnosticAnalyzer 的实现，其是Roslyn SDK提供的分析器API，第2节中会介绍分析器相关原理。该类继承自SponsorLink抽象类，为Devlooped.SponsorLink提供，是DiagnosticAnalyzer的派生类，恶意行为均在其中实现。
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\qianxin\20241223_205438_695643\Untitled.png
+
+进入到Devlooped.SponsorLink:1.0.0包的代码中，可以看到SponsorLink抽象类继承自DiagnosticAnalyzer类并实现了IIncrementalGenerator接口，这两个均是Roslyn SDK提供的分析器API，这里使用了两者的原因是为了向后兼容。
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\qianxin\20241223_205438_695643\Untitled1.png
+
+在SponsorLink类的构造函数中，首先会判断本地的代理等对远程服务器的访问是否能够成功，再从远程服务器下载相应的配置信息。
+
+
+Initialize函数是继承DiagnosticAnalyzer类需要实现的部分，在context.RegisterCompilationAction注册了method_0方法作为分析节点执行后续分析代码。
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\qianxin\20241223_205438_695643\Untitled2.png
+
+该样本通过使用下面简单的混淆代码加密了字符串而逃避静态特征检测，根据算法解码字符串，获得程序的全部字符串。
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\qianxin\20241223_205438_695643\Untitled4.png
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\qianxin\20241223_205438_695643\Untitled5.png
+
+在method_0方法中执行多个条件判断才会最终执行email信息的采集与发送，其中包括环境变量的判断和配置的判断。作者在后续描述中说，这样做的目的主要是用于判断是否是编译器环境而不去打扰使用命令行或者持续集成环境的用户。
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\qianxin\20241223_205438_695643\Untitled3.png
+
+下面分析样本获取隐私信息的行为执行前的条件准备：
+（1）首先通过以下三个部分的环境变量判断当前环境是否处于编译器环境，若不是如CI或命令行等则不进行后续代码的执行。
+
+
+（2）然后从构建时的变量来获取当前构建完整路径以及是否存在，只有存在满足条件。
+
+
+（3）最后从构建时的变量来获取当前构建是否使用DesignTimeBuild，需要在配置文件中使用DesignTimeBuild选项，且值为False。
+
+
+当判断完上述条件之后，就进入隐私获取的代码，首先获取了git邮箱，然后计算邮箱的sha256，最后通过base62编码对hash后的字符串进行编码。
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\qianxin\20241223_205438_695643\Untitled6.png
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\qianxin\20241223_205438_695643\Untitled7.png
+
+最后程序会根据当前构建中获取的值生成以下字符串和链接并传输到远程第三方云服务器。
+
+
+2 自动执行原理分析及其实现
+根据上一节中介绍的Devlooped.SponsorLink包的源码，我们知道了NuGet包能够在安装时自动执行。在使用.NET框架开发项目的时候不可避免的会使用到NuGet包，当我们对安装的NuGet包的具体内容不够了解的时候就可能触发自动执行代码攻击。那么为什么会执行，它的原理是什么呢，以及我们在使用NuGet包的时候应该注意什么，在本节中将会详细介绍。
+2.1 概念介绍
+在上节中我们提到了Roslyn SDK和分析器等概念，这里将具体介绍他们的含义，同时还将介绍Roslyn SDK提供的用来编写分析器的API：DiagnosticAnalyzer和IIncrementalGenerator。第一节中包Devlooped.SponsorLink就使用了这两种API实现了NuGet包在安装的时候代码自动运行的功能。
+2.1.1 Roslyn SDK
+Roslyn是.NET Compiler Platform的代号，是用于C#和Visual Basic .NET的开源编译器和代码分析API， SDK就是这样的API的一个集合[4]。传统的编译过程是输入源码并生成目标代码，中间过程对于开发人员来说是不透明的。但是Roslyn的目标则是将编译过程开发，使开发人员能够访问并分析编译器的内部工作。具体来说使用Roslyn提供的API可以构建自定义的代码分析工具和代码生成器等。
+Roslyn SDK包含了多个API层，包括编译器 API、诊断 API、脚本 API 和工作区 API，其中编译器API层通过一个可扩展API允许将自定义的分析器插入编译过程[5]。这样每次编译的时候都会启动自定义的分析器，执行分析器中的代码。
+2.1.2 DiagnosticAnalyzer
+DiagnosticAnalyzer 是Roslyn SDK 提供的用于代码分析的API。用于在代码编辑器中实时检测和显示代码中的问题、警告、建议或错误。DiagnosticAnalyzer 主要用于静态代码分析，可以帮助开发人员在编写代码时发现潜在的问题，从而提高代码质量和可维护性[6]。
+2.1.3 IIncrementalGenerator
+SourceGenerator(源生成器)允许 C# 开发人员在编译用户代码时检查用户代码。生成器可以动态创建新的 C# 源文件，这些文件将添加到用户的编译中[7]。IIncrementalGenerator是取代SourceGenerator的一种新的 API，允许用户指定生成策略，并由托管层以高性能方式应用[8]。
+按照官方文档[7]，源生成器的主要流程如下：
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\qianxin\20241223_205438_695643\Untitled8.png
+
+2.2 实现与分析
+2.2.1 代码实现与验证
+根据2.1节的概念介绍，本节将使用这两个API分别创建分析器，并在另一个控制台项目上验证分析器的自动运行。
+这里使用VS2022创建三个项目，其中两个项目如下为分析器代码，另外一个为控制台验证项目用于验证分析器代码在安装时是否能自动执行。两个分析器被打包成nupkg格式并发布到本地源供验证项目验证相关内容。
+DiagnosticAnalyzer：
+
+
+IIncrementalGenerator：
+
+
+控制台项目通过VS2022中的包管理器分别安装两个包，安装发现两个包均可自动执行其中的代码，并且在每次执行编译操作时也会执行，同时还发现在VS2022上执行编辑代码的操作同样也会触发分析器操作。
+同样的实验在命令行环境中进行，我们发现当只执行以下命令的时候不会触发任何分析器执行，而不是像VS2022一样直接会运行分析器。
+
+
+当再次执行编译命令的时候就会触发分析器执行。
+
+
+2.2.2 自动执行分析
+上面的实验我们验证了分析器在VS2022中安装之后便会自动执行（在VS2019中也可以触发相应攻击），命令行下执行编译操作的时候会自动执行，下面我们将从微软文档中获取的内容讲述一下其中的原理。
+首先，从 Visual Studio 2019 16.8 和 .NET 5.0 开始，roslyn提供的官方分析器会包含在.NET SDK（.NET 平台开发工具集）中供用户使用。Roslyn SDK在编译层API会允许用户插入自己的分析器到编译过程中，这个过程将自定义分析器和官方分析器集成到一起，并在执行编译操作的时候执行这些分析器[5]。
+当安装的NuGet包中包含分析器时，包中的分析器就会集成到当前项目的分析器中，VS环境中会立刻执行分析器中的相关代码。VS和命令行方式下每次执行编译操作时，都会重新启动分析器，并执行分析器中的代码。
+另一方面，VS2022默认情况下开启了实时代码分析功能，在这种情况下Roslyn分析器会在键入内容时实时分析当前活动文档，当我们编辑代码文件的时候分析器就会自动执行。
+以上几种情况都可以自动运行分析器中的代码，这种不受控制的自动执行方法是危险的。若没有明确待安装分析器的功能以及安全性，建议不开启它的分析器功能以保证分析器的代码不能执行，向csproj文件添加以下字段禁用分析器或选择允许开启的分析器。
+
+
+3 威胁分析与检测手段
+3.1 威胁分析
+在.NET 5之后，由于SDK中集成了分析器，代码分析功能在面向NET5或更高版本的项目中默认启用[9]。这就导致了一些开发人员在不知情的情况下安装含有分析器的包，并且分析器的代码可以在不用被允许的情况下自动运行。即使是有背景的开发人员，当分析器为闭源的且高度混淆时，他们可能也不能判断分析器是否为恶意。
+.NET 5还引入了新的分析器-SourceGenerator（源分析器）。源生成器不仅可以在上述情况中运行，而且它可以向待构建的项目中注入其他代码。在源生成器出现后，已经有研究人员发布了相关的文章表达了对于源生成器在软件供应链安全上的担忧，例如这两篇文章：
+（1）Building a supply chain attack with .NET, NuGet, DNS, source generators, and more! - Maarten Balliauw {blog}[10]
+（2）.NET 5, Source Generators, and Supply Chain Attacks | Veracode[11]
+它们从源生成器功能本身出发，通过实际代码举例源生成器将恶意代码注入到开发的项目中，并可能持续对用户产生威胁。由于源生成器是在编译阶段将代码注入到正在编译的开发项目中，对开发项目的源代码审计并不能检测到注入的代码，因为在编译的时候才生成相应代码，只有编译结束后的二进制程序才可能被二进制检测程序检出。
+不论是将代码注入到开发的项目中还是直接在安装后运行分析器代码，当分析器中的代码可以执行任意操作时，本身就存在巨大的威胁。因此在使用过程中必须警惕含有分析器的NuGet包，同时对这部分的检测是必要的。
+3.2 检测手段
+在实验过程中发现当想使用分析器中的包的时候，需要使用特定的结构打包，在csproj文件中使用如下字段：
+
+
+在NuGet文档[12]中也说明了分析器的路径格式如下所示：
+
+
+因此在判断包中是否含有分析器时可以检测包中是否存在analyzers目录，存在目录则可能使用了分析器。同时，分析器需要引用以下包作为依赖。
+
+
+当使用的NuGet包具有以下两个特征的时候，就需要小心包中可能含有分析器，在不清楚分析器中代码的时候不建议安装该包。
+参考文献
+[1] Moq, https://github.com/moq/moq
+[2] Devlooped.SponsorLink, https://www.nuget.org/packages/Devlooped.SponsorLink
+[3] Package Downloads for Moq, https://www.nuget.org/stats/packages/Moq?groupby=Version
+[4] .NET Compiler Platform SDK, https://learn.microsoft.com/zh-cn/dotnet/csharp/roslyn-sdk/
+[5] 了解 .NET Compiler Platform SDK 模型, https://learn.microsoft.com/zh-cn/dotnet/csharp/roslyn-sdk/compiler-api-model
+[6] 教程：编写第一个分析器和代码修补程序, https://learn.microsoft.com/zh-cn/dotnet/csharp/roslyn-sdk/tutorials/how-to-write-csharp-analyzer-code-fix
+[7] 源生成器, https://learn.microsoft.com/zh-cn/dotnet/csharp/roslyn-sdk/source-generators-overview
+[8] Incremental-generators, https://github.com/dotnet/roslyn/blob/main/docs/features/incremental-generators.md
+[9] 源代码分析概述， https://learn.microsoft.com/zh-cn/visualstudio/code-quality/roslyn-analyzers-overview?view=vs-2022
+[10] Building a supply chain attack with .NET, NuGet, DNS, source generators, and more!, https://blog.maartenballiauw.be/post/2021/05/05/building-a-supply-chain-attack-with-dotnet-nuget-dns-source-generators-and-more.html
+[11] .NET 5, Source Generators, and Supply Chain Attacks, https://www.veracode.com/blog/secure-development/net-5-source-generators-and-supply-chain-attacks
+[12] 分析器 NuGet 格式, https://learn.microsoft.com/zh-cn/nuget/guides/analyzers-conventions
