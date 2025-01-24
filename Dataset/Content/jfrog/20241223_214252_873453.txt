@@ -1,0 +1,103 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214252_873453\CurlandlibcurlVulnerabilities863x3001.png
+
+Update – October 11, 2023: This blog has been updated to include all the details that have been published about the vulnerabilities.
+On Wednesday, October 4th 2023, Daniel Stenberg, one of Curl’s core maintainers announced that a forthcoming release of Curl, version 8.4.0, is scheduled to be available on October 11th 2023 at approximately 06:00 UTC. The upcoming release will include fixes for two Curl vulnerabilities that they had discovered. One of these vulnerabilities is rated as having low severity (CVE-2023-38546), whereas the second one is considered high severity (CVE-2023-38545).
+Which versions of Curl are affected?
+CVE-2023-38545 is a high severity vulnerability that affects both the Curl command-line tool and libcurl.
+Affected versions: Curl and libcurl from 7.69.0 up to and including 8.3.0.
+CVE-2023-38546 is a low severity vulnerability that only impacts libcurl – a library provided by the Curl project that allows developers to access Curl APIs from their own code.
+Affected versions: libcurl from 7.9.1 up to and including 8.3.0.
+Are you affected by CVE-2023-38545?
+The high-severity vulnerability affects both the Curl CLI tool and the libcurl library, but even under the set of vulnerable versions, the vulnerability cannot be exploited under default conditions.
+The libcurl library is only vulnerable if used in any of the following ways –
+
+CURLOPT_PROXYTYPE set to type CURLPROXY_SOCKS5_HOSTNAME, for example –
+
+curl_easy_setopt(handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME)
+CURLOPT_PROXY or CURLOPT_PRE_PROXY set to use the scheme socks5h://, for example – curl_easy_setopt(handle, CURLOPT_PROXY, "socks5h://...")
+One of the proxy environment variables is set to use the socks5h:// scheme. For example the environment variables http_proxy, HTTPS_PROXY or ALL_PROXY.
+The Curl CLI tool is only vulnerable if any of the following conditions are true –
+
+Executed with –-socks5-hostname flag.
+Executed with --proxy (-x) or --preproxy set to use the scheme socks5h://.
+Executed with relevant environment variables as described above.
+Example of a vulnerable Curl invocation –
+
+curl -x socks5h://myproxy.com malicioushost.com
+In addition to the following conditions, the Curl CLI tool in version 8.x  is only vulnerable if the flag --limit-rate is set with a number smaller than 65541.
+(To clarify, this additional condition is not required for exploitation of libcurl or Curl CLI version 7.x)
+How likely is CVE-2023-38545 to get exploited in the wild?
+CVE-2023-38545 is a heap overflow that can possibly be exploited for remote code execution (RCE).
+There are numerous Proof-of-Concepts published, which demonstrate denial of service (DoS)  via read-access from an attacker-controlled pointer. While remote code execution exploit has not been published or discussed at this time, heap overflows can often be exploited for remote code execution.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214252_873453\curl_dos_poc_2.png
+Demonstrating DoS via an arbitrary-read primitive
+Seeing that curl is an ubiquitous project it can be assumed with good confidence that this vulnerability will get exploited in the wild for remote code execution, with more sophisticated exploits being developed. However – the set of pre-conditions needed in order for a machine to be vulnerable (see previous section) is more restrictive than initially believed. Therefore, we believe the vast majority of curl users won’t be affected by this vulnerability.
+That being said, it is crucial to emphasize that the attacker payload is restricted due to being a URL (specifically, the hostname – see analysis below). Curl’s URL parser rejects arbitrary byte values, making them invalid, and thus, it only accepts ASCII characters. Furthermore, even if Curl is configured with IDN support (allowing internationalized domain names with Unicode hostnames), it still does not permit arbitrary byte values.
+CVE-2023-38545 Overview
+SOCKS5 is a networking protocol that allows internet users to route their traffic through a remote server, providing enhanced security, anonymity, and the ability to bypass certain content restrictions. It is particularly popular for its support of various applications, including web browsers, torrent clients, and online gaming.
+SOCKS5 proxy servers offer two primary resolver modes: “remote” and “local.” In the remote mode, DNS resolution is performed by the proxy server, enhancing privacy and reducing direct connections to external DNS servers. In the local mode, the client’s DNS resolver handles name resolution, potentially improving performance but sacrificing some anonymity.
+The vulnerability is a heap overflow that can be triggered when connecting to an attacker-controlled HTTP server over a SOCKS5 proxy with remote hostname resolving (using the scheme socks5h://). This occurs when an excessively long, attacker-controlled hostname is copied into a small local heap-based buffer, as discovered during the investigation.
+CVE-2023-38545 In-Depth Details
+In early 2020, an effort was made to convert a blocking function in curl that connects to SOCKS5 proxies into a non-blocking state machine. This change was introduced in curl version 7.69.0 but also introduced a security vulnerability, CVE-2023-38545.
+The vulnerability stemmed from an issue in the state machine’s logic – a fallback mechanism that triggered a shift from remote name resolution to local name resolution when handling excessively long host names in SOCKS5 proxy connections. This fallback mechanism was implemented when the host name exceeded the SOCKS5 protocol’s limit of 255 bytes:
+if(!socks5_resolve_local && hostname_len > 255) {
+  socks5_resolve_local = TRUE;
+}
+Then, when constructing a protocol frame in memory buffers, Curl incorrectly believed it should pass on the host name to the proxy, even when it was too lengthy to fit within the allocated buffer. This could result in a buffer overflow, with the extent of the overflow depending on the host name’s length and the size of the target buffer.
+An attacker who has control over an HTTPS server can manipulate it in a way that affects clients using the libcurl library and accessing the server through a SOCKS5 proxy, specifically when using remote proxy resolver mode. This manipulation involves causing the server to generate a carefully crafted redirect response with an HTTP 30x Redirect status code.
+The 30x redirect response includes a “Location” header, which is designed as follows:
+Location: https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/
+In this scenario, the host name within the “Location” header can be extended beyond 16 kilobytes in length, with a maximum length of up to 64 kilobytes.
+How to resolve CVE-2023-38545 and CVE-2023-38546?
+Upgrade to the newly released Curl 8.4.0 to resolve both vulnerabilities. Make sure to spot any versions that might be at risk (any version) and update to this newly fixed version.
+In addition to the upstream patched version, several Linux distributions have already published fixed versions of curl, most notably Debian, Ubuntu, Alpine and SUSE.
+Fixes are still pending for Red Hat.
+Is it possible to mitigate CVE-2023-38545 without upgrading?
+It is possible to mitigate CVE-2023-38545 without hurting SOCKS5 functionality, by forcing curl to use local hostname resolving to begin with, instead of remote hostname resolving when connecting to a SOCKS5 proxy
+For example, replace the socks5h scheme –
+curl -x socks5h://someproxy.com
+With the socks5 scheme –
+curl -x socks5://someproxy.com
+Similarly, In code that uses libcurl, replace usage of CURLPROXY_SOCKS5_HOSTNAME with CURLPROXY_SOCKS5 –
+Replace –
+curl_easy_setopt(handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME)
+With –
+curl_easy_setopt(handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5)
+
+Is the JFrog Platform Vulnerable to CVE-2023-38545?
+After conducting internal research, we can confirm that the JFrog DevOps platform is not vulnerable to Curl’s CVE-2023-38545, since it does not use SOCKS5 proxy with remote hostname resolution.
+
+Resolving CVE-2023-38545 and CVE-2023-38546 with JFrog Xray and JFrog Advanced Security
+As always, JFrog Security Essentials (Xray) and JFrog Advanced Security can be used to identify every occurrence of Curl across your entire codebase and compiled artifacts, including Docker containers, repository packages, and even standalone binaries.
+Specifically, JFrog’s contextual analysis technology can automatically detect whether the required prerequisites for exploiting CVE-2023-38545 exist in Docker containers –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214252_873453\curl_contextual.png
+JFrog Platform: JFrog Contextual Analysis for Curl’s CVE-2023-38545
+libcurl
+CURLOPT_PROXYTYPE
+CURLPROXY_SOCKS5_HOSTNAME
+curl_easy_setopt(handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME)
+CURLOPT_PROXY
+CURLOPT_PRE_PROXY
+socks5h://
+curl_easy_setopt(handle, CURLOPT_PROXY, "socks5h://...")
+socks5h://
+http_proxy
+HTTPS_PROXY
+ALL_PROXY
+-socks5-hostname
+--proxy
+--preproxy
+socks5h://
+curl -x socks5h://myproxy.com malicioushost.com
+--limit-rate
+socks5h://
+Location: https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/
+socks5h
+curl -x socks5h://someproxy.com
+socks5
+curl -x socks5://someproxy.com
+CURLPROXY_SOCKS5_HOSTNAME
+CURLPROXY_SOCKS5
+curl_easy_setopt(handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME)
+curl_easy_setopt(handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5)

@@ -1,0 +1,197 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214354_055774\ArtifactoryCustomWebhooksandGithubWorkflows863x3001.png
+
+Full automation makes your Continuous Deployment (CD) faster, seamless and less error prone. For example, triggering the deployment of your Helm Chart when a Docker image is pushed to production.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214354_055774\ContinuousDeploymentautomationdiagram.png
+
+The latest JFrog Artifactory release makes this easy! With a new Custom Webhook feature that enables a direct integration with a variety of services such as Gitlab Pipelines, Jenkins and GitHub Actions.
+This blog post will go through a step-by-step example of setting up Artifactory to notify Github when a new tag of a specific Docker image is pushed, creating a Github Action that redeploys a Helm chart with the updated Docker image.
+Prerequisites
+First you’ll need a running Artifactory server. If you don’t already have one, you can create a cloud instance for free. In the example below this will be mydemo.jfrog.io.
+Start by creating two repositories for Docker and Helm. In the example below, they will be named after our favorite project, Vegapunk: vegapunk-docker and vegapunk-helm. The Helm repository includes a Helm Chart called turbine, which uses a Docker image called turbine.
+We also need a Kubernetes cluster, like Amazon EKS. On this cluster, we need a Service Account that allows the cluster to connect to our Artifactory instance to download Helm charts and Docker images. The Service Account uses an Artifactory scoped token, stored in a Kubernetes secret.
+Lastly, we need a Github repository that holds the Github Actions workflow.
+Step 1: Setup Github workflow
+Create a file named .github/workflows/main.yml that contains the following.
+The “on” section describes when the workflow is triggered. In our example, we will use the repository_dispatch event which allows triggering the workflow using a REST API call.
+The “types” attribute defines a filter to distinguish REST calls.
+on:
+  repository_dispatch:
+    types: hot-deploy
+name: deploy
+jobs:
+  deploy:
+    name: deploy to cluster
+    runs-on: ubuntu-latest
+    steps:
+    - name: deploy to cluster
+      uses: wahyd4/kubectl-helm-action@master
+      env:
+        KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+      with:
+        args: |
+          echo Deploying tag ${{ github.event.client_payload.tag }}
+          helm repo add vegapunk-helm https://mydemo.jfrog.io/artifactory/api/helm/vegapunk-helm --username k8s --password ${{ secrets.RT_HELM_REPO_PASSWORD }}
+          helm upgrade --install -n demo --set image.tag=${{ github.event.client_payload.tag }} --version=0.1.0 turbine vegapunk-helm/turbine
+          kubectl get pod -n demo
+The following example JSON payload triggers the workflow:
+{
+    "event_type" : "hot-deploy",
+    "client_payload" :  {
+        "tag" : "3.0.0"
+    }
+}
+In this payload, the client_payload.tag attribute defines the tag of the Docker image that must be deployed.
+As a first step, the workflow configures the Helm CLI to enable downloading the Helm chart from Artifactory by adding a helm repository (helm repo add). It uses a specific Artifactory user account named k8s that has the required permissions, and uses a password stored in Github Actions secrets (RT_HELM_REPO_PASSWORD).
+Then, using helm upgrade, the step triggers the deployment of the Helm chart on the Kubernetes cluster. It overrides the property image.tag (from Helm’s values.yaml) with the Docker image tag that was provided in the REST request with ${{github.event.client_payload.tag}}.
+As a final action, the step displays the pod’s status, so that we can see the changes.
+All these actions connect to our Kubernetes cluster, and this requires a Kubernetes configuration file. This configuration is passed as a Github Action secret named KUBE_CONFIG_DATA (more details on kubectl-helm-action Github Action).
+Step 2: Create Github token
+Triggering a Github Actions workflow through Github REST API requires authentication.  Follow Github’s documentation to create an authentication token with the appropriate permissions that will be used in the following step.
+Step 3: Set up the Webhook on Artifactory
+From the Administration menu in Artifactory, navigate to General > Webhooks.
+Click New Webhook, switch the webhook type to custom and enter the following values:
+
+Key: hot-deploy
+
+The name that will identify our webhook.
+Description: Trigger hot deployment using Github Actions
+
+Plain text providing some documentation about the webhook.
+URL: https://api.github.com/repos/<username>/<repo>/dispatches
+
+* Important: Replace <username> and <repo> with your own Github repository details
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214354_055774\SetuptheWebhookonArtifactory.png
+
+In the Events dropdown, select Docker tag was pushed
+
+When asked for repositories, select the Docker repository to which the Docker image will be pushed (in our case, vegapunk-docker-dev-local).
+In the Include Patterns list, add the Docker image name filter turbine/** (because our Docker image is mydemo.jfrog.io/vegapunk-docker/turbine). Otherwise, our webhook will be triggered by the push of any Docker image.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214354_055774\Repositoriessetup.png
+
+In the Secrets, add your Github token:
+
+Name: ghtoken
+Value: your Github token (created at Step 2)
+Secrets for custom webhooks is a safe place where you can store your secrets, without the risk of disclosing them to other Artifactory users.
+Now, following the GitHub documentation, add these HTTP headers:
+
+Authorization: Bearer {{.secrets.ghtoken}} which will add the Authorization header with the Github token stored in the secrets.
+Accept: application/vnd.github+json
+X-GitHub-Api-Version: 2022-11-28
+Finally, add a JSON payload:
+{
+    "event_type" : "hot-deploy",
+    "client_payload" :  {
+        "tag" : "{{ .data.tag }}"
+    }
+}
+In this payload, we set the event type to hot-deploy so that it can trigger our Github Actions workflow. We also inject the tag of the pushed Docker image using {{.data.tag}}. When a Docker image is pushed, the payload will be built by extracting data from the following event data. Click Save.
+{
+  "domain": "docker",
+  "event_type": "pushed",
+  "data": {
+    "repo_key": "vegapunk-docker",
+    "path": "turbine/3.0.0/manifest.json",
+    "name": "manifest.json",
+    "sha256": "ac3513d79d82ace55aeac8c430bcc53c973d373637490d81525c8244eb9cd300",
+    "size": 1781,
+    "image_name": "turbine",
+    "tag": "3.0.0",
+    "platforms": []
+  },
+  "secrets": {
+    "ghtoken": ""
+  }
+}
+Step 4: Push/Deploy Docker image
+Now, we can push a new Docker image tag to Artifactory using the following command.
+> docker push mydemo.jfrog.io/vegapunk-docker/turbine:3.0.1
+The push refers to repository [mydemo.jfrog.io/vegapunk-docker/turbine]
+99c482acf42e: Layer already exists 
+80115eeb30bc: Layer already exists 
+049fd3bdb25d: Layer already exists 
+ff1154af28db: Layer already exists 
+8477a329ab95: Layer already exists 
+7e7121bf193a: Layer already exists 
+67a4178b7d47: Layer already exists 
+3.0.1: digest: sha256:ac3513d79d82ace55aeac8c430bcc53c973d373637490d81525c8244eb9cd300 size: 1781
+Make sure that the content of this new image is different from previous ones, as it could otherwise prevent deployment.
+The Docker image push triggers the event in JFrog Artifactory, which in turn invokes our Webhook. The Webhook issues a REST request to Github, and triggers the workflow.
+Watching the Actions tab of the Github project, we will see the workflow being run:
+> echo 3.0.1
+3.0.1
+> helm repo add vegapunk-helm https://yann.jfrog.io/artifactory/api/helm/vegapunk-helm --username k8s -***
+"vegapunk-helm" has been added to your repositories
+> helm upgrade --install -n demo --set image.tag=3.0.1 --version=0.1.0 turbine vegapunk-helm/turbine
+Release "turbine" has been upgraded. Happy Helming!
+NAME: turbine
+LAST DEPLOYED: Thu Jan 26 15:20:01 2023
+NAMESPACE: demo
+STATUS: deployed
+REVISION: 4
+NOTES:
+1. Get the application URL by running these commands:
+  export POD_NAME=$(kubectl get pods --namespace demo -l "app.kubernetes.io/name=turbine,app.kubernetes.io/instance=turbine" -o jsonpath="{.items[0].metadata.name}")
+  export CONTAINER_PORT=$(kubectl get pod --namespace demo $POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")
+  echo "Visit http://127.0.0.1:8080 to use your application"
+  kubectl --namespace demo port-forward $POD_NAME 8080:$CONTAINER_PORT
+> kubectl get pod -n demo
+NAME                      READY  STATUS              RESTARTS   AGE
+turbine-6b94d64d6-qjqfj   1/1    Running             0          3m57s
+turbine-6fdb9c67cc-w27xj  0/1    ContainerCreating   0          0s
+When done, we can inspect the Kubernetes pod and check that the new Docker image was deployed:
+> kubectl describe pod -l 'app.kubernetes.io/name=turbine' -n demo
+Name:             turbine-6fdb9c67cc-w27xj
+Namespace:        demo
+Priority:         0
+Service Account:  default
+Node:             ****
+Start Time:       Thu, 26 Jan 2023 16:20:02 +0100
+Labels:           app.kubernetes.io/instance=turbine
+                  app.kubernetes.io/name=turbine
+                  pod-template-hash=6fdb9c67cc
+Annotations:      kubernetes.io/psp: eks.privileged
+Status:           Running
+IP:               ****
+IPs:
+  IP:           ****
+Controlled By:  ReplicaSet/turbine-6fdb9c67cc
+Containers:
+  turbine:
+    Container ID:   docker://723feb3e002b9eca7e72be9552a9732c243845b81848e7208648f2abc750391e
+👉  Image:          mydemo.jfrog.io/vegapunk-docker/turbine:3.0.1
+    Image ID:       docker-pullable://mydemo.jfrog.io/vegapunk-docker/turbine@sha256:ac3513d79d82ace55aeac8c430bcc53c973d373637490d81525c8244eb9cd300
+    Port:           80/TCP
+    Host Port:      0/TCP
+    State:          Running
+      Started:      Thu, 26 Jan 2023 16:20:04 +0100
+    Ready:          True
+    Restart Count:  0
+    Liveness:       http-get http://:http/ delay=0s timeout=1s period=10s #success=1 #failure=3
+    Readiness:      http-get http://:http/ delay=0s timeout=1s period=10s #success=1 #failure=3
+    Environment:    
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from from kube-api-access-8vt49 (ro)
+...
+That’s it! Now you can try it for yourself and discover all the different events that you can use to automate virtually anything!
+mydemo.jfrog.io
+.github/workflows/main.yml
+client_payload.tag
+helm repo add
+RT_HELM_REPO_PASSWORD
+values.yaml
+${{github.event.client_payload.tag}}
+KUBE_CONFIG_DATA
+hot-deploy
+Trigger hot deployment using Github Actions
+https://api.github.com/repos/<username>/<repo>/dispatches
+vegapunk-docker-dev-local
+mydemo.jfrog.io/vegapunk-docker/turbine
+ghtoken
+Authorization: Bearer {{.secrets.ghtoken}}
+Authorization
+Accept: application/vnd.github+json
+X-GitHub-Api-Version: 2022-11-28
+hot-deploy
+{{.data.tag}}

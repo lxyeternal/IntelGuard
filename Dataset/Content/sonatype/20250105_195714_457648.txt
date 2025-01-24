@@ -1,0 +1,139 @@
+
+*Note: Join us live and online for the 2019 Nexus User Conference on June 12. Registration is free.
+A few months ago, I gave a talk at Nexus User Conference 2018 on how to build a fully automated CI/CD platform on AWS using Terraform, Packer & Ansible.
+The session illustrated how concepts like infrastructure as code, immutable infrastructure, serverless, cluster discovery, etc can be used to build a highly available and cost-effective pipeline.
+The platform I built is represented in the following diagram:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457648\2.jpeg
+
+The platform has a Jenkins cluster with a dedicated Jenkins master and workers inside an autoscaling group. Each push event to the code repository will trigger the Jenkins master which will schedule a new build on one of the available slave nodes.
+The slave nodes will be responsible of running the unit and pre-integration tests, building the Docker image, storing the image to a private registry and deploying a container based on that image to Docker Swarm cluster. If you missed my talk, you can watched it again on YouTube - below.
+
+
+
+On this post, I will walk through how to deploy the Jenkins cluster on AWS using the latest automation tools.
+The cluster will be deployed into a VPC with 2 public and 2 private subnets across 2 availability zones. The stack will consists of an autoscaling group of Jenkins workers in a private subnets and a private instance for the Jenkins master sitting behind an elastic Load balancer.
+To add or remove Jenkins workers on-demand, the CPU utilization of the ASG will be used to trigger a scale out (CPU > 80%) or scale in (CPU < 20%) event.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457648\32.png
+
+To get started, we will create 2 AMIs (Amazon Machine Image) for our instances. To do so, we will use Packer, which allows you to bake your own image.
+The first AMI will be used to create the Jenkins master instance. The AMI uses the Amazon Linux Image as a base image and for provisioning part it uses a simple shell script:
+
+
+
+	"variables" : {
+	"region" : "eu-west-3",
+	"source_ami" : "ami-0ebc281c20e89ba4b"
+	},
+	"builders" : [
+	{
+	"type" : "amazon-ebs",
+	"profile" : "default",
+	"region" : "{{user `region`}}",
+	"instance_type" : "t2.micro",
+	"source_ami" : "{{user `source_ami`}}",
+	"ssh_username" : "ec2-user",
+	"ami_name" : "jenkins-master-2.107.2",
+	"ami_description" : "Amazon Linux Image with Jenkins Server",
+	"run_tags" : {
+	"Name" : "packer-builder-docker"
+	},
+	"tags" : {
+	"Tool" : "Packer",
+	"Author" : "mlabouardy"
+	}
+	}
+	],
+	"provisioners" : [
+	{
+	"type" : "file",
+	"source" : "COPY FILES",
+	"destination" : "COPY FILES"
+	},
+	{
+	"type" : "shell",
+	"script" : "./setup.sh",
+	"execute_command" : "sudo -E -S sh '{{ .Path }}'"
+	}
+	]
+	}
+
+The shell script will be used to install the necessary dependencies, packages and security patches:
+
+
+
+	
+	echo "Install Jenkins stable release"
+	yum remove -y java
+	yum install -y java-1.8.0-openjdk
+	wget -O /etc/yum.repos.d/jenkins.repo http://pkg.jenkins-ci.org/redhat-stable/jenkins.repo
+	rpm --import https://jenkins-ci.org/redhat/jenkins-ci.org.key
+	yum install -y jenkins
+	chkconfig jenkins on
+	
+	echo "Install Telegraf"
+	wget https://dl.influxdata.com/telegraf/releases/telegraf-1.6.0-1.x86_64.rpm -O /tmp/telegraf.rpm
+	yum localinstall -y /tmp/telegraf.rpm
+	rm /tmp/telegraf.rpm
+	chkconfig telegraf on
+	mv /tmp/telegraf.conf /etc/telegraf/telegraf.conf
+	service telegraf start
+	
+	echo "Install git"
+	yum install -y git
+	
+	echo "Setup SSH key"
+	mkdir /var/lib/jenkins/.ssh
+	touch /var/lib/jenkins/.ssh/known_hosts
+	chown -R jenkins:jenkins /var/lib/jenkins/.ssh
+	chmod 700 /var/lib/jenkins/.ssh
+	mv /tmp/id_rsa /var/lib/jenkins/.ssh/id_rsa
+	chmod 600 /var/lib/jenkins/.ssh/id_rsa
+	
+	echo "Configure Jenkins"
+	mkdir -p /var/lib/jenkins/init.groovy.d
+	mv /tmp/basic-security.groovy /var/lib/jenkins/init.groovy.d/basic-security.groovy
+	mv /tmp/disable-cli.groovy /var/lib/jenkins/init.groovy.d/disable-cli.groovy
+	mv /tmp/csrf-protection.groovy /var/lib/jenkins/init.groovy.d/csrf-protection.groovy
+	mv /tmp/disable-jnlp.groovy /var/lib/jenkins/init.groovy.d/disable-jnlp.groovy
+	mv /tmp/jenkins.install.UpgradeWizard.state /var/lib/jenkins/jenkins.install.UpgradeWizard.state
+	mv /tmp/node-agent.groovy /var/lib/jenkins/init.groovy.d/node-agent.groovy
+	chown -R jenkins:jenkins /var/lib/jenkins/jenkins.install.UpgradeWizard.state
+	mv /tmp/jenkins /etc/sysconfig/jenkins
+	chmod +x /tmp/install-plugins.sh
+	bash /tmp/install-plugins.sh
+	service jenkins start
+
+It will install the latest stable version of Jenkins and configure its settings:
+
+Create a Jenkins admin user.
+Create a SSH, GitHub and Docker registry credentials.
+Install all needed plugins (Pipeline, Git plugin, Multi-branch Project, etc).
+Disable remote CLI, JNLP and unnecessary protocols.
+Enable CSRF (Cross Site Request Forgery) protection.
+Install Telegraf agent for collecting resource and Docker metrics.
+The second AMI will be used to create the Jenkins workers, similarly to the first AMI, it will be using the Amazon Linux Image as a base image and a script to provision the instance:
+
+
+
+	
+	echo "Install Java JDK 8"
+	yum remove -y java
+	yum install -y java-1.8.0-openjdk
+	
+	echo "Install Docker engine"
+	yum update -y
+	yum install docker -y
+	usermod -aG docker ec2-user
+	service docker start
+	
+	echo "Install git"
+	yum install -y git
+	
+	echo "Install Telegraf"
+	wget https://dl.influxdata.com/telegraf/releases/telegraf-1.6.0-1.x86_64.rpm -O /tmp/telegraf.rpm
+	yum localinstall -y /tmp/telegraf.rpm
+	rm /tmp/telegraf.rpm
+	chkconfig telegraf on
+	usermod -aG docker telegraf
+	mv /tmp/telegraf.conf /etc/telegraf/telegraf.conf
+	service telegraf start

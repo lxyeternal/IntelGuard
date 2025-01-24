@@ -1,0 +1,177 @@
+
+When I was running a DevOps team back in 2012 BC (before containers) we had learned some powerful lessons. One of those lessons, as we got some automation cooking, was to look at downstream consumers and take their 'acceptance test' and make them our 'exit criteria'. We worked with our QA partners and started running their test 'before' we turned the freshly updated environment over to them. This was a big deal as we took some work off their plate and had built up a lot of confidence and trust that the environments we were turning over to them were ready for QA testing.That kind of shifting testing left is at the heart of what continuous integration is all about and containers can help us take it even further.
+To better understand this for myself along with what does containerizing a legacy web app look like I turned to one of my favorite projects, OWASP Webgoat. If we look back at version 6 of the project we'll see it is distributed as a WAR file with an embedded tomcat server which is exactly how many enterprise apps were made. Webgoat version 8 however is now a docker image and we can see that the app is now constructed as a springboot JAR file, a likely pattern for how many folks will convert their web apps to docker images as well. So I decided to I'd fork the project an add a Jenkinsfile to play with what the pipeline might look like.
+The idea is to build the springboot JAR and run it's unit testing, then build the container and fully test it prior to publishing the image to our private registry if we are building from the master branch only  (I'm assuming a github workflow, although I'm not on board, yet, with deploying to prod from the branch).
+We start with the build stage which should look very familiar:
+stage ('Build') {
+  steps {
+    sh '''
+     echo "PATH = ${PATH}"
+     echo "M2_HOME = ${M2_HOME}"
+     mvn -B install
+    ''' 
+  }
+  post {
+    always {
+      junit '**/target/surefire-reports/**/*.xml' 
+    } 
+  }
+ }
+Here we can see a typical maven build which will run the unit test and regardless of the outcome will publish the unit test results. It's common to have failing test, especially in test driven development so we don't get too caught up in failures, yet.
+In the next stage we take advantage of parallelization to keep things fast:
+stage('Scan App - Build Container') {
+  steps{
+    parallel('IQ-BOM': {
+      nexusPolicyEvaluation failBuildOnNetworkError: false, 
+      iqApplication: 'webgoat8', 
+      iqStage: 'build', 
+      iqScanPatterns: [[scanPattern: '']], 
+      jobCredentialsId: ''
+    },
+    'Static Analysis': {
+      echo '...run SonarQube or other SAST tools here'
+    },
+    'Build Container': {
+      sh '''
+        cd webgoat-server
+        mvn -B docker:build
+      '''
+    })
+  }
+ }
+In this section we want to do our scanning so I have our Nexus Lifecycle scan running against the build phase and I have a placeholder for static analysis with tools like Sonarqube or Static Code Analysis. I also build the container here to shave some time off of the overall pipeline. We could opt to break the build here but my own policies are set to 'warn' because in my experience, I want to do all of my testing before I pull the andon cord and stop the pipeline. Here is what the build will look like in Jenkins when the IQ server policy is set to 'warn':
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_458065\Webgoat_warning.png
+
+The next section highlight my lack of Jenkinsfile fu as I haven't yet figured out how to do these two steps in parallel and check for failures. Did I mention I'm accepting pull request? ;-)  Anyway, this is where the testing gets real containers allow us to easily stand up and instance of our app or service and put it through it paces.
+stage('Test Container') {
+  steps{
+    echo '...run container and test it'
+  } 
+    post {
+      success {
+        echo '...the Test Scan Passed!'
+      }
+      failure {
+        echo '...the Test FAILED'
+        error("...the Container Test FAILED")
+      }
+    } 
+  }
+ stage('Scan Container') {
+  steps{
+    sh "docker save webgoat/webgoat-8.0 -o / ${env.WORKSPACE}/webgoat.tar"
+
+    nexusPolicyEvaluation failBuildOnNetworkError: false, 
+      iqApplication: 'webgoat8', 
+      iqStage: 'release', 
+      iqScanPatterns: [[scanPattern: '*.tar']], 
+      jobCredentialsId: ''
+  } 
+  post {
+    success {
+      echo '...the IQ Scan PASSED'
+  }
+    failure {
+      echo '...the IQ Scan FAILED'
+      error("...the IQ Scan FAILED")
+    }
+  } 
+ }
+While I've stubbed out the first test, the idea is to actually run the container, perform functional / system test and monitor the logs and any other metrics, like performance data. We check for errors and throw an 'error' to break the build here. I repeat that pattern with the Lifecycle scan of the container by setting the scan pattern to *.tar. What's interesting to me about that is that the scan picks up a lot more components than just the application as we scan the entire container and start reporting on runtime layers as well, a Java JRE in this case. In Part 2 we'll take a look at how those base images were made and tested as well to see the real power that containers have to offer. Because Webgoat is intentionally insecure this scan will fail as seen below.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_458065\Webgoat_fail.png
+
+The last bit of logic in the Jenkinsfile will publish the container to a private docker registry (or sometimes called a trusted docker registry) IF we are on the master branch and all of the above testing has passed.
+stage('Publish Container') {
+  when {
+    branch 'master'
+  }
+  steps {
+    sh '''
+      docker tag webgoat/webgoat-8.0  /     mycompany.com:5000/webgoat/webgoat-8.0:8.0
+      docker push mycompany.com:5000/webgoat/webgoat-8.0
+    '''
+  }
+ }
+We use some branch logic to ensure we're on the master and then tag and push our container off to the Nexus Repository Manager I've stood up using docker-compose from my previous blog post. Our competitor would have you wait to perform the Lifecycle like scans after it is has been pushed to a registry but in a world of 10's of builds a day, do you really want to put 100's of known bad containers in your registry just to label them as 'bad' after an acceptance test? To me, this is the advantage of shifting 'acceptance testing' to 'exit criteria'. Only containers that pass all of our test make their way into a registry from where they can finish their journey to Production. Passing defects downstream doesn't help anyone and just waste time, storage, compute and network resources.
+Hopefully this example shows why shifting left is important and the value of moving as much testing, including application security, as early in the process as possible to help with your DevSecOps journey. Would love to hear how your CI process looks and what you do to prevent bad builds from leaving this phase.
+
+stage ('Build') {
+steps {
+sh '''
+echo "PATH = ${PATH}"
+echo "M2_HOME = ${M2_HOME}"
+mvn -B install
+'''
+}
+post {
+always {
+junit '**/target/surefire-reports/**/*.xml'
+}
+}
+}
+stage('Scan App - Build Container') {
+steps{
+parallel('IQ-BOM': {
+nexusPolicyEvaluation failBuildOnNetworkError: false,
+iqApplication: 'webgoat8',
+iqStage: 'build',
+iqScanPatterns: [[scanPattern: '']],
+jobCredentialsId: ''
+},
+'Static Analysis': {
+echo '...run SonarQube or other SAST tools here'
+},
+'Build Container': {
+sh '''
+cd webgoat-server
+mvn -B docker:build
+'''
+})
+}
+}
+stage('Test Container') {
+steps{
+echo '...run container and test it'
+}
+post {
+success {
+echo '...the Test Scan Passed!'
+}
+failure {
+echo '...the Test FAILED'
+error("...the Container Test FAILED")
+}
+}
+}
+stage('Scan Container') {
+steps{
+sh "docker save webgoat/webgoat-8.0 -o / ${env.WORKSPACE}/webgoat.tar"
+nexusPolicyEvaluation failBuildOnNetworkError: false,
+iqApplication: 'webgoat8',
+iqStage: 'release',
+iqScanPatterns: [[scanPattern: '*.tar']],
+jobCredentialsId: ''
+}
+post {
+success {
+echo '...the IQ Scan PASSED'
+}
+failure {
+echo '...the IQ Scan FAILED'
+error("...the IQ Scan FAILED")
+}
+}
+}
+*.tar
+stage('Publish Container') {
+when {
+branch 'master'
+}
+steps {
+sh '''
+docker tag webgoat/webgoat-8.0  /     mycompany.com:5000/webgoat/webgoat-8.0:8.0
+docker push mycompany.com:5000/webgoat/webgoat-8.0
+'''
+}
+}
+docker-compose

@@ -1,0 +1,295 @@
+
+I firmly believe that reasonably smart people learn fastest from working examples. It's relatively easy to make small changes to a working example and learn through experimentation.
+Hopefully, this project can help jumpstart your understanding of Docker and containers along with how to use our provisioning API and a the new nexus-cli tool.
+In previous posts, we've explored using Docker Compose with the official Sonatype containers. Part 1 was an intro to Docker and our containers while Part 2 built upon that by showing how do a custom build to add you configuration to a stock container.
+In this post we'll further build upon that with:
+
+Offloading SSL to NGINX for both Sonatype IQ Server and Sonatype Nexus Repository
+Configuring the NGINX routes
+Using the provisioning API to configure our new servers to:
+
+
+create a blobstore
+
+
+create the docker repositories and group
+
+
+install the IQ Server license and import a set of policies
+
+create a blobstore
+create the docker repositories and group
+install the IQ Server license and import a set of policies
+For this work I've created a new folder in my GitHub demo-iq-server project. Let's start the walk through with the demo-setup.sh script.
+#!/usr/bin/env bash
+
+# Creates directories to be mounted to containers as volumes
+mkdir ~/iq-data ~/nexus-data
+
+# Stands up test environment and builds nginix container to put our config in
+docker-compose up -d --build
+#wait
+until curl --fail --insecure http://localhost:8081; do 
+   sleep 5
+done
+
+#import license and policies to IQ server
+./iq-server/config-iq.sh
+
+#Create Docker repos and group
+cd nexus-repository
+./create.sh blobs.json
+./run.sh myBlobs
+
+./create.sh docker.json
+./run.sh Docker
+It starts off just like before by making the folders we'll need to persistent volumes and then calling docker-compose with the 'build' flag. Then after some poor code to wait for the Sonatype IQ Server to be responding we move on to the provisioning scripts. Let's come back to those at the end and for now looking into what happens to bring this all up. For that we need to go look at the docker-compose.yml file:
+version: '3'
+
+services:
+ nginx-proxy:
+ build: ./nginx
+ ports:
+ - '443:443'
+ - '5000:5000'
+ - '18443:18443'
+ links:
+ - nexus
+ - iq-server
+ command: [ nginx, '-g', 'daemon off;' ]
+
+ nexus:
+ #build: nexus
+ volumes:
+ - ~/nexus-data:/nexus-data
+ ports:
+ - "8081:8081"
+ image: sonatype/nexus3:3.8.0
+ links:
+ - iq-server
+ container_name: nexus
+
+ iq-server:
+ build: ./iq-server
+ volumes:
+ - ~/iq-data:/sonatype-work
+ ports:
+ - "8070:8070"
+ - "8071:8071"
+ image: sonatype/nexus-iq-server:1.44.0
+ container_name: iq-server
+Right off the bat you can see we've added the NGINX proxy which will handling the inbound traffic so we expose 443 for the HTTPS traffic and move our two docker registry ports to the NGINX server as well. After that, we just establish the links to the iq-server and Sonatype Nexus Repository so it can pass traffic to them. How we route that traffic is in the nginx.conf file. The top three entries show us the pattern we'll be using:
+http {
+  proxy_send_timeout 120;
+  proxy_read_timeout 300;
+  proxy_buffering off;
+  keepalive_timeout 5 5;
+  tcp_nodelay on;
+
+  ssl on;
+  ssl_certificate /etc/nginx/external/cert.pem;
+  ssl_certificate_key /etc/nginx/external/key.pem;
+
+  client_max_body_size 1G;
+
+ server {
+ listen 443;
+ server_name nexus;
+
+ location / {
+  proxy_pass http://nexus:8081/;
+  proxy_redirect off;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Host $server_name;
+  proxy_set_header X-Forwarded-Proto $scheme;
+ }
+ }
+
+ server {
+ listen 443;
+ server_name iq-server;
+
+ location / {
+  proxy_pass http://iq-server:8070/;
+  proxy_redirect off;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Host $server_name;
+  proxy_set_header X-Forwarded-Proto $scheme;
+ }
+ }
+...
+In the 'http' we have some basic settings and enable SSL plus point to the self-signed key NGINX has created for us as part of it's Dockerfile. For real work you'll supply your own certs and just copy them in the same way we copy in the conf file. In the next two 'server' sections we can see how the routes are established. What I love here is I can run both servers on 443 because NGINX can route different named request to different places. So when it sees https://nexus it passes that along to the Sonatype Nexus Repository server on it's 8081 port. If, however, it sees a request for https://iq-server, it passes that along to the iq-server on it's 8070 port. Remember that we had added those names as aliases in parts 1 and 2 of these blog posts. What I also like is that we can still hit the iq-server on localhost:8070 and nexus on localhost:8080 which comes in handy for the provisioning scripts. While I'm not showing them here, in the nginx.conf file you can see we also have two more server entries for our docker registry connections on 5000 and 18443.
+So... when we run the demo-setup.sh script and it calls docker-compose up -d --build we can now see how the NGINX container is built to include our configuration to handle traffic for each of the Sonatype platform containers running behind it. We are still also building the iq-server so that we can also copy in any custom configuration we need. While all of this is great, it's not very useful if we don't also do some basic configuration of Sonatype Nexus Repository, to setup those Docker registries as well as installing the Sonatype IQ license and importing a set of policies. For that lets finally take a look at those provisioning scripts I said we'd come back to. Let's start with the config-iq.sh file that is called in the demo-setup.sh file we first ran.
+#!/bin/bash
+
+#Note: defaults creds are baked in so this will work on a fresh instance
+nexus() {
+java -jar nexus-cli-1.0-SNAPSHOT-shaded.jar \
+ -s http://localhost:8070 $@
+}
+
+
+cd iq-server
+
+echo "Importing license"
+# Update this to point to your license placed in this folder
+#nexus license install <your license file>
+nexus license install sonatype-nexus-firewall-lifecycle-2017.lic
+
+#these policies are based on the sample set with some changes I've made and exported.
+echo "Applying policies"
+nexus policy import myPolicies.json
+
+#need to pop back up so we end where we started
+cd ..
+pwd
+Immediately we can see this is a 'wrapper' script that wraps the nexus-cli Java archive (JAR) file which is a utility our solution architects came up with to simplify interacting with the API. I love this project because this script becomes easy to read. Any guess what nexus policy import myPolicies.json does? Notice we're still connecting to http://localhost:8070, which still works, and we don't have to deal with credentials yet as the tool provides the default creds for us. You'll have to have your own license file and edit this script but the intent here is simply to show a working example.
+When it came time to configure Sonatype Nexus Repository through the API I poked around and found the scripting section of the nexus-book-examples GitHub project. Having tried them all I settled on using the simple-shell-example as it provided a similar 'wrapper' typr approach. The JSON files still required you to know what fields were expect but that wasn't too hard to track down. I copied those scripts to my project in the nexus-repository folder and used them as a starting point.
+So, when we look at the demo-setup.sh we see this:
+#Create Docker repos and group
+cd nexus-repository
+./create.sh blobs.json
+./run.sh myBlobs
+
+./create.sh docker.json
+./run.sh Docker
+I knew I wanted a separate blobstore for Docker than the default one, so I created the blobs.json to define one. The run line then executes what we've defined, in this case myBlobs is the name I gave the definition. Then I create the three Docker repositories I'll need, proxy, hosted, and a group for them in the docker.json file. I also define them to use the ports I've settled on. I'll eventually want to be able to create all of the other repos I might want as well but for now this gives me what I need. I left the other example in the project and will add some more formats in the future.
+Hopefully this project can help folks by being a working example to learn from. I know it has been an interesting journey for me so far as I continue to learn how to manage my apps as containers. I'm quickly becoming addicted to the ease of being able to start-from-scratch, which in turn gives me the confidence to throw it all away if I need to.
+We've come a long way and having NGINX in the mix now sets us up for the next step, HA-C for Sonatype Nexus Repository. Until them, I hope this post inspires a few folks to move their existing Sonatype platform off of VM's and into their cloud infrastructure.
+Offloading SSL to NGINX for both Sonatype IQ Server and Sonatype Nexus Repository
+Configuring the NGINX routes
+Using the provisioning API to configure our new servers to:
+
+create a blobstore
+create the docker repositories and group
+install the IQ Server license and import a set of policies
+create a blobstore
+create the docker repositories and group
+install the IQ Server license and import a set of policies
+#!/usr/bin/env bash
+# Creates directories to be mounted to containers as volumes
+mkdir ~/iq-data ~/nexus-data
+# Stands up test environment and builds nginix container to put our config in
+docker-compose up -d --build
+#wait
+until curl --fail --insecure http://localhost:8081; do
+sleep 5
+done
+#import license and policies to IQ server
+./iq-server/config-iq.sh
+#Create Docker repos and group
+cd nexus-repository
+./create.sh blobs.json
+./run.sh myBlobs
+./create.sh docker.json
+./run.sh Docker
+version: '3'
+
+services:
+ nginx-proxy:
+ build: ./nginx
+ ports:
+ - '443:443'
+ - '5000:5000'
+ - '18443:18443'
+ links:
+ - nexus
+ - iq-server
+ command: [ nginx, '-g', 'daemon off;' ]
+
+ nexus:
+ #build: nexus
+ volumes:
+ - ~/nexus-data:/nexus-data
+ ports:
+ - "8081:8081"
+ image: sonatype/nexus3:3.8.0
+ links:
+ - iq-server
+ container_name: nexus
+
+ iq-server:
+ build: ./iq-server
+ volumes:
+ - ~/iq-data:/sonatype-work
+ ports:
+ - "8070:8070"
+ - "8071:8071"
+ image: sonatype/nexus-iq-server:1.44.0
+ container_name: iq-server
+http {
+  proxy_send_timeout 120;
+  proxy_read_timeout 300;
+  proxy_buffering off;
+  keepalive_timeout 5 5;
+  tcp_nodelay on;
+
+  ssl on;
+  ssl_certificate /etc/nginx/external/cert.pem;
+  ssl_certificate_key /etc/nginx/external/key.pem;
+
+  client_max_body_size 1G;
+
+ server {
+ listen 443;
+ server_name nexus;
+
+ location / {
+  proxy_pass http://nexus:8081/;
+  proxy_redirect off;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Host $server_name;
+  proxy_set_header X-Forwarded-Proto $scheme;
+ }
+ }
+
+ server {
+ listen 443;
+ server_name iq-server;
+
+ location / {
+  proxy_pass http://iq-server:8070/;
+  proxy_redirect off;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Host $server_name;
+  proxy_set_header X-Forwarded-Proto $scheme;
+ }
+ }
+...
+#!/bin/bash
+
+#Note: defaults creds are baked in so this will work on a fresh instance
+nexus() {
+java -jar nexus-cli-1.0-SNAPSHOT-shaded.jar \
+ -s http://localhost:8070 $@
+}
+
+
+cd iq-server
+
+echo "Importing license"
+# Update this to point to your license placed in this folder
+#nexus license install <your license file>
+nexus license install sonatype-nexus-firewall-lifecycle-2017.lic
+
+#these policies are based on the sample set with some changes I've made and exported.
+echo "Applying policies"
+nexus policy import myPolicies.json
+
+#need to pop back up so we end where we started
+cd ..
+pwd
+#Create Docker repos and group
+cd nexus-repository
+./create.sh blobs.json
+./run.sh myBlobs
+./create.sh docker.json
+./run.sh Docker

@@ -1,0 +1,211 @@
+
+In this post, I will walk you through how to deploy Sonatype Nexus OSS 3 on Google Cloud Platform and how to create a private Docker hosted repository to store your Docker images and other build artifacts (maven, npm and pypi, etc). To achieve this, we need to bake our machine image using Packer to create a gold image with Nexus preinstalled and configured. Terraform will be used to deploy a Google compute instance based on the baked image. The following schema describes the build workflow:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\Docker201.png
+
+PS : All the templates used in this tutorial, can be found on my GitHub.
+
+To get started, we need to create the machine image to be used with Google Compute Engine (GCE). Packer will create a temporary instance based on the CentOS image and use a shell script to provision the instance:
+
+
+
+	"variables" : {
+	"zone" : "YOUR ZONE",
+	"project" : "YOUR PROJECT ID",
+	"source_image" : "centos-7-v20181210",
+	"ssh_username" : "packer",
+	"credentials_path" : "PATH/account.json"
+	},
+	"builders" : [
+	{
+	"type": "googlecompute",
+	"account_file": "{{user `credentials_path`}}",
+	"project_id": "{{user `project`}}",
+	"source_image": "{{user `source_image`}}",
+	"ssh_username": "{{user `ssh_username`}}",
+	"zone": "{{user `zone`}}",
+	"image_name" : "nexus-v3-14-0-04"
+	}
+	],
+	"provisioners" : [
+	{
+	"type" : "file",
+	"source" : "./nexus.rc",
+	"destination" : "/tmp/nexus.rc"
+	},
+	{
+	"type" : "file",
+	"source" : "./repository.json",
+	"destination" : "/tmp/repository.json"
+	},
+	{
+	"type" : "shell",
+	"script" : "./setup.sh",
+	"execute_command" : "sudo -E -S sh '{{ .Path }}'"
+	}
+	]
+	}
+
+The shell script, will install the latest stable version of Nexus OSS based on official documentation and wait for the service to be up and running, then it will use the Scripting API to post a groovy script:
+
+
+
+	
+	NEXUS_USERNAME="admin"
+	NEXUS_PASSWORD="admin123"
+	
+	echo "Install Java JDK 8"
+	yum update -y
+	yum install -y java-1.8.0-openjdk wget
+	
+	echo "Install Nexus OSS"
+	mkdir /opt/nexus
+	cd /opt/nexus
+	wget https://download.sonatype.com/nexus/3/latest-unix.tar.gz
+	tar -xvf latest-unix.tar.gz
+	rm latest-unix.tar.gz
+	mv nexus-3.14.0-04 nexus
+	useradd nexus
+	chown -R nexus:nexus /opt/nexus/
+	ln -s /opt/nexus/nexus/bin/nexus /etc/init.d/nexus
+	cd /etc/init.d
+	chkconfig --add nexus
+	chkconfig --levels 345 nexus on
+	mv /tmp/nexus.rc /opt/nexus/nexus/bin/nexus.rc
+	service nexus restart
+	
+	until $(curl --output /dev/null --silent --head --fail http://localhost:8081); do
+	printf '.'
+	sleep 2
+	done
+	
+	
+	echo "Upload Groovy Script"
+	curl -v -X POST -u $NEXUS_USERNAME:$NEXUS_PASSWORD --header "Content-Type: application/json" 'http://localhost:8081/service/rest/v1/script' -d @/tmp/repository.json
+	
+	echo "Execute it"
+	curl -v -X POST -u $NEXUS_USERNAME:$NEXUS_PASSWORD  --header "Content-Type: text/plain" 'http://localhost:8081/service/rest/v1/script/docker-repository/run'
+
+The script will create a Docker private registry listening on port 5000:
+
+
+
+	import org.sonatype.nexus.repository.storage.WritePolicy;
+	
+	repository.createDockerHosted('mlabouardy', 5000, 443, BlobStoreManager.DEFAULT_BLOBSTORE_NAME, true, true, WritePolicy.ALLOW)
+
+Once the template files are defined, issue packer build command to bake our machine image:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\docker202.png
+
+If you head back to Images section from Compute Engine dashboard, a new image called nexus should be created:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock3.png
+
+Now we are ready to deploy Nexus, we will create a Nexus server based on the machine image we baked with Packer. The template file is self-explanatory, it creates a set of firewall rules to allow inbound traffic on port 8081 (Nexus GUI) and 22 (SSH) from anywhere, and creates a google compute instance based on the Nexus image:
+
+
+
+	credentials = "${file("${var.credentials}")}"
+	project = "${var.project}"
+	region = "${var.region}"
+	}
+	
+	resource "google_compute_firewall" "nexus" {
+	name = "nexus-firewall"
+	network = "${google_compute_network.nexus.name}"
+	
+	allow {
+	protocol = "tcp"
+	ports = ["22", "8081"]
+	}
+	
+	source_ranges = ["0.0.0.0/0"]
+	}
+	
+	resource "google_compute_network" "nexus" {
+	name = "nexus-network"
+	}
+	
+	resource "google_compute_instance" "nexus" {
+	name = "nexus"
+	machine_type = "${var.instance_type}"
+	zone = "${var.zone}"
+	
+	boot_disk {
+	initialize_params {
+	image = "${var.image_name}"
+	size = 100
+	}
+	}
+	
+	metadata {
+	sshKeys = "${var.ssh_user}:${file(var.ssh_pub_key_file)}"
+	}
+	
+	network_interface {
+	network = "${google_compute_network.nexus.name}"
+	access_config = {}
+	}
+	}
+
+On the terminal, run the terraform init command to download and install the Google provider, shown as follows:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock4.png
+
+Create an execution plan (dry run) with the terraform plan command. It shows you things that will be created in advance, which is good for debugging and ensuring that you’re not doing anything wrong, as shown in the next screenshot:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock6.png
+
+When you’re ready, go ahead and apply the changes by issuing terraform apply:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock207.png
+
+Terraform will create the needed resources and display the public ip address of the nexus instance on the output section. Jump back to GCP Console, your nexus instance should be created:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock8.png
+
+If you point your favorite browser to http://instance_ip:8081, you should see the Sonatype Nexus Repository Manager interface:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock9.png
+
+Click the “Sign in” button in the upper right corner and use the username “admin” and the password “admin123”. Then, click on the cogwheel to go to the server administration and configuration section. Navigate to “Repositories”, our private Docker repository should be created as follows:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock10.png
+
+The docker repository is published as expected on port 5000:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock11.png
+
+Hence, we need to allow inbound traffic on that port, so update the firewall rules accordingly:
+
+
+
+	name = "nexus-firewall"
+	network = "${google_compute_network.nexus.name}"
+	
+	allow {
+	protocol = "tcp"
+	ports = ["22", "8081", "5000"]
+	}
+	
+	source_ranges = ["0.0.0.0/0"]
+	}
+	
+	resource "google_compute_network" "nexus" {
+	name = "nexus-network"
+	}
+
+Issue terrafrom apply command to apply the changes:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock12.png
+
+Your private docker registry is ready to work at instance_ip:5000, let’s test it by pushing a docker image.
+
+Since we have exposed the private Docker registry on a plain HTTP endpoint, we need to configure the Docker daemon that will act as client to the private Docker registry as to allow for insecure connections.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock13.png
+
+
+On Windows or Mac OS X: Click on the Docker icon in the tray to open Preferences. Click on the Daemon tab and add the IP address on which the Nexus GUI is exposed along with the port number 5000 in Insecure registries section. Don’t forget to Apply & Restart for the changes to take effect and you’re ready to go.
+Other OS: Follow the official guide.
+
+You should now be able to log in to your private Docker registry using the following command:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock14.png
+
+And push your docker images to the registry with the docker push command:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock16.png
+
+If you head back to Nexus Dashboard, your docker image should be stored with the latest tag:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_457602\dock15.png
+
+Drop your comments, feedback, or suggestions below — or connect with me directly on Twitter @mlabouardy.
+A version of this article originally published on Hackernoon. Re-published with the author's permission.

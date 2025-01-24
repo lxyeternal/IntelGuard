@@ -1,0 +1,472 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\sonatype\20250105_195714_458019\ansible.jpg
+
+This article explains how to automate the installation as well as configuration of Sonatype Nexus Repository version 3.x with Ansible.
+Ansible is a deployment tool, which enables playbooks to automate applications and infrastructure deployments. The key advantage is its flexibility to change applications with versatility as well as apprehending them as a service. However, Ansible has some weaknesses too. Following a voluntary simple design, it functions solely as an application of parameters without taking into account information availability and security concerns, which need to be handled by other systems. That is why developers will prefer to use Ansible in combination with a stateful agent system like Puppet, or a centralized management tool like Ansible Tower.
+Automation with Ansible
+Ansible focuses on the application-level setup, scripting a provisioning that can be run on top of any infrastructure-supporting tool (PaaS, containers, bare-metal, vagrant, etc.). It only needs an SSH connection and a sudo account to the remote system.
+Provisioning scripts in Ansible are written in a declarative style using YAML files grouped as roles. The atomic instructions in those roles are expressed using a number of core modules provided by Ansible. Please have a look at the Ansible documentation for an in-depth introduction.
+Re-provisioning and updating configuration
+One of the DevOps models to handle configuration updates consists of provisioning a brand new environment from scratch and completely discarding the old one (think container images). This implies a reliable management of your data lifecycle. In our particular case of Sonatype Nexus Repository, this consists of several gigs of uploaded/proxied artifacts, some audit logs, and OrientDB blobs containing the configuration. Therefore, depending on one’s environment constraints, it can make sense to be able to update the configuration of an already-provisioned Sonatype Nexus Repository instance. The declarative nature of Ansible’s core instructions is inline with this purpose, but any custom logic written in a role should be idempotent, take the "create or maybe update" path into account.
+One must also note that some parts of the Sonatype Nexus Repository configuration cannot be updated. Some examples include:
+
+the admin password if you ever loose the current one (update: or maybe through this way)
+How to make Sonatype Nexus Repository Groovy API fit well with Ansible
+The basic steps of the installation are pretty straightforward and can all be written using simple Ansible core modules:
+
+download and unpack the archive
+create a system user/group
+create a systemd service
+(these steps are in tasks/nexus_install.yml)
+And then comes the surprise: Sonatype Nexus Repository configuration is not available in a simple text file format which can be edited with the help of simple Ansible instructions. It is stored in an embedded OrientDB database that must not be altered directly.
+The way the Integration API works is as follows:
+
+Write a Groovy script that handles your configuration change;
+Upload it to Sonatype Nexus with an HTTP PUT request, creating a REST resource for this script;
+Call the script through its HTTP GET/POST resource.
+URI module to the rescue!
+Ansible's uri module makes HTTP requests, providing automation to all of this.
+The first step is to upload the Groovy script on Sonatype Nexus Repository. Note that the script may already be there. Therefore, on re-runs of the playbook, we try to delete it before taking any action, just in case:
+Through tasks/declare_script_each.yml, follow on:
+
+
+
+The HTTP requests are executed from inside the target host, which is why localhost is used here. force_basic_auth: yes makes the HTTP client not wait for a 401 before providing credentials, as Sonatype Nexus immediately replies with 403 when no credentials are passed. status_code is the expected HTTP status replied by Sonatype Nexus. Since the Groovy script may not necessarily exist at that point, we must also accept the 404 status code.
+The next step is to call the Groovy script that has been created through the previous HTTP call. Most of the scripts will take some parameters as input (e.g. create user <x>), and this is where Ansible and Groovy will help. Both coming from the ages of REST things, they can speak and understand JSON fluently.
+On the Groovy script side :
+
+
+
+And to call this script from Ansible passing arguments:
+
+
+
+with call_script.yml:
+
+
+
+This allows us to cleanly pass structured parameters from Ansible to the Groovy scripts, keeping the objects’ structure, arrays and basic types.
+Sonatype Nexus Repository Groovy scripts development tips and tricks
+Here are some hints that can help a developer while working on the Groovy scripts.
+Have a classpath setup in your IDE
+As described in the Sonatype Nexus Repository documentation, having Sonatype Nexus Repository scripting in your IDE's classpath can really help you work. If you automate the Sonatype Nexus Repository setup as much as possible, you will inevitably stumble against some undocumented internal APIs. Additionally, some parts of the API do not have any source available (e.g. LDAP). In such cases, a decompiler can be useful.
+Since our role on GitHub uses Maven with the all the necessary dependencies, you can simply open it with IntelliJ and edit the scripts in files/groovy.
+Scripting API entry points
+As documented, there are four implicit entry points to access Sonatype Nexus Repository internals from your script:
+
+core
+repository
+blobStore
+security
+Those are useful for simple operations, but for anything more complicated you will need to resolve services more in-depth:
+
+through indirection from the main entry points: blobStore.getBlobStoreManager()
+directly by resolving an inner @Singleton from container context: container.lookup(DefaultCapabilityRegistry.class.getName())
+Take examples from Sonatype Nexus Repository source code
+Some parts of Sonatype Nexus Repository (7.4%, according to GitHub) are also written using Groovy, containing lots of nice code examples: CoreApiImpl.groovy.
+Creating HTTP requests from the configuration web interface (AJAX requests) also provides some hints about the expected data structures or parameters or values of some settings.
+Last but not least, setting up a remote debugger from your IDE to a live Sonatype Nexus Repository instance can help, since there are lots of places where a very generic data structure is used (like Map<String, Object>) and only runtime inspection can quickly tell the actual needed types.
+Detailed examples
+Here are some commented examples of Groovy scripts taken from the Ansible role.
+Setting up a capability
+Capabilities are features of Sonatype Nexus Repository that can be configured using a unified user interface. In our case, this covers:
+
+anonymous access
+base public URL
+branding (custom HTML header/footer).
+Instructions:
+
+
+Setting up a Maven repository proxy
+
+
+Setting up a role
+
+
+
+The resulting role is available at Ansible Galaxy and on GitHub.
+It features the setup of:
+
+Downloading and unpacking of Sonatype Nexus
+SystemD service unit
+(optional) SSL-enabled apache reverse proxy
+Admin password
+LDAP
+Privileges and roles
+Local users
+Blobstores
+All types of repos
+Base URL
+Branding (custom HTML header & footer)
+Automated jobs
+Resources for this article
+
+Core modules provided by Ansible
+Code examples: CoreApiImpl.groovy
+
+download and unpack the archive
+create a system user/group
+create a systemd service
+Write a Groovy script that handles your configuration change;
+Upload it to Sonatype Nexus with an HTTP PUT request, creating a REST resource for this script;
+Call the script through its HTTP GET/POST resource.
+---
+- name: Removing (potential) previously declared Groovy script
+
+uri:
+
+url: "http://localhost:8081/service/siesta/rest/v1/script/{{item}}"
+
+user: 'admin'
+
+password: ""
+
+method: DELETE
+
+force_basic_auth: yes
+
+status_code: 204,404
+- name: Declaring Groovy script {{item}}
+
+uri:
+
+url: "http://localhost:8081/service/siesta/rest/v1/script"
+
+user: 'admin'
+
+password: ""
+
+body_format: json
+
+method: POST
+
+force_basic_auth: yes
+
+status_code: 204
+
+body:
+
+name: "{{item}}"
+
+type: 'groovy'
+
+content: ""
+import
+groovy.json.JsonSlurper
+parsed_args =
+new
+JsonSlurper().parseText(args)
+security.setAnonymousAccess(Boolean.valueOf(parsed_args.anonymous_access))
+- include: call_script.yml
+
+vars:
+
+script_name: setup_anonymous_access
+
+args: # this structure will be parsed by the groovy JsonSlurper above
+
+anonymous_access: true
+---
+- name: Calling Groovy script
+
+uri:
+
+url: "http://localhost:8081/service/siesta/rest/v1/script//run"
+
+user: 'admin'
+
+password: ""
+
+headers:
+
+Content-Type: "text/plain"
+
+method: POST
+
+status_code: 200,204
+
+force_basic_auth: yes
+
+body: ""
+core
+repository
+blobStore
+security
+through indirection from the main entry points: blobStore.getBlobStoreManager()
+directly by resolving an inner @Singleton from container context: container.lookup(DefaultCapabilityRegistry.class.getName())
+anonymous access
+base public URL
+branding (custom HTML header/footer).
+import
+groovy.json.JsonSlurper
+import
+org.sonatype.nexus.capability.CapabilityReference
+import
+org.sonatype.nexus.capability.CapabilityType
+import
+org.sonatype.nexus.internal.capability.DefaultCapabilityReference
+import
+org.sonatype.nexus.internal.capability.DefaultCapabilityRegistry
+// unmarshall the parameters as JSON
+parsed_args =
+new
+JsonSlurper().parseText(args)
+// Type casts, JSON serialization insists on keeping those as 'boolean'
+parsed_args.capability_properties[
+'headerEnabled'
+] = parsed_args.capability_properties[
+'headerEnabled'
+].toString()
+parsed_args.capability_properties[
+'footerEnabled'
+] = parsed_args.capability_properties[
+'footerEnabled'
+].toString()
+// Resolve a @Singleton from the container context
+def
+capabilityRegistry = container.lookup(DefaultCapabilityRegistry.
+class
+.getName())
+def
+capabilityType = CapabilityType.capabilityType(parsed_args.capability_typeId)
+// Try to find an existing capability to update it
+DefaultCapabilityReference existing = capabilityRegistry.all.
+find
+{
+
+CapabilityReference capabilityReference -&amp;amp;amp;amp;amp;amp;amp;gt;
+
+capabilityReference.context().descriptor().type() == capabilityType
+}
+// update
+if
+(existing) {
+
+log.info(parsed_args.typeId +
+' capability updated to: {}'
+,
+
+capabilityRegistry.update(existing.id(), existing.active, existing.notes(), parsed_args.capability_properties).toString()
+
+)
+}
+else
+{
+// or create
+
+log.info(parsed_args.typeId +
+' capability created as: {}'
+, capabilityRegistry.
+
+add(capabilityType, true,
+'configured through api'
+, parsed_args.capability_properties).toString()
+
+)
+}
+import
+groovy.json.JsonSlurper
+import
+org.sonatype.nexus.repository.config.Configuration
+// unmarshall the parameters as JSON
+parsed_args =
+new
+JsonSlurper().parseText(args)
+// The two following data structures are good examples of things to look for via runtime inspection
+// either in client Ajax calls or breakpoints in a live server
+authentication = parsed_args.remote_username ==
+null
+?
+null
+: [
+
+type:
+'username'
+,
+
+username: parsed_args.remote_username,
+
+password: parsed_args.remote_password
+]
+configuration =
+new
+Configuration(
+
+repositoryName: parsed_args.name,
+
+recipeName:
+'maven2-proxy'
+,
+
+online: true,
+
+attributes: [
+
+maven  : [
+
+versionPolicy: parsed_args.version_policy.toUpperCase(),
+
+layoutPolicy : parsed_args.layout_policy.toUpperCase()
+
+],
+
+proxy  : [
+
+remoteUrl: parsed_args.remote_url,
+
+contentMaxAge:
+1440.0
+,
+
+metadataMaxAge:
+1440.0
+
+],
+
+httpclient: [
+
+blocked: false,
+
+autoBlock: true,
+
+authentication: authentication,
+
+connection: [
+
+useTrustStore: false
+
+]
+
+],
+
+storage: [
+
+blobStoreName: parsed_args.blob_store,
+
+strictContentTypeValidation: Boolean.valueOf(parsed_args.strict_content_validation)
+
+],
+
+negativeCache: [
+
+enabled: true,
+
+timeToLive:
+1440.0
+
+]
+
+]
+)
+// try to find an existing repository to update
+def
+existingRepository = repository.getRepositoryManager().
+get
+(parsed_args.name)
+if
+(existingRepository !=
+null
+) {
+
+// repositories need to be stopped before any configuration change
+
+existingRepository.stop()
+
+// the blobStore part cannot be updated, so we keep the existing value
+
+configuration.attributes[
+'storage'
+][
+'blobStoreName'
+] = existingRepository.configuration.attributes[
+'storage'
+][
+'blobStoreName'
+]
+
+existingRepository.update(configuration)
+
+// re-enable the repo
+
+existingRepository.start()
+}
+else
+{
+
+repository.getRepositoryManager().create(configuration)
+}
+import
+groovy.json.JsonSlurper
+import
+org.sonatype.nexus.security.user.UserManager
+import
+org.sonatype.nexus.security.role.NoSuchRoleException
+// unmarshall the parameters as JSON
+parsed_args =
+new
+JsonSlurper().parseText(args)
+// some indirect way to retrieve the service we need
+authManager = security.getSecuritySystem().getAuthorizationManager(UserManager.DEFAULT_SOURCE)
+// Try to locate an existing role to update
+def
+existingRole =
+null
+try
+{
+
+existingRole = authManager.getRole(parsed_args.id)
+}
+catch
+(NoSuchRoleException ignored) {
+
+// could not find role
+}
+// Collection-type cast in groovy, here from String[] to Set&amp;amp;amp;amp;amp;amp;amp;lt;String&amp;amp;amp;amp;amp;amp;amp;gt;
+privileges = (parsed_args.privileges ==
+null
+?
+new
+HashSet() : parsed_args.privileges.toSet())
+roles = (parsed_args.roles ==
+null
+?
+new
+HashSet() : parsed_args.roles.toSet())
+if
+(existingRole !=
+null
+) {
+
+existingRole.setName(parsed_args.name)
+
+existingRole.setDescription(parsed_args.description)
+
+existingRole.setPrivileges(privileges)
+
+existingRole.setRoles(roles)
+
+authManager.updateRole(existingRole)
+}
+else
+{
+
+// Another collection-type cast, from Set&amp;amp;amp;amp;amp;amp;amp;lt;String&amp;amp;amp;amp;amp;amp;amp;gt; to List&amp;amp;amp;amp;amp;amp;amp;lt;String&amp;amp;amp;amp;amp;amp;amp;gt;
+
+security.addRole(parsed_args.id, parsed_args.name, parsed_args.description, privileges.
+toList
+(), roles.
+toList
+())
+}
+Downloading and unpacking of Sonatype Nexus
+SystemD service unit
+(optional) SSL-enabled apache reverse proxy
+Admin password
+LDAP
+Privileges and roles
+Local users
+Blobstores
+All types of repos
+Base URL
+Branding (custom HTML header & footer)
+Automated jobs

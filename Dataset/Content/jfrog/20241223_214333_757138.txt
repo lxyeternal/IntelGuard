@@ -1,0 +1,150 @@
+
+Analyzing Impala Stealer – Payload of the first NuGet attack campaign
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\1200x230.png
+
+In this blog post, we’ll provide a detailed analysis of a malicious payload we’ve dubbed “Impala Stealer”, a custom crypto stealer which was used as the payload for the NuGet malicious packages campaign we’ve exposed in our previous post. The sophisticated campaign targeted .NET developers via NuGet malicious packages, and the JFrog Security team was able to detect and report it as part of our regular activity of exposing supply chain attacks.
+Using the typosquatting technique, the attackers propagated 13 malicious packages which impersonated legitimate packages, some of which are very popular. The attackers leveraged the NuGet package structure, which allows inserting PowerShell scripts that will be executed upon installation, in order to perform a two-stage attack. In the first stage, the init.ps1 PowerShell script bundled in the malicious package is automatically executed upon installation, in order to download and execute a Windows executable. In the second stage, the downloaded executable installs itself as a persistent backdoor, before targeting the Exodus Wallet desktop application by using code injection, in order to gain access to the user’s cryptocurrency accounts.
+Since the payload was referred to by (some of) the malicious packages as Impala, a name we also saw in the payload’s debug strings, we decided to name this custom payload Impala Stealer.
+NuGet malicious packages that contained Impala Stealer
+
+
+Coinbase.Core	BinanceOfficial	121.9K	2023-02-22	Coinbase
+Anarchy.Wrapper.Net	OfficialDevelopmentTeam	30.4K	2023-02-21	Anarchy-Wrapper
+DiscordRichPresence.API	OfficialDevelopmentTeam	14.1K	2023-02-21	DiscordRichPresence
+Avalon-Net-Core	joeIverhagen	1.2k	2023-01-03	AvalonEdit
+Manage.Carasel.Net	OfficialDevelopmentTeam	559	2023-02-21	N/A
+Asip.Net.Core	BinanceOfficial	246	2023-02-22	Microsoft.AspNetCore
+Sys.Forms.26	joeIverhagen	205	2023-01-03	System.Windows.Forms
+Azetap.API	DevNuget	153	2023-02-27	N/A
+AvalonNetCore	RahulMohammad	67	2023-01-04	AvalonEdit
+Json.Manager.Core	BestDeveIopers	46	2023-03-12	Generic .NET name
+Managed.Windows.Core	MahamadRohu	37	2023-01-05	Generic .NET name
+Nexzor.Graphical.Designer.Core	Impala	36	2023-03-12	N/A
+Azeta.API	Soubata	28	2023-02-24	N/A
+Impala Stealer technical analysis
+The main payload of the Impala Stealer is an executable file. In this section we will elaborate on the payload’s actions, and what we were able to conclude from its analysis.
+The payload’s capabilities can be divided into three types:
+
+Persistency
+Auto-updating
+Crypto-stealing
+Payload format
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\image11.png
+The payload is an executable that seems to be a .NET application compiled natively using .NET Ahead of Time (AoT) compilation, which is a process that converts the .NET intermediate language into a native language (in our case – x86-64). This AoT compilation was probably done as an obfuscation step, as native code is harder to reverse engineer than intermediate language binaries:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\image2.png
+View of strings from within the binary showing that it is a .NET application compiled AOT
+The payload also embeds two additional binary executables:
+
+A custom updater app that we will analyze later in this post
+Rasar, a tool used for extracting and compressing Electron Archives
+High-level overview of Impala Stealer
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\image3.png
+Impala Stealer and Updater flow graph
+Installation and auto-update mechanism
+Upon execution, the payload first checks whether the directory %USERPROFILE%\.nuget exists or not. If it doesn’t exist, the payload exits immediately. This is probably a way to make sure that the payload was dropped into the system via NuGet.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\image4.png
+Checking for the existence of the %USERPROFILE%\.nuget folder
+Afterwards, the payload drops another executable (which was embedded in the original payload) to %LOCALAPPDATA%\Squirrel-2021\Updater.exe, and adds this path to the registry key found at HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Run, in order to make sure that it will be executed every time a user logs in to the system.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\image5.png
+Installation of the malware via the Run registry key
+This executable, which we dubbed “The Updater,” is a .NET executable that tries to download an executable from a remote location, then saves it to the path %PROGRAMDATA%\XboxGameBar\RuntimeBroker.exe, and finally executes it.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\image6.png
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\image7.png
+Action performed by the updating mechanism
+The URL that is passed to the DownloadData function is the same URL used by the PowerShell script in the NuGet package to download the payload. Hence, we concluded that this executable probably keeps the malware up to date, and protects it from deletion.
+Achieving Persistency through Code Injection
+After creating the Updater executable, the payload performs more actions to base itself in the system. If Discord or Microsoft Visual Studio Code are installed on the system, the payload injects JavaScript code into them, causing them to run RuntimeBroker.exe (the main Impala executable, downloaded by the Updater) on startup.
+In Discord, JavaScript code is added to %LOCALAPPDATA%\Discord\app-<discord version>\modules\discord_voice-2\discord_voice\index.js:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\image8.png
+Code injected into Discord
+In Visual Studio Code, JavaScript code is added to %LOCALAPPDATA%\Programs\Microsoft VS Code\resources\app\out\main.js:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\image9.png
+Code injected into VS Code
+“Liberating” funds from your Exodus Wallet
+After basing itself on the system, Impala begins execution of its main payload.
+The payload searches for an installation of the Exodus Wallet Desktop Application. If found, the malware then looks for the file %LOCALAPPDATA%\exodus\app-<exodus version>\resources\app.asar. This file is an Electron Archive, containing resources, web pages and JavaScript code for the Exodus app. The payload creates a backup of the file, and then extracts it, using an embedded executable copy of Rasar.
+After extracting the archive, the payload tries to download a JavaScript code snippet from an online paste website:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\image10.png
+Code injected into VS Code
+At the time of writing, this paste was already deleted, and so we couldn’t obtain its contents, but we can speculate about its functionality from the performed operations:
+The payload edits 3 of the extracted Exodus app’s JavaScript files:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_757138\image13.png
+
+In src\static\wallet.html Impala adds the url https://discord.com/ to the Content-Security-Policy, allowing pages to connect to Discord domains –  .
+Code injected into Exodus’ src\static\wallet.html
+This is performed in order to allow Impala to exfiltrate sensitive data via a hardcoded Discord webhook: https[:]//discord[.]com/api/webhooks/1076330498026115102/MLkgrUiivlgAoFWyvkSpLsBE3DMaDZd9cxPK3k9XQPyh6dw55jktV6qfDgxbs5AaY7Py
+In src\app\main\index.js Impala adds discord.com to the wallet domains:
+Code injected into Exodus’ src\app\main\index.js
+This is probably done for the same reason as mentioned above (exfiltration through Discord).
+In src\app\wallet\index.js Impala adds the code that it pulled from the online paste after an existing call to await this._loadLightningCreds().
+Code injected into Exodus’ src\app\wallet\index.js
+Since we weren’t able to get the injected JavaScript code from the online paste, we can’t exactly say what it was meant to do.  However, we examined the code in src\app\wallet\index.js, and were able to tell that the call to _loadLightningCreds is done after the Exodus Wallet user inserts their password to login to the wallet. At that point, the _loadLightningCreds uses the credentials to decrypt several files.
+The code that was supposed to be added from the deleted paste might have been used to steal the user’s credentials for Exodus and other cryptocurrency exchange platforms, or use them to decrypt important files of the Exodus wallet. After injecting the malicious code to the JavaScript files, the payload compresses them back into the “app.asar” file, causing Exodus to run the malicious code when it runs.
+After injecting the malicious code into Exodus, Impala sends a message to the hardcoded Discord webhook mentioned earlier, containing the following data:
+
+content:
+
+``css
+
+user's Exodus has been pwned sorry g
+
+```
+username: Exodus Detection by Impala
+
+content:
+
+``css
+
+user's Exodus has been pwned sorry g
+
+```
+username: Exodus Detection by Impala
+
+
+
+avatar_url: https[:]//www.startpage[.]com/av/proxy-image?piurl=https%3A%2F%2Fupload.wikimedia.org%2Fwikipedia%2Fen%2F9%2F9b%2FTame_Impala_-_Currents.png&sp=1676686318T1f4463dbc9a9476b9d1c842a525a4dcfb610c3d6875da7a162ab7fc8136a17b2
+This message is probably used to notify the attacker about a successful attack.
+Conclusion
+In conclusion, supply chain attacks, which have been on the rise in the last few years, should also be considered a serious risk for NuGet developers. Our research team had exposed for the first time a sophisticated attack, in which several malicious packages were propagated, relying on typosquatting techniques and impersonating legitimate packages. According to our analysis, the attack’s payload mainly targets the Exodus Wallet application by injecting it with malicious code meant to leak the victim’s credentials to cryptocurrency exchanges.
+.NET developers — see our previous blog post for tips on how to identify and protect yourself from malicious NuGet packages.
+Stay up-to-date with JFrog Security Research
+In addition to exposing new security vulnerabilities and threats, JFrog provides developers and security teams easy access to the latest relevant information for their software with automated security scanning by JFrog Xray.  This includes enhanced CVE metadata and remediation advice.
+Follow us for product updates including automated vulnerability and malicious code detection to defend against the latest emerging threats in our research website, security research blog posts, and on Twitter @JFrogSecurity.
+init.ps1
+%USERPROFILE%\.nuget
+%LOCALAPPDATA%\Squirrel-2021\Updater.exe
+HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
+%PROGRAMDATA%\XboxGameBar\RuntimeBroker.exe
+DownloadData
+RuntimeBroker.exe
+%LOCALAPPDATA%\Discord\app-<discord version>\modules\discord_voice-2\discord_voice\index.js
+%LOCALAPPDATA%\Programs\Microsoft
+Code\resources\app\out\main.js
+%LOCALAPPDATA%\exodus\app-<exodus version>\resources\app.asar
+src\static\wallet.html
+Code injected into Exodus’ src\static\wallet.html
+This is performed in order to allow Impala to exfiltrate sensitive data via a hardcoded Discord webhook: https[:]//discord[.]com/api/webhooks/1076330498026115102/MLkgrUiivlgAoFWyvkSpLsBE3DMaDZd9cxPK3k9XQPyh6dw55jktV6qfDgxbs5AaY7Py
+src\app\main\index.js
+discord.com
+Code injected into Exodus’ src\app\main\index.js
+This is probably done for the same reason as mentioned above (exfiltration through Discord).
+src\app\wallet\index.js
+await this._loadLightningCreds()
+Code injected into Exodus’ src\app\wallet\index.js
+src\app\wallet\index.js
+_loadLightningCreds
+_loadLightningCreds
+
+content:
+
+``css
+
+user's Exodus has been pwned sorry g
+
+```
+username: Exodus Detection by Impala
+``css
+user's Exodus has been pwned sorry g
+```
+Exodus Detection by Impala

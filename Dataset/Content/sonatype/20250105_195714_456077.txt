@@ -1,0 +1,90 @@
+
+In the previous post we examine particular Java serialisation characteristics and design points that had a few unexpected consequences. In this post we'll explore more around exploiting serialisation datastreams. How it's possible to compromise systems silently and in different ways: from changing data, running arbitrary code or even crashing systems.
+Constraints
+Once the ability to compromise a serialised data stream has been achieved, the bad actors have multiple options. How constrained they are depends on a number of factors.
+The primary limiting factor will be available code. Can the bad actor run arbitrary code or are they limited to only use what is installed in the target application? As an aside, it can often come as a shock to developers to learn that the Java Runtime supports loading code remotely via URL classloaders. A capability of the runtime from inception.
+There is another inbuilt way to load code from a remote server which is much more relevant to serialisation. This mechanism is part of the javax.naming package. The particular class that can be the trigger for an attack is called javax.naming.Reference
+This class, as its name implies, is a reference to another class external to the JVM. The class contains information about how to instantiate objects from the remote server. Including the actual URL where the code is stored. This means that if a serialised object stream contains a Reference object then arbitrary remote code can be trivially loaded and executed. The Log4Shell vulnerability is the exemplar of this technique. Note that later versions of the runtime and/or Log4J have settings that can reduce the exposure.
+Other constraining factors are ensuring that any remote code is at a compatible version level with the local JVM and that object serialisation identifiers in the data stream are compatible with the classes being accessed. Both of these restrictions are usually easy to overcome.
+Gadget chains
+In reality, once a bad actor has access to a serialised object stream it is simply a matter of time before a system is compromised. The luxury of being able to run arbitrary code via Reference objects is just that - a luxury. Using commonly available objects in the Java runtime and common frameworks, toolkits etc. the bad actors can often construct serialisation object streams that give them power to subvert the the applications behaviour up to including full access to the server.
+The method of constructing an object stream that joins objects together (usually in ways never intended by the author and often making use of over powerful capabilities and poor encapsulation) is called a Gadget Chain.
+Several tools exist to make gadget chain creation straightforward. Tools like yoserial examine classes to find relational paths between objects and to find deserialisation or constructor time method calls. By working out which particular method calls can be subverted to drive method calls on other unexpected objects, the tool can construct an object stream that when deserialised will create objects and call methods to their desire. A typical target being to trigger a call to Runtime.exec() with a specific payload.
+A example of planned flow of a might look like this:
+ObjectInputStream.readObject()
+AnnotationInvocationHandler.readObject()
+Map(Proxy).entrySet()
+AnnotationInvocationHandler.invoke()
+LazyMap.get()
+ChainedTransformer.transform()
+ConstantTransformer.transform()
+InvokerTransformer.transform()
+Method.invoke()
+Class.getMethod()
+InvokerTransformer.transform()
+Method.invoke()
+Runtime.getRuntime()
+InvokerTransformer.transform()
+Method.invoke()
+Runtime.exec()
+It is vital to understand that these tools really exist and make this complex construction fairly simple to achieve.
+Deserialisation time - what code gets executed?
+Gadget chains rely on being able to force an object instance to behave differently by altering its state and forcing code to be executed. As has been stated before these instances are created differently from the normal mechanism of the constructor.
+Deserialised objects are created without calling their constructors at all. Recall that a deserialised object is one that was created and then saved elsewhere. Imagine deserialisation like some sort of over-the-wire teleportation. The aim is to recreate an existing object asis  It does not make sense in this model to call a constructor since the object already exists.
+However code can still get run during the process and the bad actors will attempt to subvert any or all of the three mechanisms available to them:
+
+Construct a gadget chain with all the necessary setup so that a subsequent unrelated method call, perhaps as a result of an external REST request, triggers the desired sequence. Imagine this as a trap. A gadget chain inserts the trap into the system and the subsequent call triggers it.
+In situations where a subclass is serialisable but its parent is not, the creation of an instance via deserialisation will trigger the parent's constructor to be called. This is the only situation when constructors are called. as part of a deserialisation process.
+Where a class has declared special deserialisation helper methods. (which are methods that only run during deserialisation) that are intended to provide the classes author with a way to control the population of the classes fields and whatever else is needed to get the newly instantiated object into the state it was prior to being serialised.
+In all three of these places the bad actors will be looking for code sequences that can be subverted by changing the data in the serialisation stream.
+Other types of attack through deserialization
+Since constructors are not called during deserialisation, except as described above, the bad actors have the opportunity to bypass any validation taking place during construction. Typically the bad actor will attempt to create objects that would normally fail this validation or more generally would fail any other validation process used to ensure the object was in a proper state. This the bad actor might try to create an object for insertion into a database that had perhaps higher authority levels, or with better credit scores, financial balances etc.
+The other type of attack often encountered is much more obvious and is intentionally so. That is the denial of service type of attack.
+Consider the deserialised form of a Java array declared like this
+private int[] ids=new int[]{1,2,3,4}
+The deserialized array would look something like
+
+
+field type	[
+field name	ids
+field array type	I
+field array length	4
+field array data	1,2,3,4
+
+At deserialization time, the array would be created, populated, and then inserted into the parent object.
+Now, imagine what would happen if the data was modified to be the following:
+
+
+field type	[
+field name	ids
+field array type	I
+field array length	INT_MAX
+field array data	1,2,3,4,5,6,7, ….
+
+Would the JVM have enough memory to deserialise the array? What would happen if the data was modified to be an array of arrays of arrays with each one being INT_MAX in length? It doesn't take much effort to construct a data stream that will cause a JVM to run out of memory. Using this method to prevent the application from running is a simple example of a denial-of-service attack.
+Next time, we'll look at ways to defend again these sorts of serialisation attacks.
+See also: Part 1 and Part 2.
+Field
+Value
+field type
+[
+field name
+ids
+field array type
+I
+field array length
+4
+field array data
+1,2,3,4
+Field
+Value
+field type
+[
+field name
+ids
+field array type
+I
+field array length
+INT_MAX
+field array data
+1,2,3,4,5,6,7, ….

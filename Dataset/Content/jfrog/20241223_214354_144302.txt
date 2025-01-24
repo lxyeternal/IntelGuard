@@ -1,0 +1,58 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214354_144302\DoSwhenusingRustHyper863x3001.png
+
+The JFrog Security Research team is constantly looking for new and previously unknown vulnerabilities and security issues in popular open-source projects to help improve their security posture and defend the wider software supply chain. As part of this effort, we recently discovered and disclosed multiple vulnerabilities in popular Rust projects such as Axum, Salvo and conduit-hyper, that stem from the same root cause – forgetting to set proper limits on HTTP requests when using the Hyper library. In this blog post we will elaborate on this issue and share guidance on how to avoid it, which is important since it can be trivially exploited for DoS.
+What is Rust’s Hyper Package?
+Hyper is an extremely popular, low-level HTTP library written in Rust. The library is not a full-featured HTTP server or client, but rather it can be used as a “building block” for implementing those, as it contains methods for responding to requests, parsing request bodies and generating proper HTTP responses. Currently, this is Rust’s most popular HTTP library, downloaded more than 67 million times from crates.io due to its usefulness for building more feature-rich HTTP clients and servers. Two of the most popular Rust-based HTTP clients & servers, namely reqwest and warp, are built on top of Hyper, and in total there are currently 2579 projects in crates.io that depend on Hyper.
+The basic vulnerability – unlimited resource consumption
+A very common and useful function in the Hyper API is body::to_bytes, the function is used for copying a request or response body to a single Bytes buffer, for example the following insecure usage  –
+pub async fn to_bytes(body: T) -> Result<Bytes, T::Error>
+where
+    T: HttpBody,
+{
+    ...
+    // With more than 1 buf, we gotta flatten into a Vec first.
+    let cap = first.remaining() + second.remaining() + body.size_hint().lower() as usize;
+    let mut vec = Vec::with_capacity(cap);
+    ...
+The reason the above call is insecure is also detailed in the function documentation – the function does not implement any length checks. Therefore, due to the function writing the entire body to a single buffer, the function can be made to allocate an arbitrary amount of memory, directly proportional to the malicious HTTP packet’s size.
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214354_144302\Picture1.png
+
+The more dangerous issue – instant DoS
+Some vendors may have ignored the above warning, or simply downplayed the issue since sending a single HTTP request with a body size of 64GB (or any size that will hog all available memory) is quite unfeasible – the amount of data transferred would be enormous, and in the real world this request would be stopped by proxies, CDNs, WAFs and more, simply due to its abnormal size.
+However, without any length checks it is actually possible to abuse this issue for causing DoS even with a very small packet.
+As mentioned, the to_bytes function reads chunks of data. If there is only one chunk, it just returns it. After reading the first chunk, the code checks if there is more to read. If there is nothing else waiting on the line, the code returns the first chunk read. If there is more data on the line, the code then creates a Vector with a capacity of the expected length of the body –
+pub async fn to_bytes(body: T) -> Result<Bytes, T::Error>
+where
+    T: HttpBody,
+{
+    ...
+    // With more than 1 buf, we gotta flatten into a Vec first.
+    let cap = first.remaining() + second.remaining() + body.size_hint().lower() as usize;
+    let mut vec = Vec::with_capacity(cap);
+    ...
+The code then populates the vector with the data already read and then waits for the rest of the data to be read into it.
+The crucial observation here is that the size for the vector is derived from the “Content-Length” header. The expected size is passed directly to the Rust memory allocator, if the expected size is too large for the allocator, it will panic and crash the process. Since there is no limit for the “Content-Length” header’s value, it is possible to send a small request with a very large “Content-Length” value that will immediately crash the process –
+memory allocation of 11111111111111111111 bytes failed
+In many cases, depending on the project that uses Hyper, this could be a zero-click DoS attack, since the scenario of an HTTP-based server receiving data from untrusted sources is extremely common. One such case that we disclosed was in the Axum web application framework, where every web app built with the framework would be vulnerable to this issue by default.
+How can this issue be resolved?
+Since the Hyper library does not restrict the HTTP body size by default, it is up to the developers that rely on Hyper to implement the size check in their own code, by comparing the request/response’s size_hint to some upper limit. For example from the official documentation –
+use hyper::{body::HttpBody};
+let response = client.request(request).await?;
+ 
+const MAX_ALLOWED_RESPONSE_SIZE: u64 = 1024;
+ 
+let response_content_length = match response.body().size_hint().upper() {
+    Some(v) => v,
+    None => MAX_ALLOWED_RESPONSE_SIZE + 1
+};
+ 
+if response_content_length < MAX_ALLOWED_RESPONSE_SIZE {
+    let body_bytes = hyper::body::to_bytes(response.into_body()).await?;
+    println!("body: {:?}", body_bytes);
+}
+Summary
+To summarize, the lack of size limitations while using Hyper is a very serious issue that can be easily exploited by attackers in order to crash both HTTP clients and servers. We highly recommend implementing a size limit on requests & responses as shown above. The JFrog Security Research team will continue to alert Rust maintainers that are susceptible to this issue, so that all instances of this vulnerability can be fixed. Stay up-to-date with JFrog Security Research
+Bytes
+to_bytes
+size_hint

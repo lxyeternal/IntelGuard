@@ -1,0 +1,152 @@
+
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214313_314170\SpringSecurityCVE202334034863x3001.jpg
+
+Spring Security’s newly released versions contain a fix for a broken access control vulnerability – CVE-2023-34034 – which was given a critical NVD severity (CVSS 9.8) and a high severity by Spring’s maintainers.
+Given the severe potential impact of the vulnerability on Spring WebFlux applications (that use Spring Security for authentication and access control), its high popularity in the industry, and the lack of public information regarding the exploitation details, this security fix prompted the JFrog Security Research team to investigate the vulnerability.
+This blog post provides details on the vulnerability, who is affected, and a proof-of-concept demonstrating in which cases the vulnerability can be triggered to cause an authentication bypass.
+What is Spring WebFlux?
+The Spring Framework is a widely used Java-based application framework that provides infrastructure support for the development of enterprise-level Java applications.
+Spring Security is a powerful authentication and access control framework, and an industry-standard in securing Spring-based applications. It provides both authentication and authorization and can be easily extended to meet custom requirements.
+Spring WebFlux was introduced in Spring 5 as a reactive programming alternative to the traditional Spring Web MVC framework.
+At its core, Spring WebFlux is designed to handle asynchronous, non-blocking, and reactive programming paradigms. It provides a reactive programming model that allows developers to build scalable, responsive, and resilient applications. Instead of using the traditional thread-per-request approach, WebFlux leverages the reactive streams API, which enables handling multiple requests concurrently with a small number of threads.
+Vulnerability Background
+On July 18, 2023, Spring Security released new versions with this security advisory, which caught our attention as this was a filter bypass vulnerability. Searching the Spring’s GitHub repository, this is the fix commit.
+Vulnerability In-Depth Details
+The description in the Spring advisory is very abstract and doesn’t detail exactly which Spring use-cases are affected by the issue.
+Here is our deep dive analysis into the source code, starting with the fix commit – 7813a9b.
+The changes in the web/src/main/java/org/springframework/security/web/server/util/matcher/PathPatternParserServerWebExchangeMatcher.java file seem interesting:
+image: D:/Desktop/malware/IntelliGraph\Dataset\Image\jfrog\20241223_214313_314170\1_PathPatternParserSourceCodee1704799987337.png
+
+When looking at the side-by-side difference, before the fix, we can see that the class PathPatternParserServerWebExchangeMatcher used the parse() method implemented in the PathPatternParser class.
+The fix commit introduces a new parse() function, implemented in the PathPatternParserServerWebExchangeMatcher class itself, which extends the parse() method of PathPatternParser with initFullPathPattern().
+Looking at the source code, we can see that the utility function adds a forward slash at the start of a string, only if it’s not already present.
+/**
+ * Prepare the given pattern for use in matching to full URL paths.
+ * By default, prepend a leading slash if needed for non-empty patterns.
+ * @param pattern the pattern to initialize
+ * @return the updated pattern
+ * @since 5.2.25
+ */
+public String initFullPathPattern(String pattern) {
+	return (StringUtils.hasLength(pattern) && !pattern.startsWith("/") ? "/" + pattern : pattern);
+}
+Looking further into the commit confirms this assessment when presented with the newly-introduced test:
+class PathPatternParserServerWebExchangeMatcherTests {
+
+	@Test
+	void matchesWhenConfiguredWithNoTrailingSlashAndPathContainsSlashThenMatches() {
+		PathPatternParserServerWebExchangeMatcher matcher = new PathPatternParserServerWebExchangeMatcher("user/**");
+		MockServerHttpRequest request = MockServerHttpRequest.get("/user/test").build();
+assertThat(matcher.matches(MockServerWebExchange.from(request)).block().isMatch()).isTrue();
+	}
+}
+The test creates a parser for path user/** and checks that it matches the path /user/test. Without the addition of a preceding slash introduced in this commit, the paths would have not matched. initFullPathPattern() makes sure they do match.
+How does all of this relate to a ** path?
+The following custom filter contains **. Let’s say you wanted to make all the pages on your site accessible except the admin pages, you may have set the following rule:
+.authorizeExchange()
+    .pathMatchers("admin/**")
+    .hasRole(Roles.ADMIN)
+                
+    .and()
+    .authorizeExchange()
+    .anyExchange()
+    .permitAll();
+Thinking (sensibly) that now every page under admin/ could be accessed only by admins.
+Before the fix, this rule wouldn’t match any admin/ URL, as it’s missing a preceding / and all of the web pages under admin/ will be accessible by anyone.
+Proof-of-Concept
+We created a simple Spring WebFlux application, which includes User and Admin roles and uses a vulnerable version of Spring Security.
+In this application, there’s a login page and an admin endpoint.
+The rules are set as follows:
+http
+    // disable CSRF
+    .csrf().disable()
+
+    // add AuthenticationWebFilter and set the handler
+    .formLogin()
+    .authenticationSuccessHandler(new WebFilterChainServerAuthenticationSuccessHandler())
+    .authenticationFailureHandler(((webFilterExchange, exception) -> Mono.error(exception)))
+
+                
+    .and()
+    .authorizeExchange()
+    .pathMatchers("admin/**")
+    .hasRole(Roles.ADMIN)
+                
+    .and()
+    .authorizeExchange()
+    .anyExchange()
+    .permitAll();
+
+return http.build();
+.anyExchange().permitAll() allows all pages to be accessible, except for the admin pages as instructed by .pathMatchers(“admin/**”).hasRole(Roles.ADMIN).
+Due to the vulnerability, the “admin/**” rule would not match any URL, as it’s missing a slash at the beginning. For example, an attacker would be able to freely access the URL “/admin/supershell” without actually being an administrator. Our PoC shows how these pages would still be accessible.
+If an attacker is aware of an endpoint that was “secured” in this vulnerable manner, it is trivial to access the privileged endpoints without any authentication.
+
+Who is Affected by CVE-2023-34034
+The vulnerability applies under the following conditions:
+
+The web application uses the Spring WebFlux framework (applications that use an older “Spring MVC” framework are not affected).
+The web application uses a vulnerable version of Spring Security. For example, 5.6.0.
+The web application uses URL path filtering for setting Spring Security access rules. The URL path pattern DOES NOT begin with a forward-slash character (/). For example, pathMatchers("admin/supershell"). This will affect a single page, in this example, the admin/supershell page.
+
+Also, if the URL path contains the multiple-segments wildcard character (**) this increases the vulnerability severity. For example, pathMatchers("admin/**"). This will affect all pages under the URL path, in this example, everything under the admin page.
+Remediation
+Upgrading your Spring Security version to one of the following is strongly advised:
+
+6.1.2+
+6.0.5+
+5.8.5+
+5.7.10+
+5.6.12+
+The above requires the Spring Framework versions:
+
+6.0.11+
+5.3.29+
+5.2.25+
+Alternatively, add a leading forward-slash / to any URL filter used in Spring Security.
+For example, replace –
+pathMatchers("admin/**")
+with –
+pathMatchers("/admin/**")
+Is the JFrog Platform Vulnerable to CVE-2023-34034?
+After conducting an internal analysis, we can confirm that the JFrog Platform is not vulnerable to Spring’s CVE-2023-34034.
+Contextual Analysis With JFrog Advanced Security
+The Contextual Analysis feature, included in the JFrog Advanced Security set of capabilities for JFrog Xray, enables users to automatically detect whether these vulnerabilities are applicable in the user’s code base. This process involves running automated contextual scanners on the container image to determine reachable paths and the configuration settings for the analyzed vulnerabilities. Xray automatically validates CVEs that have exploitation prerequisites, and provides a contextual analysis report that determines which vulnerabilities are applicable or not. This saves developers from a lot of wasted time and effort.
+
+Save developer time by only remediating vulnerabilities that are applicable
+Analyze the finished code (binary) the same way an attacker would
+Know which CVEs are exploitable and their potential impact
+Test a vulnerability in the context of the complete artifact, build or Release Bundle​
+Enable action and remediation in the context of the artifact, build or Release Bundle
+Stay up-to-date with JFrog Security Research
+The security research team’s findings and research play an important role in improving the JFrog Platform’s application software security capabilities. This manifests in the form of enhanced CVE metadata and remediation advice for developers, DevOps, and security teams in the JFrog Xray vulnerability database, as well as new security scanning capabilities used by JFrog Xray.
+Follow the latest discoveries and technical updates from the JFrog Security Research team in our research website, security research blog posts and on Twitter at @JFrogSecurity.
+web/src/main/java/org/springframework/security/web/server/util/matcher/PathPatternParserServerWebExchangeMatcher.java
+PathPatternParserServerWebExchangeMatcher
+parse()
+PathPatternParser
+parse()
+PathPatternParserServerWebExchangeMatcher
+parse()
+PathPatternParser
+initFullPathPattern()
+user/**
+/user/test
+initFullPathPattern()
+**
+**
+admin/
+admin/
+admin/
+.anyExchange().permitAll()
+.pathMatchers(“admin/**”).hasRole(Roles.ADMIN)
+“admin/**”
+“/admin/supershell”
+/
+pathMatchers("admin/supershell")
+admin/supershell
+**
+pathMatchers("admin/**")
+admin
+pathMatchers("admin/**")
+pathMatchers("/admin/**")
