@@ -328,8 +328,8 @@ class IntelliLLM:
 if __name__ == '__main__':
     # 使用示例
     ltmgpt = IntelliLLM()
-    # ltmgpt.start("test")
-    ltmgpt.start("phylum")
+    ltmgpt.start("test")
+    # ltmgpt.start("phylum")
     # ltmgpt.start("sonatype_oss")
     # ltmgpt.start("checkmarx")
     # ltmgpt.start("medium_recommand")
