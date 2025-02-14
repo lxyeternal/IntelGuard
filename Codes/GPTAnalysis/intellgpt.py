@@ -101,7 +101,7 @@ class IntelliLLM:
         if not os.path.exists(target_dir):
             return
         self.dealt_pkgs = os.listdir(target_dir)
-        self.dealt_pkgs = [json_file.replace("_easy_extract_gpt4.json", ".txt").replace("_complex_extract_gpt4.json", ".txt").replace("_verify_gpt4.json", ".txt") for json_file in self.dealt_pkgs if json_file != ".DS_Store"]
+        self.dealt_pkgs = [json_file.replace("_extract_gpt4.json", ".txt").replace("_verify_gpt4.json", ".txt") for json_file in self.dealt_pkgs if json_file != ".DS_Store"]
 
     @staticmethod
     def read_txt(file_name):
@@ -301,7 +301,6 @@ class IntelliLLM:
     def process_content(self, content, file_name):
         self.load_common_words()
         re_pkgnames = self.extract_package_names(content)
-        # 删除停用词
         filtered_words = [word for word in re_pkgnames if word not in stop_words]
         complete_entity = self.entity_extract_llm(content, filtered_words)  # 调用 entity_extract_llm 提取复杂实体
         self.save_json(complete_entity, file_name + "_extract_gpt4.json")
@@ -315,21 +314,38 @@ class IntelliLLM:
         # 遍历源目录中所有文件，如果是隐藏文件或已经处理过，则跳过
         for file_name in os.listdir(os.path.join(self.content_dir, self.source_dir)):
             if (file_name in [".DS_Store"]) or (file_name in self.dealt_pkgs):
-                print(f"Skipping: {file_name}")
+                print(f"\nSkipping: {file_name}")
                 continue
             # 生成对应 JSON 文件路径
             json_file_name = file_name.replace(".txt", "")
             json_file_path = os.path.join(self.json_dir, self.source_dir, json_file_name)
             txt_content = self.read_txt(os.path.join(self.content_dir, self.source_dir, file_name))  # 读取文本内容
-            print(f"Processing: {file_name}")
+            print(f"\nProcessing: {source_dir} {file_name}")
             self.process_content(txt_content, json_file_path)
 
 
 if __name__ == '__main__':
     # 使用示例
     ltmgpt = IntelliLLM()
-    ltmgpt.start("test")
-    # ltmgpt.start("phylum")
-    # ltmgpt.start("sonatype_oss")
+    # ltmgpt.start("test")
+    # ltmgpt.start("bleepingcomputer")
     # ltmgpt.start("checkmarx")
+    # ltmgpt.start("checkpoint")
+    # ltmgpt.start("cybersecuritynews")
+    # ltmgpt.start("datadoghq")
+    # ltmgpt.start("fortinet")
+    # ltmgpt.start("jfrog")
+    # ltmgpt.start("medium")
     # ltmgpt.start("medium_recommand")
+    # ltmgpt.start("phylum")
+    # ltmgpt.start("qianxin")
+    # ltmgpt.start("reversinglabs")
+    # ltmgpt.start("rhisac")
+    # ltmgpt.start("securityaffairs")
+    # ltmgpt.start("securityweek")
+    # ltmgpt.start("snyk")
+    # ltmgpt.start("socket")
+    # ltmgpt.start("sonatype")
+    # ltmgpt.start("sonatype_oss")
+    ltmgpt.start("thehackernews")
+    ltmgpt.start("tuxcare")
