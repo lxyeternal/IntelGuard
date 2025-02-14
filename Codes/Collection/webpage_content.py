@@ -602,7 +602,7 @@ class WebPageContent:
                 webpage_content = self.parse_elements(driver, article_section, web_name, timestamp)
                 print(webpage_content)
                 self.write_text(webpage_content,
-                                os.path.join(os.path.join(self.text_dir, "bleepingcomputer_pypi"), filename))
+                                os.path.join(os.path.join(self.text_dir, "bleepingcomputer"), filename))
                 self.write_collected_pagelinks(timestamp, web_name, postdate, page_url)
             except:
                 print('bleepingcomputer', page_url, "------Error-------")
