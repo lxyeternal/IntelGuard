@@ -17,8 +17,8 @@ import json
 import time
 import nltk
 import base64
-import openai  # 0.28.1
 import tiktoken
+from openai import AzureOpenAI
 from nltk.corpus import stopwords
 # 首次使用时需要下载停用词集
 nltk.download('stopwords')
@@ -53,10 +53,13 @@ class IntelliLLM:
         self.config_path = os.path.join(os.path.dirname(__file__), "..", "..", "Configs", "config.json")
         with open(self.config_path, 'r') as file:
             self.config = json.load(file)
-        openai.api_type = self.config['azure_api_type']
-        openai.api_base = self.config['azure_api_base']
-        openai.api_version = self.config['azure_api_version']
-        openai.api_key = self.config['azure_api_key']
+        self.oclient = AzureOpenAI(
+            api_key=self.config["azure_api_key"],
+            api_version=self.config["azure_api_version"],
+            azure_endpoint=self.config["azure_api_base"]
+        )
+
+
 
     # 读取提示文件内容
     def read_file(self, file_path):
@@ -181,9 +184,8 @@ class IntelliLLM:
         output = ""
         while attempt < self.max_attempts:
             try:
-                completion = openai.ChatCompletion.create(
-                    # engine="csl-malicious",
-                    engine="csl-malicious-4o-mini",
+                completion = self.oclient.chat.completions.create(
+                    model="gpt-4o",
                     messages=message_text,
                     response_format={"type": "json_object"},
                     temperature=0,
@@ -191,9 +193,11 @@ class IntelliLLM:
                     top_p=0.3,
                     frequency_penalty=0,
                     presence_penalty=0,
-                    stop=None
+                    stop=None,
+                    stream=False
                 )
-                output = completion.choices[0].message['content']
+                output = completion.choices[0].message.content
+                # output = completion.choices[0].message['content']
                 break  # 如果成功，跳出循环
             except Exception as e:
                 print(f"Attempt {attempt + 1}: An error occurred: {e}")
@@ -327,7 +331,7 @@ class IntelliLLM:
 if __name__ == '__main__':
     # 使用示例
     ltmgpt = IntelliLLM()
-    # ltmgpt.start("test")
+    ltmgpt.start("test")
     # ltmgpt.start("bleepingcomputer")
     # ltmgpt.start("checkmarx")
     # ltmgpt.start("checkpoint")
@@ -347,5 +351,5 @@ if __name__ == '__main__':
     # ltmgpt.start("socket")
     # ltmgpt.start("sonatype")
     # ltmgpt.start("sonatype_oss")
-    ltmgpt.start("thehackernews")
-    ltmgpt.start("tuxcare")
+    # ltmgpt.start("thehackernews")
+    # ltmgpt.start("tuxcare")
