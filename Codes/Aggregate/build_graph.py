@@ -544,11 +544,9 @@ def update_graph_from_json(json_file_path):
     print("所有包信息更新完成")
 
 
-if __name__ == '__main__':
-    # Iterate over all data sources and their JSON files
+def process_directory(base_dir):
     count = 0
     package_manager_dict = defaultdict(list)
-    base_dir = os.path.join(project_dir, "Dataset", "IntelliJson")
     for source_dir in os.listdir(base_dir):
         source_path = os.path.join(base_dir, source_dir)
         print(f"extracting files in {source_dir}..")
@@ -605,3 +603,12 @@ if __name__ == '__main__':
     update_graph_from_json(pypi_basic_info_path)
     # The graph is now built and ready to be visualized using Neo4j.
     print("Knowledge graph has been successfully created in Neo4j.")
+
+
+if __name__ == '__main__':
+    # Iterate over all data sources and their JSON files
+    base_dir1 = os.path.join(project_dir, "Dataset", "IntelliJson")
+    base_dir2 = os.path.join(project_dir, "Dataset", "IntelliJson", "osv")
+    # base_dir = "D:/Desktop/malware/tmp/IntelliJson_formatted"
+    process_directory(base_dir1)
+    process_directory(base_dir2)

@@ -1,0 +1,374 @@
+
+
+ReversingLabs has been actively tracking a malicious campaign targeting the NuGet package manager since the beginning of August, 2023. This report presents the findings of that research, which shows how malicious actors are continuously improving their techniques and responding to disruption of their campaigns. 
+
+Since the beginning of the campaign, threat actors behind this campaign refined their attacks, moving from exploiting NuGet’s MSBuild integrations to a strategy that uses simple, obfuscated downloaders that are inserted into legitimate PE binary files using Intermediary Language (IL) weaving, a .NET programming technique for modifying an application’s code after compilation.
+Discussion
+In October 2023, the RL research team reported on a malicious campaign targeting the NuGet repository, a popular open source package manager for .NET code. The campaign has been active since the early August 2023 and included more than 700 malicious packages. 
+
+The threat actors behind this campaign have since evolved their methods to achieve execution of their malicious code. Attacks started with simple initialization and post-installation Powershell scripts in the affected packages which contained malicious downloader functionality. The hundreds of malicious NuGet packages the RL research team detected weren’t hard to spot — they contained links within their install scripts (unusual) and, upon closer inspection, contained no non-malicious functionality. Following the installation and execution of the downloader, second stage malware was retrieved from an attacker-controlled C2 server. 
+
+In the later stages of this campaign, the threat actors moved from initialization scripts to a lesser-known technique that exploits NuGet’s MSBuild integrations feature. Malicious functionality was added to build tasks inside a *.targets file ensuring that malicious code gets executed every time the project is built. Additionally, a lot of effort was put into making malicious packages look as trustworthy as possible, by choosing suitable impersonation packages, making clever typo-squats, using icons from impersonated packages and by pumping up the package download counts.
+Patching .NET binaries with malicious content
+As already concluded, the threat actor behind this campaign is determined to push malware into NuGet repository and has been doing it regularly for more than the last six months. It can be concluded that this threat actor is quite skilled also: they are constantly improving their arsenal with edgy execution techniques that can be used in .NET projects. 
+
+The latest malicious packages published by this threat actor are using a technique called “IL weaving” to add malicious functionality to legitimate Portable Executable (PE) .NET binaries. In these attacks, the attacker takes a compiled .NET binary from a legitimate NuGet package and patches it in order to inject a module initializer into it. 
+
+Dotnet documentation says that module initializers are “executed at, or sometime before, first access to any static field or first invocation of any method defined in the module.” Simply said, they are the first thing that is executed when a .NET module is loaded. They can be added to the source code and created at the compile time, but a much more interesting way to add them is by patching already compiled .NET binaries using Intermediate Language (IL) weaving. Here, the original binary is first decompiled, then the desired functionality is added (“weaved”) to it. Finally it is compiled back to an executable file. Libraries like Mono.Cecil can be used to handle MSIL (Microsoft Intermediate Language) or CIL compiling and decompiling. There are open source tools like Fody that encapsulate MSIL construction and simplify IL weaving.
+Figure 1: IL weaving
+Since the end of October, NuGet packages containing three types of patched, malicious .NET DLL libraries have been observed. All of them implement the same downloader functionality, and download second stage malware seen in the previous phases of this campaign: the obfuscated SeroXen RAT. 
+
+Using binary patching, threat actors tried to make their malware downloader packages harder to detect. Analyzing compiled binaries is a bit harder task than analyzing PowerShell scripts, which contain commands in plaintext format that are easier to scan. What also made detection harder is the fact that all of the patched binaries were DLL files, which aren’t executed on their own or by default. Rather, DLLs are libraries that are called and executed under specific circumstances, which complicates dynamic analysis. But there are tools like ReversingLabs Spectra Assure that are capable of extracting behavior indicators during static analysis, making it possible to detect the presence of suspicious functionality inside compiled binary files.
+These aren’t the Gunas you’re looking for: homoglyphs in action
+The threat actors copied Guna.UI2.WinForms, a popular open source package that is used for creating desktop UIs. Using IL weaving, the threat actor modified the code to inject a module initializer and named the modified package Gսոa.UI3.Wіnfօrms, an obvious effort to “typo squat” on the name of the legitimate package. They then published it to the NuGet repository. 
+
+What’s interesting here is that Guna is actually a reserved prefix name on the NuGet repository. That means that only the authors that own and manage the Guna prefix can publish packages starting with that specific name — a security feature of sorts. So while it looks like a high-level NuGet account compromise, it's actually not.
+image: D:\Desktop\malware\IntelliGraph\Dataset\Image\osv\reversinglabs\20250329_181814_780846\BlogMaliciousNuGetcampaigngoesonFigure2.png
+Figure 2: Package with a reserved prefix
+As it turns out, this “Guna” isn’t what it seems. That’s because the threat actor exploited a NuGet feature — its support for homoglyphs — to create a package that convincingly mimics those that use the reserved “Guna” prefix. 
+
+Homoglyphs are unique characters that look identical, while having totally different features (sounds) and digital identifiers. So, for example, the latin lower case “u” and the Armenian character “ս” (“seh”) are visually identical. However, each has a unique sound associated with it and a unique unicode value — \u0075 for the latin “u” and \u057D for the Armenian “seh.” While humans may not be able to tell them apart when visually scanning text, computers see and treat them as completely different characters. 
+
+Looking more closely at the name of the imposter NuGet package Guna.UI3.WinForms package, RL found four of these homoglyph characters mimicking their latinate doppelgangers: ս(\u057D), ո(\u0578), і(\u0456) and օ(\u0585).
+
+Using RL Spectra Assure platform to analyze the two packages revealed important differences between the legitimate Guna.UI2.WinForms and the imposter Guna.UI3.WinForms packages. Specifically, it revealed that two .NET binaries were tampered with to include a module initializer.
+image: D:\Desktop\malware\IntelliGraph\Dataset\Image\osv\reversinglabs\20250329_181814_780846\BlogMaliciousNuGetcampaigngoesonFigure3.png
+Figure 3: Spectra assure Diff
+When RL researchers compared the two .NET binaries using third-party tools that can decompile and diff the code to show us the differences between them, our research team noticed that the two packages have the same contents, with the biggest difference being the module initializer inside the modified, malicious package.
+image: D:\Desktop\malware\IntelliGraph\Dataset\Image\osv\reversinglabs\20250329_181814_780846\BlogMaliciousNuGetcampaigngoesonFigure4.png
+Figure 4: Package diff & obfuscated Initialize() method. 
+Green = new (malicious) code; purple = modified code; red = removed code
+The strings inside the module initializer (Figure 4) are obfuscated by a simple method. Adjacent to every character the threat actor tries to “hide”, they’ve placed a dummy string (in this case  {#}{$}{&}{(}{_}{#}{%}{^}{^}{#}{!}  that is removed at runtime by searching for the dummy string and removing it. It’s very easy to get the deobfuscated code and see what this DLL does.
+image: D:\Desktop\malware\IntelliGraph\Dataset\Image\osv\reversinglabs\20250329_181814_780846\BlogMaliciousNuGetcampaigngoesonFigure5.png
+Figure 5: Deobfuscated code: Initialize() function
+Figure 5 shows the inner workings of the first stage malware, a simple downloader that fetches a batch script from a C2 server and executes it, triggering the second stage of the infection process that ends with the installation of the SeroXen RAT.
+Detection: YARA won’t do it
+Since the code for the module initializer is located inside the pseudo-class <Module>, it can’t be detected by YARA out of the box, because it’s skipping parsing that class.
+
+RL Spectra Assure provide a behavioral indicator for it. Module initializers are not purely used by malware. They are used for many legitimate reasons such as setting up code before the main execution starts (in other words, initializing a module) and by obfuscators — tools used to protect the intellectual property of developers.
+
+However, RL can combine this indicator with others in order to create a good threat hunting heuristics for identifying suspicious packages.
+image: D:\Desktop\malware\IntelliGraph\Dataset\Image\osv\reversinglabs\20250329_181814_780846\BlogMaliciousNuGetcampaigngoesonFigure6.png
+Figure 6: Indicators
+Evolve your AppSec to stay up to speed with threats
+Threat actors are constantly evolving the methods and tactics they use to compromise and infect their victims with malicious code that is used to extract sensitive data or provide attackers with control over IT assets. Any methods that give them an edge over defenders and allow their actions to remain undetected have a high value and are likely to be adopted by malicious actors. That’s why defenders have to evolve alongside threat actors in order to catch any possible threats on time and stay safe. 
+
+And that’s what happened in this latest campaign, which saw attackers using a variety of new — or rarely seen — techniques to escape detection and increase the changes of their malicious code being downloaded and used. Those techniques include binary patching of DLLs via IL weaving to make malicious downloader code harder to detect. They also include the attackers’ use of “homoglyphs” in typosquatting attacks. Those are glyphs or characters with an identical visual appearance to a common character (like “u” or “o”), but a different logical representation. To date, RL researchers have identified approximately 60 packages and 290 package versions that are part of this same campaign abusing module initializers. Some of the packages can be seen in the IOCs list below. 
+
+All the identified packages were reported to NuGet administrators and have since been removed from the NuGet platform. 
+
+This latest campaign highlights new ways in which malicious actors are scheming to fool developers as well as security teams into downloading and using malicious or tampered with packages from popular open source package managers like NuGet. With scores of packages and hundreds of malicious versions, the latest campaign highlights the need for development organizations to up their game and stay abreast of a fast evolving software supply chain threat landscape.
+Indicators of Compromise (IOCs)
+Indicators of Compromise (IoCs) refer to forensic artifacts or evidence related to a security breach or unauthorized activity on a computer network or system. IOCs play a crucial role in cybersecurity investigations and cyber incident response efforts, helping analysts and cybersecurity professionals identify and detect potential security incidents.
+
+The following IOCs were collected as part of ReversingLabs investigation of this software supply chain campaign.
+NuGet packages:
+
+
+Gսոa.UI3.Wіnfօrms	2.0.4.8	63f76e3f51dd053d04dcd9584f0c1cc484b7a747
+AlgoTrading	3.2.56	99f263f38a7af5330ba5a2b6885c9f38604c7080
+AlgoTrading	3.2.57	9e385ec2739e08b3b0e48ca3c1cfdef41772cfce
+AlgoTrading.Net	5.0.164	cc5f779e027528cc7433393aeee220a82bd206b3
+Altcoins	1.45.24	bb4b99f5aed7c5a73e32a36c38139ea936967d3c
+Altcoins	1.45.25	fde010d1035f50912096a07e684dd1761e5c618b
+Altcoins.Library	2.12.5	10ead6e0c6f537393c73bc8ef4be20dc296cc55b
+AnimatedGifWpf	2.1.0	dfec8f1e00c9ca220d222eb78e46693907229995
+AnimatedGifWpf	2.0.2	8b294d1a1677a77ddb55924f960da42dc94de572
+AnimatedGifWpf	2.0.8	b54bdcf9835007dd73e58c46026c64232ccbcd7b
+AnimatedGifWpf	2.0.3	57ea56b45cbd59872ee459a02ef154b38fb19ec8
+AnimatedGifWpf	2.0.9	570937f0b32f52254132f50c687d011a9fd3d15b
+AnimatedGifWpf	2.0.5	5a72ecc3a14c1cb7040518e3ed6ff2025b356c3d
+AnimatedGifWpf	2.1.1	e3a8f5ff757a5658ba58a614af7ac884575cfc96
+AvalonEdit.Net	8.3.0.91	3ce17b59fee72291e040aad556f019e5873c104a
+AvalonEdit.Net	8.3.0.93	f38c121515b194859672522962f69a240459f55f
+AvalonEdit.Net	8.4.0.96	b823730bd562cceb9ce589372963bc320364e05b
+AvalonEdit.Net	8.3.0.92	c9cde77c8ee75d7aa503b0b8048eebd135e71cdc
+AvalonEdit.Net	6.3.0.90	524aac1318447588c018c5540d80aff3b9b01e17
+AvalonEdit.Net	8.3.0.90	ee897b3b266af9f9a0a77ba10dfd72326c8be95a
+AvalonEdit.Net	8.3.0.94	0b14dc1ae59a29e7053818ffe04eeee3f055357d
+AvalonEdit.Net	8.4.0.95	f49b5072036a58949244ac1f13dccdb9582012cf
+Binance.Libary	7.0.3	2a8b52ae48ce566c680b874ded3f99fe23b35546
+Binance.Libary	3.8.8	df43e8caefef054e3428307d9c39fbecafb09993
+Binance.Libary	2.7.4	4e8cfcd1ab54e0c4c4e4504927716f59e47e3a76
+Binance.Libary	1.6.0	445ec2baaf4ee49d028c96f42288118d4a166c41
+Binance.Libary	6.5.3	7574393406ffdefcf3b1ee9b6f906c6ba2112268
+Binance.Libary	0.8.7	c20c8bb09a67a5919f87390a7093af7ebd27cba9
+Binance.Libary	6.1.0	e70df5fb92e03bfedd21dba8736e009470cfa302
+Binance.Libary	0.2.1	44c225b5703034ff60307c5cf70d02dd15761276
+Binance.Libary	3.3.4	cdc76806553973df505e347518e2b2b781f02789
+Binance.Libary	6.0.3	c06de81d34c3c50a8881467b3286d3e1fc579cd7
+Binance.Library	0.6.1	d0aca9cfe4d2377a36f4e0adb182290853f34feb
+BitcoinLib.Net	1.5.3	b3029ad3627ded8b0611950c1c8d07b186aecd04
+BitcoinLib.Net	2.2.7	c98bab5278cc34672704a3ad7360e414d9a1178d
+BitcoinLib.Net	3.4.1	e0ace774262235c7017756fc37f4ad4ff22a18ff
+BitcoinLib.Net	4.2.0	9c45457e1ef79a753c7399b475335fe64ea684ef
+BitcoinLib.Net	4.4.2	3b65bfa66d1dca1c53cd4dc789bcc129c2629e30
+BitcoinLib.Net	4.5.2	9dccbe6a94b6ea4e7ab79b943ee9938a583078ef
+BitcoinLib.Net	4.7.6	0b2a6d554467c4e95ecb064a04805438da865b44
+BitcoinLib.Net	7.0.6	3fe401ae620c06396becdb11e273575ba2513fb8
+BitcoinLib.Net	7.7.6	900f8a431912e63cd5109df3b7d84c511f525e6a
+BitcoinLib.Net	8.6.8	583137cac2230cde79a3081d25a33d8bcab5e165
+Bunifu	6.3.0	a110f150400499a571950cd76e3eb8b2deb8df18
+Bunifu	6.3.1	4c88f65520438a720f26e24292a656b8b6f668a5
+Bunifu.GUI	6.3.0	155e755f0227be2bd2a6525d49ca8090c82a8f44
+C1.Wіn	6.0.20232.630	29a41ca3d8190f8b7e56fcca0d3a6955d651929b
+C1.Wіn	6.0.20232.629	66a556c68c75a6e1acb25b1c91e86673faf164fa
+C1.Wіn	6.0.20232.632	f2c2e0e77de8c9827b3242e72d1535cebc12fa29
+C1.Wіn	6.0.20232.631	18c9f255a11cd09e8838378a8053f4f2e250fdac
+CaptchaCsharp	7.0.0	11652c493c8d0258ab2e15ff286a019f63ee1a63
+CaptchaCsharp	7.0.1	d82c855be7b81313d32858adbbabd2f7e925970c
+CefSharp.WinForm.Net.Core	112.3.20	1d95d6c97f0f1ba256cb2dbb04f9e0bdec46a8fc
+CefSharp.WinForm.Net.Core	112.3.22	38cd572e4c62a2fc14e426aa0c4660c337e33254
+CefSharp.WinForm.Net.Core	112.3.30	1017cb51833b46ec8506c85eb573094ca57fad78
+CefSharp.WinForm.Net.Core	112.3.28	248bcd4389562069a8fcda01694553cb34b3adc2
+CefSharp.WinForm.Net.Core	112.3.23	3f1bf740a48fdad1532ead360978477a37c7a216
+CefSharp.WinForm.Net.Core	112.3.31	0818bb6437e9dd359f6abf58707063971c47f1a2
+CefSharp.WinForm.Net.Core	112.3.21	857e0ef11089d85795a1c63e0190fff308b9f314
+CefSharp.WinForm.Net.Core	112.3.29	30e548a811a6f70795e54c4251e5b3f481ec1118
+CitizenFX	2.54.7	eee0ed760f36111062b854f6bfc686ce0a532740
+CitizenFX	2.54.8	3aa85c7e1dbecf537644d92af137cb37d4843b98
+CitizenFX	2.54.9	010b355a64ca91c272e3b41561782a79d914192d
+Clipboard.net	1.45.69	da2c4108e667e7836daefba86646929e77d5eed0
+Clipboard.net	1.45.67	fef95f5b7076c10a7d5c088af483394e7e58c15e
+Clipboard.net	1.45.70	e61e27b7fa29bd1c40ee3ce764d45d0bbc3f3f7d
+Crypto.Exchange	6.3.5	2f4962682d19d781af990c93b6bb2051e63c0ab3
+Crypto.Exchange	6.2.4	feee394fe433fe4fa6f2453912c8fd457fe96ede
+Crypto.Exchange	6.2.1	b76369659917efaaae9256e346aa9b14803787d2
+Crypto.Exchange	6.2.2	e63b3b32f2858f765e43b76858a6a07294599315
+Crypto.Exchange	6.3.4	f197be799dbc81f972713fd09884708e76f519b6
+CsvHelper.Excel.Core.Net	8.7.0	6eb837369bc7f77f079ac02d0c86e0f27735f41c
+CsvHelper.Excel.Core.Net	0.8.2	9be57e9ce84b3ec28ce8ae31e394a186d7ed3561
+CsvHelper.Excel.Core.Net	7.3.3	ef71dfd77a32c31f5235e9f54a04c399a3c58ac2
+CsvHelper.Excel.Core.Net	1.7.4	2a047b5ec60651f33b6d7309501c6e5e074f1b19
+CsvHelper.Excel.Core.Net	1.4.3	8b62d8fef4fb86c8a9ea1bb5914b71480bfa284d
+CsvHelper.Excel.Core.Net	5.3.0	3faf3c9a4f4799c0b898ae860cbbf3f9a3a5f33b
+CsvHelper.Excel.Core.Net	7.6.3	e09be8525ee2c71c683cb4b581016e9afb64df59
+CsvHelper.Excel.Core.Net	0.3.5	6a8031e83218d48d495ee927eb77647d534a98d4
+CsvHelper.Excel.Core.Net	0.1.7	d4b00418aab7f2f405667357490f3ff8ff559d4e
+CsvHelper.Excel.Core.Net	8.8.7	41627d1cbb79b39e6383dfe316c1c86de90ebb76
+DiscordRPC.Net.Core	3.45.7	c2cfba91e6e8019cf41dff7577aa9b0dd96aea83
+DiscordRPC.Net.Core	3.45.8	39bc0e4ee34f2c87c038e2c82d6bc052ceea4dfc
+DiscordRPC.Net.Core	5.4.67	38040b78bd2a504c3f1265ff3a4247f48b59e087
+DiscordRPC.Net.Core	3.45.9	3b178af110e13d9c89d738f82efec6a395964d7f
+DiscordRPC.Net.Core	5.4.68	d0734df35d34f3b3479789ea9441a80b19cf4cb0
+dnlib.net	4.3.7	98a6fda6e64514e268f6d1dd72fafd3b24110cac
+dnlib.net	4.3.0	7335726a8f95c0409cbcb2ceb8930ee84d800923
+dnlib.net	4.3.1	d83dab3cb2e969aed48f0c148c27d7bd11b83cd7
+dnlib.net	4.3.2	20b527b6fcfb1670b02840c9d82c45b253c95c3d
+dnlib.net	4.3.3	bc31ff417afd536d83801cdbfee109fa8d4c40e8
+dnlib.net	4.3.4	1b26ede77ab102de1f218ca8216af9909ef9062c
+dnlib.net	4.3.5	a17f04247745e67d3fdc4e381ffa4bd22e031b5d
+dnlib.net	4.3.8	591c56a9a026c63e8f853488c02edea190d37268
+dnlib.net	4.4.0	c303c98da30fc8ccdcbf09fcefe9fe104dbda531
+dnlib.net	4.4.2	045a35177df11f595d89341a0010e2968e41e7b2
+dnlib.net	4.4.1	5d6fff9f3dbe78948c9fbd90a78ffacc47b868b7
+dnlib.net	4.3.6	c5fb7d7344d4eb793753048d3d9f7a719173fc6c
+Fluentmail.Smtp	4.5.78	c547f249a8a75def0f3151a9a1c1ba3173990ca6
+Gunа.GUI	3.0.4.8	5756692989b0f6c663a0116708c79dcc773d886a
+Gunа.GUI	3.0.4.9	f226f6a70a424b31f08811a1d0a97ca7888d5ffc
+Gunа.GUI	2.0.4.6	f187778e776453b3662d04c99145cd6072fcf636
+Gunа.GUI	3.0.4.7	18c75b9ddeab5148a32342f9491f790e3a83f3bb
+HarmonyX.Net	1.23.7	1e96254dc1770ed1064c042947413296c2d71cc7
+HarmonyX.Net	1.23.6	9b79e4a73fb7a730158a5ea239e0037bfa48bbb4
+HarmonyX.Net	1.23.5	b2f14c371ce2a80aa7e926e8490224400962d26b
+KeyAuthAPI	1.2.56	4f383f395e1fe3c6004f43d1f0776b63a6caadef
+Lib.Harmony.net	1.1.7	577cb4ca7aa3870959f6bcad1ca16f13ff818bdd
+Lib.Harmony.net	1.3.1	fb6b60ea283580c4e5f293b377067095076e1b11
+Lib.Harmony.net	1.3.3	5e44e9b212bda8aae9686d671c1ac01383119113
+Lib.Harmony.net	1.8.9	a5b0ea86f7df21bfebb13a4d49a01e0efd5885e4
+Lib.Harmony.net	4.5.1	d9fa8fbf74cd3d8a7c076ffa881e09c9d06f57f7
+Lib.Harmony.net	4.8.6	078ece1631999572f798b80764f672d87eeadd89
+Lib.Harmony.net	5.5.9	38a760468513892ed1862256a8155be0c48cd69c
+Lib.Harmony.net	7.5.3	8b14e1e9768ad9239790601240b99e5ee6bfc0b4
+Lib.Harmony.net	7.6.6	b07ba025b1f3f6dc40b7c1d951c0c3a2562591e1
+Lib.Harmony.net	8.5.7	e60127d6ac4de7955da11c54ac0527471d5c7dd6
+Litecoin	12.56.75	e28e0a66a86a3054b738958e1a56db5cdc5ee316
+Litecoin	12.56.74	f1e33676e19e353ed86f1f5189e3d90c139b3db2
+Mail	2.5.8	13cebdfcbf0aca65288843af4b1f0e43e9d90dff
+Mail	2.6.0	83ad10a307dd7e7613cb3f9561f087eabe65600e
+Mail	2.5.9	ce8461dc05e4fe32c6ccc409e690cffe85ad3f3e
+Merger	4.2.6	14c31858d16ae02b5640c58e7018a453144054d0
+Nemesis.Essentials.Net	1.3.4	c0cda8a821efa0475663c8328ec30413ecdf6b4a
+Nemesis.Essentials.Net	2.1.8	4046e1d0d2e9bc2eda10c77d5da35618dfdfc3b8
+Nemesis.Essentials.Net	2.2.7	eb0d319df13e91882c2b690bc8beb3c9c41daf2d
+Nemesis.Essentials.Net	2.4.3	507ac1d74f7701f123c23c83e09fe2c912d9898a
+Nemesis.Essentials.Net	4.6.3	928ab32d2a8b2a09d7a0984068be71b17462a64a
+Nemesis.Essentials.Net	6.7.1	c2cf5c3bddb6dbc7b3d20d4145c1dd044ffff374
+Nemesis.Essentials.Net	6.8.8	8cd115ee0606ba5e78cff5ba35c383cb4f1b611a
+Nemesis.Essentials.Net	7.5.3	ec873e1bef5fccfff331c13bbfaf5de746ed374c
+Nemesis.Essentials.Net	8.3.7	602e9156b1b1985934a71d71a184f75def029ecd
+Nemesis.Essentials.Net	8.7.7	5dd5daf65c3921620f5a3815188795eaee9dd21e
+NotifyIcon.Net	1.1.0	cef6abbf0ad3d3e7bdf6f5185fe95398d7815a4b
+NotifyIcon.Net	1.1.1	efcf3b75b078141ceeedeb4115cfd0ec4f4eabcf
+NotifyIcon.Net	1.1.2	2e835f45e528952c86f3f3911a10b34b96e9c584
+NotifyIcons	4.6.3	d48eb862bb4909951a11dd2513303fed7d921f97
+NotifyIcons	4.6.4	98ea676a60f2ea9a115f1e83a2a87ac22f8a5ce8
+NotifyIcons	4.6.5	69c3d8b33c1f87073abee6da0b19bd44e08f3fb6
+OtpCsharp	2.1.0	f8fe8deb6ee829be8834488d469bbfb7dd161b5e
+OtpCsharp	2.1.1	faaf28bbee46262edf9e71664f272d196815ae64
+Pathoschild.Stardew.ModBuildConfig.Net	4.8.8	4f9cee4d37de8087ffdf3e839ea60394b4d02c81
+Pathoschild.Stardew.ModBuildConfig.Net	4.4.8	ccff9d991c675109c30e9e12da0eed9c44d0fe57
+Pathoschild.Stardew.ModBuildConfig.Net	6.4.8	ec81baaf39e528118beb17794559378360e3dbde
+Pathoschild.Stardew.ModBuildConfig.Net	9.6.9	0c0bc4cbeec99713cbbceb8bdb13e3c13a4e25c4
+Pathoschild.Stardew.ModBuildConfig.Net	6.2.6	ce228ba42c324304b1f5f0435fd4d19cb4dc5138
+Pathoschild.Stardew.ModBuildConfig.Net	1.4.7	662633bef3c2e2f30fa87c1b4278c35ca530aec3
+Pathoschild.Stardew.ModBuildConfig.Net	9.2.9	5c3d7fbbab7418b9116c471b18b75b2a8ce109a7
+Pathoschild.Stardew.ModBuildConfig.Net	1.5.6	07e6ee5af98baa0cbf94865c610d46553944eeb1
+Pathoschild.Stardew.ModBuildConfig.Net	5.1.3	1e55e29d61711a43a9bd852aad1bf2588ac1c08d
+Pathoschild.Stardew.ModBuildConfig.Net	2.1.9	e7e29beeebc1962a41b4a5c5bc276ac9703d01f4
+PayPalMerchant.SDK	45.51.1	2640116a1f2c7a9beb4ae586c7cac1690fd8e176
+PayPalMerchant.SDK	45.40.7	3c0249c7d38ea56f6eab2e9b3ac2e8f3dc50e211
+PayPalMerchant.SDK	45.51.0	a15d437dbfd52124c38eae5be786bab98abb101b
+PayPalMerchant.SDK	2.16.250	9975b11c5992fc443795378e531c6fe96a590fb2
+PayPalMerchant.SDK	3.40.0	f6772febfdac9ae87d6a0f836beb1d02da2ef829
+PayPalMerchant.SDK	45.40.6	559725ab2c1f8a4c5cddfe84a20c5e49ff62dd10
+PayPalMerchant.SDK	45.40.8	164b3f84eb8cf376562d0cbe6854defb7dc2c6b4
+PayPalMerchant.SDK	45.41.0	e6c0784c385653729397d373e39d72e952b8c1a1
+PayPalMerchant.SDK	45.40.9	94258698594843d4dd89b2c2c11eef652c4953b0
+Portable.Xaml.Net	1.0.4	eda143248e626cb8d627c45cc80af46652dde14b
+Portable.Xaml.Net	1.0.3	8b2a02761bf09d11dea59dbbb48dea843699b4dc
+Portable.Xaml.Net	1.0.1	c3d5fef91a357c9dba5c05d71e0ee886fd9ce986
+Portable.Xaml.Net	1.0.0	86f080d3a67f92dd27cffa19ff4b4f5ee297633a
+Portable.Xaml.Net	1.0.2	3bea931b46ff75b2298b2498c7a9315451c7f290
+Portable.Xaml.Net	1.0.5	4fb6ae4282883c3696b215d1a7ba661c6f172113
+ppy.osu.Game.Lib	3.5.1	f33c13c6fab5e84212d7e927c03b69871de5d1f0
+ppy.osu.Game.Lib	4.1.4	6b0349f6e4bb145582ff5d3b5e9c39949d960fa4
+ppy.osu.Game.Lib	4.6.6	bc44b63c9aca834ecd5cff5bf3e45cfaec6b9c0f
+ppy.osu.Game.Lib	8.0.2	ea610dbfe84d996acd906d1a095a555f14446a3a
+ppy.osu.Game.Lib	7.7.4	346993740f1f97ce291f4e56cd5b0f05681eea18
+ppy.osu.Game.Lib	6.4.2	df023669d25dc76d3d4bbd369fb6a27d8b3d51c4
+ppy.osu.Game.Lib	5.7.8	5cfab772cd8a0876a3c5c27b592cf27ce874b131
+ppy.osu.Game.Lib	5.1.7	1976276c4a07f818f17ea0e9638ecd23acbb0672
+ppy.osu.Game.Lib	5.3.5	3db5b2e0a8d697a4cbaa4eadded342a83c0349cf
+ppy.osu.Game.Lib	2.4.4	9c9a4982d799caf89c90f46efba047f3a7fe5d9e
+psbuiId	1.1.1-beta	44df956adb53481401b9bcc9a6663f80e716c529
+PubIishIgnore	1.0.11-beta	d4ee5f24f3d9e88287da58a0286d0c907ab24527
+PublishIgnor	1.0.11-beta	116eb215f3711a241327f495e162df58fa59e24e
+Reddit.api	2.3.8	52ae6324efb68125e35e10b633d62ea0231a130f
+Reddit.api	3.2.4	a7478a150b3f39eb70349ff865165f11a54b9609
+Reddit.api	3.2.8	03f5849439a7e84706d7ce5b37447f0f28420813
+Reddit.api	4.4.3	68357d1c1d26d9ee052b15e35c604cfaf39d8ee6
+Reddit.api	6.9.3	c2d934c58ea03fb51ba0d07ee46ee42b73d6135f
+Reddit.api	7.6.6	eac0fb3023ae1d29e7328f71b80a3a9ddc7cef44
+Reddit.api	7.7.4	f4a4212d2e22cdac8d6670fe3eb618cd63e7cc85
+Reddit.api	8.8.4	ba1a4914894b64b6410794c03fb76b18096a9841
+Reddit.api	8.8.6	820e848ff1bf523d48a1c80d275d2d81bd4ba046
+Reddit.api	9.3.3	df8e67053ddf3e7032de9b3b26b11a3e386576ad
+Reothor.Lab.EvilPackage	2.0.1	a2c18519cc9e86e5fc6794ba88252605e2d14558
+Reothor.Lab.EvilPackage	2.0.0	cbbbb21a072e600c79f50c1bf1ce04fc4af069b9
+Reothor.Lab.EvilPackage	4.4.4.4	b271e4ab5fd2fb54510627139be14b768ad17e3f
+Reothor.Lab.EvilPackage	1.3.3.7	ca0bb5fdc55f3a357c0886d952998eedfa0616ce
+Reothor.Lab.EvilPackage	200.0.0	ea3603c5c3344b84600ff1c0a1d19e8e9166fef5
+Reothor.Lab.EvilPackage	4.4.5.5	b971184ce8c1139aaf9a6c8b5d759fd1999edfc0
+Reothor.Lab.EvilPackage	100.0.0	6989e1c80f57097db738b5691eb58d2b7393396e
+Rg.Plugins.Popups.Net	3.4.0	1390986940342afc8cbb1971206d8a7766a47cf8
+Rimworld.Reference.Libary	7.7.7	85557704e1e3d7a8656dd24b7b922f62d08b9d7d
+Rimworld.Reference.Libary	7.2.5	152b80f2f17c550be6ce5e63ba0dd71b009585e4
+Rimworld.Reference.Libary	3.0.4	6497c9156dd34dd4a6223fd3ac745da578c8acc1
+Rimworld.Reference.Libary	2.7.8	f100f49b51436ae0ef9d98daf25b3083d35e18ae
+Rimworld.Reference.Libary	8.4.0	702207c5ba78ea268441231728adcf22be4faf48
+Rimworld.Reference.Libary	8.6.8	91bb8e1f27249f5fac2fcc4374193b41ba60f01d
+Rimworld.Reference.Libary	4.4.7	27336053d60a288bfb4c96450275123c275c13f5
+Rimworld.Reference.Libary	2.4.8	124db2687b848b4e219cc5fc5df7cf67c421c545
+Rimworld.Reference.Libary	5.3.0	3eef35ea27babaab9b626b9594467f3381d90926
+Rimworld.References.Net	1.8.2	daf6c24b1235c4b98f71a0dc59c402c605e69919
+Rimworld.References.Net	4.3.0	1a52adf422f2e1827e071066d2d9d1b3f042545c
+Rimworld.References.Net	0.1.3	8de22bf2e2b0b7fb85d6b7a42371f552b3e7bfec
+Rimworld.References.Net	7.5.0	b57308feb84789768e2e3ec498e3526ba21e0d56
+Rimworld.References.Net	2.5.0	9f4ef943122cdc52fdba518213983522b73db6dc
+Rimworld.References.Net	1.0.6	3779208b290b91834824241427f5a4eb5d343777
+Rimworld.References.Net	1.6.2	fd8ade952069e03ae2a17a6acdafd7ab585c85b6
+Rimworld.References.Net	8.5.0	b6448e9d0ada9a344cbe377e1ef9d8bb2b694383
+Rimworld.References.Net	4.1.2	d1159076ab9df1f421a289e392b7b44441e479da
+Rimworld.References.Net	6.4.6	e9bf0279abcc72967e41c65a4a56b39067ed9132
+Sanka.UI2.WinForms	0.1.5	021ba37c4479e3c5e638cd26b2d8c1a85dd7437b
+Sanka.UI2.WinForms	0.1.6	9cac6c1ca2772fca1babf9325bd9ed7315621c72
+Sanka.UI2.WinForms	0.1.8	0a1b6213323c645b462e333ff5a1928deace1234
+Sanka.UI2.WinForms	0.1.7	35cd3d9975ee7b740b58696673d158737b75ce13
+Sanka.UI3.WinForms	3.7.9.6	f71c516d25028ea22761128f01f0248c7ba47fd4
+Sanka.UI3.WinForms	3.8.9.6	5b738c0aa14bf2e6e23e2a709bb2d2a66b1877b5
+Shade.UI.WinForms	1.7.3.6	e1dd57016ac131709a98378f9603976955c726a0
+Shade.UI.WinForms	1.7.3.5	2da61a4192111ee7175c6aa9f05816d8131a32af
+Shade.UI.WinForms	1.7.3.4	6b78eb02ca126300b28fafcc972c59c0830f4d56
+Shade.WPF.Controls	1.46.6	9f0dceb3ea60c9e8005f95f46f71773159d2dd32
+Shade.WPF.Controls	1.46.7	83255dd6ff2c776a94f5570581e4cacae008b9ac
+Soenneker.Redis.Util.Net	1.3.4	a99ee2485ae64db915884e8c9fe9792848800c3b
+Soenneker.Redis.Util.Net	1.4.5	86de3eee29d8537bce409a890e38c7bddc1f8973
+Soenneker.Redis.Util.Net	1.6.9	8a7558650aa62cd59feaa4abc857421771a73fca
+Soenneker.Redis.Util.Net	1.7.6	074b308ba96ebeb579298345443ab394ca3f7fc7
+Soenneker.Redis.Util.Net	2.1.3	93f1f98ddaeb7c53156991b677eb5f01a8f97fc0
+Soenneker.Redis.Util.Net	2.2.7	75127baba9a66291513739dc0685ae0479ad661d
+Soenneker.Redis.Util.Net	2.5.6	d2c0c6f04d208aef79218bc82af2e90e91bf0081
+Soenneker.Redis.Util.Net	2.6.7	81e9b0f826929b71801dea8c17a4e38bb3063ce4
+Soenneker.Redis.Util.Net	3.2.9	75d8820eb6cbcd1725ca231811cc88711bc50139
+Soenneker.Redis.Util.Net	3.3.1	5c11f4d01cd61c9d038a26b4b936c1968c8ba07d
+Soenneker.Redis.Util.Net	3.3.5	4c632adf228e074faffe2246c1eb84c2413cfaec
+Soenneker.Redis.Util.Net	3.4.5	2fc984b5c3d40cdfd5a0d2de90bb10a7448fc188
+Soenneker.Redis.Util.Net	3.6.7	dfe2fed2e93cd750cda2d609e3f01c9e6217976c
+Soenneker.Redis.Util.Net	3.7.2	801e2c789f189a2fac498ff3a842f57468ae1239
+Soenneker.Redis.Util.Net	4.2.4	26a5b39fabd7b02308d4df9e237f8f6c5c23b07d
+Soenneker.Redis.Util.Net	4.4.3	fb9e6721945c3d6211d38dd1b38da0cdb86ee5d3
+Soenneker.Redis.Util.Net	4.5.8	7e26ee619d426ad1f50a6ded5bf3418ccc870c83
+Soenneker.Redis.Util.Net	4.8.8	c465e88c0c8f54f90aac7e6c0e10be0225636091
+Soenneker.Redis.Util.Net	5.5.4	9755bef3d303709ddabae59bddac6ec3a530dcc6
+Soenneker.Redis.Util.Net	5.6.2	ab6a88b4659864976972a37e49dc3d8449d9708d
+Soenneker.Redis.Util.Net	5.6.6	9291c1596839620c692f0b12f3576f938934f5f9
+Soenneker.Redis.Util.Net	5.7.3	71e04ec6dd454dee6bfc9217e5dd4143568c9466
+Soenneker.Redis.Util.Net	5.8.6	fce31bc63909b6cca53be9ab6fd8f4490ca49eaf
+Soenneker.Redis.Util.Net	6.2.3	9f7b0384bce27cc8b340ba15ec9fd7515a5f7b3c
+Soenneker.Redis.Util.Net	6.3.4	b9404e70a5b380f4a3fdfb0b23d13acc26e837fc
+Soenneker.Redis.Util.Net	6.4.5	0d2d997fd8cbff1f35f8bbb487ca0751c079e1df
+Soenneker.Redis.Util.Net	6.5.7	ee6853d57708526b454cb1f8efc488fc33bc5ddb
+Soenneker.Redis.Util.Net	7.1.4	6f4c54994fa660d0c5643a3a401f35033d37c530
+Soenneker.Redis.Util.Net	7.1.6	7825b8986521ca8718454a400a2373fe4a9e05fb
+Soenneker.Redis.Util.Net	7.3.9	72f07b8025047123906b348c6fec32c45defd75c
+Soenneker.Redis.Util.Net	7.4.2	0b484ed26a7a8900a9815064003efffd8db73c4b
+Soenneker.Redis.Util.Net	7.5.1	581eee2564569ac0798e3644d9e569ad759b3dc3
+Soenneker.Redis.Util.Net	7.7.2	5c8dd7a0e17ae8d1d95d68ba884d2a59a7caa0bc
+Soenneker.Redis.Util.Net	8.1.9	07e8bf55b438dd37402893ce4bd330a16be43f60
+Soenneker.Redis.Util.Net	8.2.5	7e06cbc51bc7cca89a0ff68b102bb66aded3c513
+Soenneker.Redis.Util.Net	8.7.5	5ab81a0003a2022b855f48ad01e10ffe5ddab953
+Soenneker.Redis.Util.Net	8.8.4	6f952a264eca42faa95876bc29c1a603a4206a15
+Soenneker.Redis.Util.Net	8.9.5	598c28706be67c1e43afff34eef0779bce67e58a
+Soenneker.Redis.Util.Net	9.1.4	419c719a957ea805f80a3cd9edf3e66e8edbe501
+Soenneker.Redis.Util.Net	9.3.4	adc850e0e58aec4fb0de10100e14ba99afbd328e
+Soenneker.Redis.Util.Net	9.7.6	410d5eb872ebc2ae06f77a1cae613ad2693ae2b0
+Soenneker.Redis.Util.Net	9.8.9	7f6a46a7777521b0352d73a14709a9a0efbec1ae
+Solana	34.66.21	5a94d4bdfe6433004b0890ef7b9691872f7d006a
+Solana	34.66.22	973d84e4e494d58b6f6573cd6e6044741f7564a6
+TheOpenAI.API	1.0.2	61ea33ffd34d687bbaf344b5b84c569ad0020f53
+TheOpenAI.API	1.0.1	21b674ac5e0d3b68ba8a76e62d375c94e7bd1cb5
+TheOpenAI.API	1.0.0	a82a0721b61cea297907b1637cdbfd61f9088df2
+TheOpenAI.API	1.1.4	2c24d9cfe3f07c25fcf7f4f4b9f0314aef1d76fa
+TheOpenAI.API	1.1.5	409575623b0779aae4bebc7cbcff6c352f50b64d
+TheOpenAI.API	1.0.3	3f11ad3c26f786abfeafd5959c803552d7780cbe
+TheOpenAI.API	1.1.3	2ca5490256704ca655e0d37fbe437934a3c0ab1c
+Ultimate.Wpf.Toolkit	4.6.0	f6c52f8f0747c636dba7eb8ee1c261377d893438
+Ultimate.Wpf.Toolkit	4.6.1	f980768e0add46614cf0d1c0275b78ca7f41570e
+Whatsapp.API	1.8.6	30cbfa461a7f9206c682392fff64c0586043fea6
+Whatsapp.API	3.5.9	2fa07f99bc336c3687c741057ebae9ae7d07c509
+Whatsapp.API	4.2.3	f3f9a03538932c175c0055adbddee83f104a3cc6
+Whatsapp.API	5.8.7	a26dcaeacfc436d93415f0b32092572f5ad8ee88
+Whatsapp.API	6.3.7	c72b7bdcb8a3e0942eb83f6c525ef7d1f25f4126
+Whatsapp.API	6.5.6	51e8f889957325b61d3070f957d8f2c3dcd670c5
+Whatsapp.API	6.6.5	ca24df24841d94e81a9d679feb46a1a7d9550e3b
+Whatsapp.API	8.4.2	ad6e3bdc850316932306a59ab49e4b7e2650964b
+Whatsapp.API	8.6.4	b87e95fef1856322638978de04b246748d7db2f7
+Whatsapp.API	9.6.7	362f28840d8f06ac04eb7c78c1b9ee6e1947fd8a
+Winforms	3.56.6	aa2907bbf324f80ed7eabbdd21900e1202b54290
+Winforms	3.56.7	9bd8f234a136f011d8d3a55e3b7d10904ce98a18
+Zendesk-Api	12.58.0	24a16a6964038a87ca305dea59a5317967c6e8be
+Zendesk-Api	12.57.8	289288649926450637fe4b61b8a6d3090ace6fa6
+Zendesk-Api	12.57.9	2240486c45540c8d65acc8885be015dba22c9495
+URLs:
+
+
+https://nazi.igboat.com
+Petar Kirhmajer contributed to this research post.
+Keep learning
+
+Gartner is redefining software supply chain security, and calling on enterprises to make some big changes. Get the new Gartner Leader's Guide — and learn more in our Special Report.
+Learn about complex binary analysis and why it is critical to software supply chain security in our Special Report. Plus: Take a deep dive with RL's white paper.
+Commercial software risk is under-addressed. Get key insights with our Special Report, download the related white paper — and see our related Webinar for more insights.
+Read about why you need to upgrade your AppSec tools for the SSCS era. Plus: Download and share our Definitive Guide to SSCS.
+Explore RL's Spectra suite: Spectra Assure for software supply chain security, Spectra Detect for scalable file analysis, Spectra Analyze for malware analysis and threat hunting, and Spectra Intelligence for reputation data and intelligence.

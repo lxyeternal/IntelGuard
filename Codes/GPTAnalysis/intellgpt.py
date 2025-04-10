@@ -32,9 +32,9 @@ class IntelliLLM:
         current_dir = os.path.dirname(__file__)
         codes_dir = os.path.dirname(current_dir)
         project_dir = os.path.dirname(codes_dir)
-        self.json_dir = os.path.join(project_dir, "Dataset", "IntelliJson")
-        self.content_dir = os.path.join(project_dir, "Dataset", "Content")
-        self.images_dir = os.path.join(project_dir, "Dataset", "Image")
+        self.json_dir = os.path.join(project_dir, "Dataset", "IntelliJson", "osv_search")
+        self.content_dir = os.path.join(project_dir, "Dataset", "Content", "osv_search")
+        self.images_dir = os.path.join(project_dir, "Dataset", "Image", "osv_search")  # modified by gjj
         self.common_words_file = os.path.join(project_dir, "archive", "common_word.txt")
         self.all_entity_file = os.path.join(current_dir, "EntityRules", "all_entity")
         self.intelli_direct_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_direct")
@@ -59,8 +59,6 @@ class IntelliLLM:
             azure_endpoint=self.config["azure_api_base"]
         )
 
-
-
     # 读取提示文件内容
     def read_file(self, file_path):
         with open(file_path, 'r', encoding='utf-8') as file:
@@ -75,7 +73,6 @@ class IntelliLLM:
     def encode_image(self, image_path):
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
-
 
     def extract_package_names(self, content):
         # PyPI 和 npm 的正则表达式
@@ -331,25 +328,25 @@ class IntelliLLM:
 if __name__ == '__main__':
     # 使用示例
     ltmgpt = IntelliLLM()
-    ltmgpt.start("test")
-    # ltmgpt.start("bleepingcomputer")
-    # ltmgpt.start("checkmarx")
+    # ltmgpt.start("test")
+    ltmgpt.start("bleepingcomputer")
+    ltmgpt.start("checkmarx")
     # ltmgpt.start("checkpoint")
     # ltmgpt.start("cybersecuritynews")
     # ltmgpt.start("datadoghq")
-    # ltmgpt.start("fortinet")
+    ltmgpt.start("fortinet")
     # ltmgpt.start("jfrog")
-    # ltmgpt.start("medium")
+    ltmgpt.start("medium")
     # ltmgpt.start("medium_recommand")
-    # ltmgpt.start("phylum")
+    ltmgpt.start("phylum")
     # ltmgpt.start("qianxin")
     # ltmgpt.start("reversinglabs")
     # ltmgpt.start("rhisac")
     # ltmgpt.start("securityaffairs")
     # ltmgpt.start("securityweek")
     # ltmgpt.start("snyk")
-    # ltmgpt.start("socket")
-    # ltmgpt.start("sonatype")
+    ltmgpt.start("socket")
+    ltmgpt.start("sonatype")
     # ltmgpt.start("sonatype_oss")
-    # ltmgpt.start("thehackernews")
+    ltmgpt.start("thehackernews")
     # ltmgpt.start("tuxcare")
