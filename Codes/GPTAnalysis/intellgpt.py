@@ -14,16 +14,8 @@
 import re
 import os
 import json
-import time
-import nltk
 import base64
-import tiktoken
-from openai import AzureOpenAI
-from nltk.corpus import stopwords
-# 首次使用时需要下载停用词集
-nltk.download('stopwords')
-# 获取英语停用词集xw
-stop_words = set(stopwords.words('english'))
+from llmquery import LLMAgent
 
 
 class IntelliLLM:
@@ -32,76 +24,104 @@ class IntelliLLM:
         current_dir = os.path.dirname(__file__)
         codes_dir = os.path.dirname(current_dir)
         project_dir = os.path.dirname(codes_dir)
-        self.json_dir = os.path.join(project_dir, "Dataset", "IntelliJson", "osv_search")
-        self.content_dir = os.path.join(project_dir, "Dataset", "Content", "osv_search")
-        self.images_dir = os.path.join(project_dir, "Dataset", "Image", "osv_search")  # modified by gjj
-        self.common_words_file = os.path.join(project_dir, "archive", "common_word.txt")
-        self.all_entity_file = os.path.join(current_dir, "EntityRules", "all_entity")
-        self.intelli_direct_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_direct")
-        self.info_verify_prompt_path = os.path.join(current_dir, "LtM_prompts", "intelli_entity_verify")
-        self.functionality_file = os.path.join(current_dir, "EntityRules", "functionality_list")
-        self.exoutput_file = os.path.join(current_dir, "Exoutput", "intelli_output2")
-        self.intelli_direct_prompt = self.read_file(self.intelli_direct_prompt_path)
-        self.infoverify_prompt = self.read_file(self.info_verify_prompt_path)
-        self.all_entity = self.read_file(self.all_entity_file)
-        self.functionality_list = self.read_file(self.functionality_file)
-        self.exoutput = self.read_file(self.exoutput_file)
-        self.common_words = set()
-        self.regex = r"(?:@[a-zA-Z0-9\-]+\/)?[a-zA-Z0-9][a-zA-Z0-9\._\-]+"
-        self.dealt_pkgs = list()
-        self.max_attempts = 5  # 最大尝试次数
-        self.config_path = os.path.join(os.path.dirname(__file__), "..", "..", "Configs", "config.json")
-        with open(self.config_path, 'r') as file:
-            self.config = json.load(file)
-        self.oclient = AzureOpenAI(
-            api_key=self.config["azure_api_key"],
-            api_version=self.config["azure_api_version"],
-            azure_endpoint=self.config["azure_api_base"]
-        )
+        self.json_dir = os.path.join(project_dir, "Dataset", "IntelliJson")
+        self.content_dir = os.path.join(project_dir, "Dataset", "Content")
+        self.images_dir = os.path.join(project_dir, "Dataset", "Image")
+        # Three-stage prompt file paths
+        self.intelli_related_prompt_path = os.path.join(current_dir, "Prompts", "intelli_related.txt")
+        self.intelli_extract_prompt_path = os.path.join(current_dir, "Prompts", "intelli_extract_v2.txt")
+        self.intelli_verify_prompt_path = os.path.join(current_dir, "Prompts", "intelli_verify_v2.txt")
+           
+        # Read prompt content
+        self.intelli_related_prompt = self.read_file(self.intelli_related_prompt_path)
+        self.intelli_extract_prompt = self.read_file(self.intelli_extract_prompt_path)
+        self.intelli_verify_prompt = self.read_file(self.intelli_verify_prompt_path)
+        
+        # Initialize two different LLM agents for different stages
+        # Small model for relevance analysis (Stage 1)
+        self.small_model_agent = self._create_small_model_agent()
+        # Large model for entity extraction and verification (Stage 2 & 3)
+        self.large_model_agent = self._create_large_model_agent()
+    
+    def _create_small_model_agent(self):
+        """Create LLM agent configured for small model (for relevance analysis)"""
+        small_agent = LLMAgent()
+        # Override config for small model efficiency
+        small_agent.config.update({
+            "openai_api_model": "gpt-4.1-mini",   # Use faster, cheaper mini model
+        })
+        # Reinitialize clients with new config
+        small_agent._init_clients()
+        print(f"Small model agent configured: {small_agent.config.get('openai_api_model', 'N/A')}")
+        return small_agent
+    
+    def _create_large_model_agent(self):
+        """Create LLM agent configured for large model (for extraction and verification)"""
+        large_agent = LLMAgent()
+        # Override config for large model power
+        large_agent.config.update({
+            "openai_api_model": "gpt-4.1",       # Use full GPT-4.1 model
+            "default_max_tokens": 4000,          # Longer responses for detailed extraction
+        })
+        # Reinitialize clients with new config
+        large_agent._init_clients()
+        print(f"Large model agent configured: {large_agent.config.get('openai_api_model', 'N/A')}")
+        return large_agent
 
-    # 读取提示文件内容
+    # Read prompt file content
     def read_file(self, file_path):
         with open(file_path, 'r', encoding='utf-8') as file:
             content = file.read()
         return content
 
-    def load_common_words(self):
-        with open(self.common_words_file, 'r', encoding='utf-8') as file:
-            for line in file:
-                self.common_words.add(line.strip().lower())
 
     def encode_image(self, image_path):
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
 
-    def extract_package_names(self, content):
-        # PyPI 和 npm 的正则表达式
-        try:
-            unique_words = list()
-            matches = re.findall(self.regex, content)
-            # 去除重复的匹配项
-            unique_matches = set(matches)
-            for word in unique_matches:
-                if word.endswith(".") or word.endswith(","):
-                    word = word[:-1]
-                    if word.lower() not in self.common_words:
-                        unique_words.append(word)
+    def extract_and_convert_image_paths(self, content):
+        """Extract image paths from text and convert to local paths"""
+        image_paths = []
+        
+        # Match lines starting with image:
+        image_pattern = r'image:\s*(.+)'
+        matches = re.findall(image_pattern, content)
+        
+        for match in matches:
+            # Clean path, remove extra spaces
+            original_path = match.strip()
+            
+            # Convert Windows path format to macOS format
+            # D:/Desktop/malware/IntelliGraph\Dataset\Image\... -> /Users/blue/Documents/Github/IntelliGraph/Dataset/Image/...
+            if original_path.startswith('D:/Desktop/malware/IntelliGraph'):
+                # Replace root path
+                converted_path = original_path.replace('D:/Desktop/malware/IntelliGraph', self.images_dir.replace('/Dataset/Image', ''))
+                # Convert backslashes to forward slashes
+                converted_path = converted_path.replace('\\', '/')
+                
+                # Check if file exists
+                if os.path.exists(converted_path):
+                    image_paths.append({
+                        'original': original_path,
+                        'converted': converted_path,
+                        'exists': True
+                    })
                 else:
-                    if word.lower() not in self.common_words:
-                        unique_words.append(word)
-            unique_words = set(unique_words)
-            return unique_words
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            return set()
+                    image_paths.append({
+                        'original': original_path,
+                        'converted': converted_path,
+                        'exists': False
+                    })
+            else:
+                # For other path formats, record but don't convert
+                image_paths.append({
+                    'original': original_path,
+                    'converted': original_path,
+                    'exists': os.path.exists(original_path) if original_path.startswith('/') else False
+                })
+        
+        return image_paths
 
-    # 读取处理过的包名文件列表
-    def load_dealt_pkgs(self):
-        target_dir = os.path.join(self.json_dir, self.source_dir)
-        if not os.path.exists(target_dir):
-            return
-        self.dealt_pkgs = os.listdir(target_dir)
-        self.dealt_pkgs = [json_file.replace("_extract_gpt4.json", ".txt").replace("_verify_gpt4.json", ".txt") for json_file in self.dealt_pkgs if json_file != ".DS_Store"]
 
     @staticmethod
     def read_txt(file_name):
@@ -109,244 +129,297 @@ class IntelliLLM:
             content = f.read()
         return content
 
-    @staticmethod
-    def save_json(data, file_name):
-        # 获取文件夹路径
+    def save_json(self, data, file_name):
+        # Get folder path
         folder = os.path.dirname(file_name)
-        # 如果文件夹不存在，则创建它
+        # If folder doesn't exist, create it
         if not os.path.exists(folder):
             os.makedirs(folder)
-        with open(file_name, "w", encoding="utf-8") as f:
-            f.write(data)
-
-    # 计算消息的token数量
-    def num_tokens_from_messages(self, content, model="gpt-3.5-turbo-16k-0613"):
-        """Return the number of tokens used by a list of messages."""
-        try:
-            encoding = tiktoken.encoding_for_model(model)
-        except KeyError:
-            print("Warning: model not found. Using cl100k_base encoding.")
-            encoding = tiktoken.get_encoding("cl100k_base")
-        if model in {
-            "gpt-3.5-turbo-0613",
-            "gpt-3.5-turbo-16k-0613",
-            "gpt-4-0314",
-            "gpt-4-32k-0314",
-            "gpt-4-0613",
-            "gpt-4-32k-0613",
-        }:
-            pass
-        elif model == "gpt-3.5-turbo-0301":
-            pass
-        elif "gpt-3.5-turbo" in model:
-            print("Warning: gpt-3.5-turbo may update over time. Returning num tokens assuming gpt-3.5-turbo-0613.")
-            return self.num_tokens_from_messages(content, model="gpt-3.5-turbo-0613")
-        elif "gpt-4" in model:
-            print("Warning: gpt-4 may update over time. Returning num tokens assuming gpt-4-0613.")
-            return self.num_tokens_from_messages(content, model="gpt-4-0613")
+        
+        # Ensure data is in string format
+        if isinstance(data, dict):
+            data_str = json.dumps(data, ensure_ascii=False, indent=2)
         else:
-            raise NotImplementedError(
-                f"""num_tokens_from_messages() is not implemented for model {model}. See https://github.com/openai/openai-python/blob/main/chatml.md for information on how messages are converted to tokens.""")
-        num_tokens = len(encoding.encode(content))
-        return num_tokens
+            data_str = str(data)
+            
+        with open(file_name, "w", encoding="utf-8") as f:
+            f.write(data_str)
 
-    # 将内容分割为多个片段以适应token限制
-    def token_slice(self, content):
-        encoding = tiktoken.encoding_for_model("gpt-3.5-turbo-16k-0613")
-        content_tokens = encoding.encode(content)
-        token_limit = 30000
-        segments = []
-        current_segment = []
-        current_length = 0
-        decode_segments = []
-        for token in content_tokens:
-            if current_length + 1 > token_limit:  # 达到或超过限制则开始新段
-                segments.append(current_segment)
-                current_segment = [token]
-                current_length = 1
-            else:
-                current_segment.append(token)
-                current_length += 1
-        if current_segment:
-            segments.append(current_segment)
-        for segment in segments:
-            segment_text = encoding.decode(segment)
-            decode_segments.append(segment_text)
-        return decode_segments[0]
 
-    def azure_query(self, message_text, max_tokens):
-        max_tokens = 16000
-        wait_time = 10
-        attempt = 0
-        output = ""
-        while attempt < self.max_attempts:
-            try:
-                completion = self.oclient.chat.completions.create(
-                    model="gpt-4o",
-                    messages=message_text,
-                    response_format={"type": "json_object"},
-                    temperature=0,
-                    max_tokens=max_tokens,
-                    top_p=0.3,
-                    frequency_penalty=0,
-                    presence_penalty=0,
-                    stop=None,
-                    stream=False
-                )
-                output = completion.choices[0].message.content
-                # output = completion.choices[0].message['content']
-                break  # 如果成功，跳出循环
-            except Exception as e:
-                print(f"Attempt {attempt + 1}: An error occurred: {e}")
-                attempt += 1
-                time.sleep(wait_time)
-                wait_time += 5  # 每次失败后增加等待时间
-        print(output)
-        return output
 
-    def parse_text_with_images(self, content):
-        content = content.replace('\\', '/')
-        # print(content)
+    def parse_text_with_images(self, content, source_dir, txt_file_name):
+        """Parse text content containing image references and return message list in correct order"""
         messages = []
-        # 正则匹配所有 image: 路径
-        pattern = r'image:\s*([^\s]+)'
-        parts = re.split(pattern, content)
-        combined_content = []  # 用于存储组合后的 text 和 image_url
-
-        for index, part in enumerate(parts):
-            if index % 2 == 0:
-                # 偶数索引是文本
-                if part.strip():
-                    combined_content.append({
-                        "type": "text",
-                        "text": part.strip()
-                    })
-            else:
-                # 奇数索引是图片路径
-                # image_rel_path = part.strip().replace('\\', '/')
-                path_parts = part.strip().split('/')
-                if len(path_parts) >= 2:
-                    # 提取最后两个部分
-                    new_rel_path = os.path.join(*path_parts[-2:])
-                    # 拼接固定的基础路径
-                    full_image_path = os.path.join(self.images_dir, self.source_dir, new_rel_path)
-                    # 规范化路径
-                    full_image_path = os.path.normpath(full_image_path)
-                    # print(full_image_path)
-                    if os.path.exists(full_image_path):
-                        base64_image = self.encode_image(full_image_path)
-                        if base64_image:
-                            combined_content.append({
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{base64_image}"
-                                }
-                            })
-                    else:
-                        combined_content.append({
+        
+        # Split content by lines to preserve order
+        lines = content.split('\n')
+        current_text_parts = []
+        
+        for line in lines:
+            if line.strip().startswith('image:'):
+                # Before processing image, add accumulated text if any
+                if current_text_parts:
+                    text_content = '\n'.join(current_text_parts).strip()
+                    if text_content:
+                        messages.append({
                             "type": "text",
-                            "text": f"[图片不存在: {new_rel_path}]"
+                            "text": text_content
+                        })
+                    current_text_parts = []
+                
+                # Process image
+                image_path = line.strip().replace('image:', '').strip()
+                
+                # Replace the old path prefix with new one - only replace the specific prefix
+                if image_path.startswith('D:/Desktop/malware/'):
+                    image_path = image_path.replace('D:/Desktop/malware/', '/Users/blue/Documents/Github/')
+                
+                # Normalize path separators for the current system
+                image_path = image_path.replace('\\', '/')
+                
+                print(f"Looking for image: {image_path}")
+                
+                if os.path.exists(image_path):
+                    base64_image = self.encode_image(image_path)
+                    if base64_image:
+                        messages.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        })
+                    else:
+                        messages.append({
+                            "type": "text",
+                            "text": f"[Image encoding failed: {os.path.basename(image_path)}]"
                         })
                 else:
-                    combined_content.append({
-                        "type": "text",
-                        "text": f"[无效的图片路径: {part}]"
+                    messages.append({
+                        "type": "text", 
+                        "text": f"[Image not found: {image_path}]"
                     })
-
-        # 将组合后的文本和图片内容一起作为 "content" 发送
-        if combined_content:
+            else:
+                # Accumulate text lines
+                current_text_parts.append(line)
+        
+        # Add any remaining text at the end
+        if current_text_parts:
+            text_content = '\n'.join(current_text_parts).strip()
+            if text_content:
+                messages.append({
+                    "type": "text",
+                    "text": text_content
+                })
+        
+        # If no messages were created, add the whole content as text
+        if not messages:
             messages.append({
-                "role": "user",
-                "content": combined_content
+                "type": "text",
+                "text": content
             })
-        return messages
+        
+        # Wrap in the role structure that the API expects
+        if messages:
+            return [{
+                "role": "user", 
+                "content": messages
+            }]
+        return []
 
-    # 提取复杂实体
-    def entity_extract_llm(self, content, potential_entity):
-        # print(potential_entity)
-        # 统计 token 的数量
-        token_length = self.num_tokens_from_messages(content)
-        max_tokens = 110000 - int(1.0 * token_length)
-        if token_length > 110000:
-            content = self.token_slice(content)
-        content_message = self.parse_text_with_images(content)
-        # print(content_message)
+
+    # Complete the entire process from entity extraction to information verification and save results
+    # Stage 1: Relevance Analysis
+    def related_analysis(self, content, source_dir, txt_file_name):
+        """Stage 1: Relevance Analysis - Use only plain text content, remove image markers"""
+        print(f"\n=== Stage 1: Relevance Analysis ===")
+        print(f"Processing file: {txt_file_name}")
+        # Print full path for debugging
+        full_txt_path = os.path.join(self.content_dir, source_dir, txt_file_name)
+        print(f"Full file path: {full_txt_path}")
+        
+        # Stage 1 uses only plain text, remove all image markers
+        clean_content = re.sub(r'image:\s*[^\s\n]+', '', content).strip()
+        
+        # Build prompt message - use only cleaned text content
         prompt_message = [
-            {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious package and malicious code in package managers. Your task is to extract specific entity information from the given content, focusing only on the entities defined in the entity description."},
-            {"role": "user", "content": "[**entity description**]:\n" + self.all_entity + "\n\n[**functionality list**]:\n" + self.functionality_list + "\n\n[**potential malicious package name**]:\n" + str(potential_entity) + "\n\n" + "\n\n[**example output**]:\n" + self.exoutput + "\n\n" + self.intelli_direct_prompt}
+            {"role": "system", "content": "You are a cybersecurity expert specializing in analyzing malicious packages and code. Your task is to analyze the relevance of the given content and extract preliminary information."},
+            {"role": "user", "content": self.intelli_related_prompt.replace("{INPUT_TEXT}", clean_content)}
         ]
-        combined_message = content_message + prompt_message
-        # 将数据写入到JSON文件，带有格式化
-        # with open("test.json", "w", encoding="utf-8") as f:
-        #     json.dump(combined_message, f, ensure_ascii=False, indent=4)
-        complex_entity = self.azure_query(combined_message, max_tokens)
-        return complex_entity
 
-    # 验证提取的信息的准确性
-    def info_verify_llm(self, content, complex_entity):
-        # 统计 token 的数量
-        token_length = self.num_tokens_from_messages(content)
-        max_tokens = 110000 - int(1.0 * token_length)
-        if token_length > 110000:
-            content = self.token_slice(content)
-        content_message = self.parse_text_with_images(content)
-        prompt_message = [
-            {"role": "system", "content": "You are a cybersecurity expert specializing in verifying the accuracy of extracted information about malicious code detection. Your task is to cross-check the extracted entities against the original content, ensuring all information is accurate and supported by the text."},
-            {"role": "user", "content": "[**entity_items**]:\n\n" + complex_entity + "\n\n[**content**]:\n" + content + "\n\n" + self.infoverify_prompt}
+        try:
+            # Use small model for relevance analysis
+            response = self.small_model_agent.perform_query(prompt_message)
+            print(f"Relevance analysis completed (using small model)")
+            return json.loads(response)
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error: {e}")
+            return {"error": "JSON parsing failed", "raw_response": response}
+        except Exception as e:
+            print(f"API call error: {e}")
+            return {"error": "API call failed", "details": str(e)}
+    
+    # Stage 2: Entity Extraction
+    def entity_extract(self, content, related_info, source_dir, txt_file_name):
+        """Stage 2: Entity Extraction - Parse images and organize text and image content in sequence"""
+        print(f"\n=== Stage 2: Entity Extraction ===")
+        print(f"Processing file: {txt_file_name}")
+        # Print full path for debugging
+        full_txt_path = os.path.join(self.content_dir, source_dir, txt_file_name)
+        print(f"Full file path: {full_txt_path}")
+        
+        # Use parse_text_with_images to parse content containing images
+        messages_with_images = self.parse_text_with_images(content, source_dir, txt_file_name)
+        
+        # Build complete prompt message
+        prompt_messages = [
+            {"role": "system", "content": self.intelli_extract_prompt}
         ]
-        combined_message = content_message + prompt_message
-        entity_validated = self.azure_query(combined_message, max_tokens)
-        return entity_validated
+        
+        # Add content containing images
+        if messages_with_images:
+            prompt_messages.extend(messages_with_images)
+        
+        try:
+            # Use large model for entity extraction
+            response = self.large_model_agent.perform_query(prompt_messages)
+            print(f"Entity extraction completed (using large model)")
+            return json.loads(response)
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error: {e}")
+            return {"error": "JSON parsing failed", "raw_response": response}
+        except Exception as e:
+            print(f"API call error: {e}")
+            return {"error": "API call failed", "details": str(e)}
+    
+    # Stage 3: Information Verification
+    def info_verify(self, content, extracted_entities, source_dir, txt_file_name):
+        """Stage 3: Information Verification - Use Stage 2 LLM output results for verification"""
+        print(f"\n=== Stage 3: Information Verification ===")
+        print(f"Processing file: {txt_file_name}")
+        # Print full path for debugging
+        full_txt_path = os.path.join(self.content_dir, source_dir, txt_file_name)
+        print(f"Full file path: {full_txt_path}")
+        
+        # Convert Stage 2 output results to string
+        entities_str = json.dumps(extracted_entities, ensure_ascii=False, indent=2)
+        
+        # Build verification prompt, mainly using Stage 2 output results
+        verification_prompt = self.intelli_verify_prompt.replace("{EXTRACTED_ENTITIES}", entities_str)
+        
+        # Build prompt message
+        prompt_messages = [
+            {"role": "system", "content": "You are a cybersecurity expert specializing in verifying the accuracy of extracted information about malicious code detection."},
+            {"role": "user", "content": [{"type": "text", "text": verification_prompt}]}
+        ]
+        
+        try:
+            # Use large model for information verification
+            response = self.large_model_agent.perform_query(prompt_messages)
+            print(f"Information verification completed (using large model)")
+            return json.loads(response)
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error: {e}")
+            return {"error": "JSON parsing failed", "raw_response": response}
+        except Exception as e:
+            print(f"API call error: {e}")
+            return {"error": "API call failed", "details": str(e)}
 
-    # 完成从提取实体到验证信息的整个流程，并保存结果
-    def process_content(self, content, file_name):
-        self.load_common_words()
-        re_pkgnames = self.extract_package_names(content)
-        filtered_words = [word for word in re_pkgnames if word not in stop_words]
-        complete_entity = self.entity_extract_llm(content, filtered_words)  # 调用 entity_extract_llm 提取复杂实体
-        self.save_json(complete_entity, file_name + "_extract_gpt4.json")
-        llm_verify = self.info_verify_llm(content, complete_entity)  # 验证
-        self.save_json(llm_verify, file_name + "_verify_gpt4.json")
+    def process_content(self, content, source_dir, txt_file_name):
+        """Three-stage processing workflow"""
+        # Extract base name from txt filename (remove .txt extension)
+        base_name = txt_file_name.replace(".txt", "")
+        
+        # Create save directory: Dataset/IntelliJson/source/txt_folder/
+        save_dir = os.path.join(self.json_dir, source_dir, base_name)
+        
+        # Extract and convert image paths
+        image_paths = self.extract_and_convert_image_paths(content)
+        
+        # Save image path information
+        if image_paths:
+            image_paths_file = os.path.join(save_dir, "image_paths.json")
+            self.save_json(image_paths, image_paths_file)
+            print(f"Found {len(image_paths)} image paths, saved to {image_paths_file}")
+        
+        # Stage 1: Relevance Analysis
+        print(f"Stage 1: Relevance analysis...")
+        related_result = self.related_analysis(content, source_dir, txt_file_name)
+        related_path = os.path.join(save_dir, "related.json")
+        self.save_json(related_result, related_path)
+        print(f"Relevance analysis results saved to: {related_path}")
+        
+        # Check if relevant, only relevant content proceeds to next stage
+        if isinstance(related_result, dict) and related_result.get("is_relevant") == True:
+            print("Content determined as relevant, proceeding with entity extraction...")
+            
+            # Stage 2: Entity Extraction
+            print(f"Stage 2: Entity extraction...")
+            extract_result = self.entity_extract(content, related_result, source_dir, txt_file_name)
+            extract_path = os.path.join(save_dir, "extract.json")
+            self.save_json(extract_result, extract_path)
+            print(f"Entity extraction results saved to: {extract_path}")
+            
+            # Stage 3: Information Verification
+            print(f"Stage 3: Information verification...")
+            verify_result = self.info_verify(content, extract_result, source_dir, txt_file_name)
+            verify_path = os.path.join(save_dir, "verify.json")
+            self.save_json(verify_result, verify_path)
+            print(f"Verification results saved to: {verify_path}")
+            
+        else:
+            print("Content determined as irrelevant or analysis error, skipping further processing")
+            if "error" in str(related_result):
+                print(f"Relevance analysis error: {related_result}")
+            else:
+                print(f"Relevance analysis result: {related_result}")
+        
+        print(f"Processing completed: {source_dir}/{txt_file_name}\n")
 
-    # 启动执行
+    # Start execution
     def start(self, source_dir):
-        self.source_dir = source_dir  # 设置源目录
-        self.load_dealt_pkgs()  # 加载已处理的包名列表
-        # 遍历源目录中所有文件，如果是隐藏文件或已经处理过，则跳过
-        for file_name in os.listdir(os.path.join(self.content_dir, self.source_dir)):
-            if (file_name in [".DS_Store"]) or (file_name in self.dealt_pkgs):
+        self.source_dir = source_dir  # Set source directory
+        
+        # Build content directory path
+        content_source_dir = os.path.join(self.content_dir, source_dir)
+        
+        # Check if directory exists
+        if not os.path.exists(content_source_dir):
+            print(f"Source directory does not exist: {content_source_dir}")
+            return
+            
+        # Traverse all files in source directory
+        for file_name in os.listdir(content_source_dir):
+            # Skip hidden files and non-txt files
+            if file_name.startswith('.') or not file_name.endswith('.txt'):
                 print(f"\nSkipping: {file_name}")
                 continue
-            # 生成对应 JSON 文件路径
-            json_file_name = file_name.replace(".txt", "")
-            json_file_path = os.path.join(self.json_dir, self.source_dir, json_file_name)
-            txt_content = self.read_txt(os.path.join(self.content_dir, self.source_dir, file_name))  # 读取文本内容
-            print(f"\nProcessing: {source_dir} {file_name}")
-            self.process_content(txt_content, json_file_path)
+            
+            # Check if already processed (verify.json exists)
+            base_name = file_name.replace(".txt", "")
+            verify_path = os.path.join(self.json_dir, source_dir, base_name, "verify.json")
+            
+            if os.path.exists(verify_path):
+                print(f"\n⊘ Skipped: {source_dir}/{file_name} (already processed)")
+                continue
+                
+            # Read text content
+            txt_file_path = os.path.join(content_source_dir, file_name)
+            txt_content = self.read_txt(txt_file_path)
+            
+            print(f"\nProcessing: {source_dir}/{file_name}")
+            print(f"Full file path: {txt_file_path}")
+            
+            # Process content using new three-stage workflow
+            self.process_content(txt_content, source_dir, file_name)
 
 
 if __name__ == '__main__':
-    # 使用示例
+    # Usage example
     ltmgpt = IntelliLLM()
-    # ltmgpt.start("test")
     ltmgpt.start("bleepingcomputer")
-    ltmgpt.start("checkmarx")
-    # ltmgpt.start("checkpoint")
-    # ltmgpt.start("cybersecuritynews")
-    # ltmgpt.start("datadoghq")
-    ltmgpt.start("fortinet")
-    # ltmgpt.start("jfrog")
-    ltmgpt.start("medium")
-    # ltmgpt.start("medium_recommand")
-    ltmgpt.start("phylum")
-    # ltmgpt.start("qianxin")
-    # ltmgpt.start("reversinglabs")
-    # ltmgpt.start("rhisac")
-    # ltmgpt.start("securityaffairs")
-    # ltmgpt.start("securityweek")
-    # ltmgpt.start("snyk")
-    ltmgpt.start("socket")
     ltmgpt.start("sonatype")
-    # ltmgpt.start("sonatype_oss")
-    ltmgpt.start("thehackernews")
-    # ltmgpt.start("tuxcare")
+    ltmgpt.start("checkmarx")
+    ltmgpt.start("medium")
+    ltmgpt.start("qianxin")
+    ltmgpt.start("datadoghq")
+    ltmgpt.start("snyk")
