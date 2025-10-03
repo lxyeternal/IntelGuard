@@ -2,8 +2,10 @@
 端到端恶意包检测系统
 
 功能流程：
-1. 输入解压后的包路径
-2. 扫描所有Python文件
+1. 输入解压后的包路径和包管理器类型（npm/pypi）
+2. 根据包管理器类型扫描相应文件：
+   - pypi: 扫描所有.py文件
+   - npm: 扫描package.json和所有.js文件
 3. 对每个文件进行LLM代码切片
 4. 对每个切片进行RAG恶意检测
 5. 汇总结果并生成完整的检测报告JSON
@@ -21,11 +23,11 @@ from dataclasses import dataclass, asdict
 import logging
 
 # 添加项目路径
-project_root = str(Path(__file__).parent)
+project_root = str(Path(__file__).parent.parent.parent)  # IntelliGraph根目录
 sys.path.insert(0, project_root)
 
 from Codes.Detect.code_slice import LLMCodeSlicer
-from Codes.Detect.rag_detector import RAGMalwareDetector, RAGKnowledgeBase, DetectionResult
+from Codes.KnowledgeBase.rag_detector import RAGMalwareDetector, RAGKnowledgeBase, DetectionResult
 from Codes.GPTAnalysis.llmquery import LLMAgent
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -64,12 +66,21 @@ class SliceDetectionResult:
             },
             "top_matches": [
                 {
+                    # 基本匹配信息
+                    "match_id": m["match_id"],
                     "source_package": m["source_package"],
+                    "source_file": m["source_file"],
+                    "match_type": m["match_type"],
+                    
+                    # 相似度分数
                     "similarity_score": round(m["similarity_score"], 4),
                     "code_similarity": round(m["code_similarity"], 4),
-                    "behavior_similarity": round(m["behavior_similarity"], 4)
+                    "behavior_similarity": round(m["behavior_similarity"], 4),
+                    
+                    # 完整的匹配片段（来自知识库）
+                    "matched_snippet": m["matched_snippet"]
                 }
-                for m in self.matched_knowledge[:3]  # 只保留Top 3
+                for m in self.matched_knowledge[:3]  # 只保留Top 3，但包含完整信息
             ]
         }
 
@@ -147,7 +158,7 @@ class PackageDetectionResult:
 
 
 class PackageMalwareDetector:
-    """端到端恶意包检测器"""
+    """端到端恶意包检测器（支持npm和pypi）"""
     
     def __init__(
         self, 
@@ -159,12 +170,14 @@ class PackageMalwareDetector:
         初始化检测器
         
         Args:
-            kb_path: 知识库路径，默认为项目下的KnowledgeBase
+            kb_path: 知识库路径，默认为项目根目录下的KnowledgeBase
             malice_threshold: 恶意判定阈值
             llm_agent: LLM代理实例（可选）
         """
         if kb_path is None:
-            kb_path = str(Path(__file__).parent / "KnowledgeBase")
+            # 默认使用项目根目录下的KnowledgeBase
+            project_root = Path(__file__).parent.parent.parent
+            kb_path = str(project_root / "KnowledgeBase")
         
         logger.info("初始化端到端恶意包检测器...")
         
@@ -172,9 +185,22 @@ class PackageMalwareDetector:
         logger.info("[1/3] 初始化代码切片器...")
         self.slicer = LLMCodeSlicer(llm_agent=llm_agent)
         
-        # 2. 初始化RAG知识库
+        # 2. 初始化并加载RAG知识库
         logger.info("[2/3] 加载RAG知识库...")
+        logger.info(f"   知识库路径: {kb_path}")
         self.kb = RAGKnowledgeBase(kb_path=kb_path)
+        
+        # 尝试加载已有知识库
+        try:
+            self.kb.load_kb()
+            logger.info(f"   ✓ 已加载知识库: {len(self.kb.packages)} 个恶意包, {len(self.kb.snippet_index)} 个代码片段")
+        except FileNotFoundError as e:
+            logger.warning(f"   ⚠️  未找到知识库文件: {e}")
+            logger.warning(f"   请先运行 Codes/KnowledgeBase/build_knowledge_base.py 构建知识库")
+        except Exception as e:
+            logger.error(f"   ❌ 加载知识库时发生错误: {e}")
+            import traceback
+            traceback.print_exc()
         
         # 3. 初始化RAG检测器
         logger.info("[3/3] 初始化RAG检测器...")
@@ -183,12 +209,18 @@ class PackageMalwareDetector:
         
         logger.info("✅ 检测器初始化完成！")
     
-    def detect_package(self, package_path: str, output_json: str = None) -> PackageDetectionResult:
+    def detect_package(
+        self, 
+        package_path: str, 
+        package_manager: str = "pypi",
+        output_json: str = None
+    ) -> PackageDetectionResult:
         """
         检测整个包
         
         Args:
             package_path: 解压后的包路径
+            package_manager: 包管理器类型，"npm" 或 "pypi"（默认）
             output_json: 输出JSON文件路径（可选）
             
         Returns:
@@ -197,17 +229,23 @@ class PackageMalwareDetector:
         package_path = Path(package_path)
         package_name = package_path.name
         
+        # 验证包管理器类型
+        if package_manager not in ["npm", "pypi"]:
+            raise ValueError(f"不支持的包管理器: {package_manager}，仅支持 'npm' 或 'pypi'")
+        
         logger.info(f"\n{'='*80}")
         logger.info(f"开始检测包: {package_name}")
+        logger.info(f"包管理器: {package_manager.upper()}")
         logger.info(f"路径: {package_path}")
         logger.info(f"{'='*80}\n")
         
-        # 1. 扫描所有Python文件
-        python_files = self._scan_python_files(package_path)
-        logger.info(f"📁 发现 {len(python_files)} 个Python文件")
+        # 1. 根据包管理器类型扫描文件
+        code_files = self._scan_code_files(package_path, package_manager)
+        file_type = "Python" if package_manager == "pypi" else "JavaScript"
+        logger.info(f"📁 发现 {len(code_files)} 个{file_type}文件")
         
-        if len(python_files) == 0:
-            logger.warning("⚠️  未发现任何Python文件")
+        if len(code_files) == 0:
+            logger.warning(f"⚠️  未发现任何{file_type}文件")
             return self._create_empty_result(package_name, str(package_path))
         
         # 2. 对每个文件进行切片和检测
@@ -215,10 +253,10 @@ class PackageMalwareDetector:
         total_slices = 0
         malicious_slices = 0
         
-        for i, py_file in enumerate(python_files, 1):
-            logger.info(f"\n[{i}/{len(python_files)}] 处理文件: {py_file.relative_to(package_path)}")
+        for i, code_file in enumerate(code_files, 1):
+            logger.info(f"\n[{i}/{len(code_files)}] 处理文件: {code_file.relative_to(package_path)}")
             
-            file_result = self._detect_file(py_file)
+            file_result = self._detect_file(code_file)
             file_results.append(file_result)
             
             if file_result.status == "success":
@@ -234,7 +272,7 @@ class PackageMalwareDetector:
         result = PackageDetectionResult(
             package_name=package_name,
             package_path=str(package_path),
-            total_files=len(python_files),
+            total_files=len(code_files),
             processed_files=sum(1 for f in file_results if f.status == "success"),
             total_slices=total_slices,
             malicious_slices=malicious_slices,
@@ -256,21 +294,49 @@ class PackageMalwareDetector:
         
         return result
     
-    def _scan_python_files(self, package_path: Path) -> List[Path]:
-        """扫描所有Python文件"""
-        if package_path.is_file() and package_path.suffix == '.py':
-            return [package_path]
-        else:
-            # 排除常见的虚拟环境和缓存目录
-            exclude_dirs = {'venv', 'env', '.venv', '__pycache__', '.git', 'node_modules', 'dist', 'build'}
+    def _scan_code_files(self, package_path: Path, package_manager: str) -> List[Path]:
+        """
+        根据包管理器类型扫描代码文件
+        
+        Args:
+            package_path: 包路径
+            package_manager: "npm" 或 "pypi"
             
-            python_files = []
+        Returns:
+            代码文件路径列表
+        """
+        # 排除常见的虚拟环境和缓存目录
+        exclude_dirs = {'venv', 'env', '.venv', '__pycache__', '.git', 'node_modules', 
+                       'dist', 'build', '.next', '.nuxt', 'coverage', '.cache'}
+        
+        code_files = []
+        
+        if package_manager == "pypi":
+            # PyPI: 扫描所有.py文件
+            if package_path.is_file() and package_path.suffix == '.py':
+                return [package_path]
+            
             for py_file in package_path.rglob('*.py'):
-                # 检查是否在排除目录中
                 if not any(excluded in py_file.parts for excluded in exclude_dirs):
-                    python_files.append(py_file)
+                    code_files.append(py_file)
+        
+        elif package_manager == "npm":
+            # NPM: 扫描package.json和所有.js文件
             
-            return python_files
+            # 1. 查找package.json
+            package_json = package_path / "package.json"
+            if package_json.exists():
+                code_files.append(package_json)
+            
+            # 2. 查找所有.js文件
+            if package_path.is_file() and package_path.suffix == '.js':
+                code_files.append(package_path)
+            else:
+                for js_file in package_path.rglob('*.js'):
+                    if not any(excluded in js_file.parts for excluded in exclude_dirs):
+                        code_files.append(js_file)
+        
+        return code_files
     
     def _detect_file(self, file_path: Path) -> FileDetectionResult:
         """检测单个文件"""
@@ -347,14 +413,48 @@ class PackageMalwareDetector:
             malice_threshold=self.malice_threshold
         )
         
-        # 转换matched_knowledge为字典列表
+        # 转换matched_knowledge为字典列表（包含完整的RAG信息）
         matched_dicts = []
         for match in rag_result.matched_knowledge:
             matched_dicts.append({
+                # 基本匹配信息
+                "match_id": match.match_id,
                 "source_package": match.source_package,
+                "source_file": match.source_file,
+                "match_type": match.match_type,
+                
+                # 相似度分数
                 "similarity_score": match.similarity_score,
                 "code_similarity": match.code_similarity,
-                "behavior_similarity": match.behavior_similarity
+                "behavior_similarity": match.behavior_similarity,
+                
+                # 完整的匹配片段信息（来自知识库）
+                "matched_snippet": {
+                    # 代码片段信息
+                    "snippet_id": match.matched_snippet.get('snippet_id', ''),
+                    "code_snippet": match.matched_snippet.get('code_snippet', ''),
+                    "code_behavior": match.matched_snippet.get('code_behavior', ''),
+                    
+                    # 恶意分析
+                    "malice_analysis": match.matched_snippet.get('malice_analysis', {}),
+                    
+                    # 执行上下文
+                    "execution_context": match.matched_snippet.get('execution_context', {}),
+                    
+                    # 包级别信息
+                    "package_info": {
+                        "package_name": match.matched_snippet.get('package_name', ''),
+                        "package_manager": match.matched_snippet.get('package_manager', ''),
+                        "package_versions": match.matched_snippet.get('package_versions', ''),
+                        "why_malicious": match.matched_snippet.get('why_malicious', '')
+                    },
+                    
+                    # 攻击链信息
+                    "attack_chain": match.matched_snippet.get('attack_chain', {}),
+                    
+                    # 检测知识
+                    "detection_knowledge": match.matched_snippet.get('detection_knowledge', {})
+                }
             })
         
         return SliceDetectionResult(
@@ -432,19 +532,41 @@ def main():
     """命令行入口"""
     import argparse
     
-    parser = argparse.ArgumentParser(description='端到端恶意包检测系统')
+    parser = argparse.ArgumentParser(
+        description='端到端恶意包检测系统（支持npm和pypi）',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例用法：
+  # 检测PyPI包
+  python package_detector.py /path/to/package -m pypi
+  
+  # 检测npm包
+  python package_detector.py /path/to/package -m npm
+  
+  # 指定输出文件和阈值
+  python package_detector.py /path/to/package -m npm -o report.json -t 0.6
+        """
+    )
+    
     parser.add_argument('package_path', help='解压后的包路径')
+    parser.add_argument('-m', '--manager', 
+                       choices=['npm', 'pypi'], 
+                       default='pypi',
+                       help='包管理器类型 (默认: pypi)')
     parser.add_argument('-o', '--output', help='输出JSON文件路径')
     parser.add_argument('-t', '--threshold', type=float, default=0.5, 
                        help='恶意判定阈值 (默认: 0.5)')
-    parser.add_argument('--kb-path', help='知识库路径 (默认: ./KnowledgeBase)')
+    parser.add_argument('--kb-path', help='知识库路径 (默认: 项目根目录/KnowledgeBase)')
     
     args = parser.parse_args()
     
     # 默认输出路径
     if not args.output:
         package_name = Path(args.package_path).name
-        args.output = f"Results/package_detection/{package_name}_detection_report.json"
+        project_root = Path(__file__).parent.parent.parent
+        output_dir = project_root / "Results" / "malware_detection"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        args.output = str(output_dir / f"{package_name}_report.json")
     
     # 初始化检测器
     detector = PackageMalwareDetector(
@@ -455,6 +577,7 @@ def main():
     # 执行检测
     result = detector.detect_package(
         package_path=args.package_path,
+        package_manager=args.manager,
         output_json=args.output
     )
     
