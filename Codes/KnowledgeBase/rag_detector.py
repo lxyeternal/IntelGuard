@@ -531,33 +531,33 @@ Provide ONLY the behavior summary, no additional text."""
         
         prompt = f"""You are a security analyst. Analyze whether the following code is malicious.
 
-**New Code to Analyze:**
-```
-{code}
-```
+            **New Code to Analyze:**
+            ```
+            {code}
+            ```
 
-**Behavior Summary:**
-{behavior}
+            **Behavior Summary:**
+            {behavior}
 
-**Similar Known Malicious Patterns (from knowledge base):**
+            **Similar Known Malicious Patterns (from knowledge base):**
 
-{context}
+            {context}
 
-**Your Task:**
-1. Compare the new code with the known malicious patterns
-2. Determine if the new code is suspicious or malicious
-3. Provide confidence score (0.0-1.0)
-4. Explain your reasoning with specific evidence
+            **Your Task:**
+            1. Compare the new code with the known malicious patterns
+            2. Determine if the new code is suspicious or malicious
+            3. Provide confidence score (0.0-1.0)
+            4. Explain your reasoning with specific evidence
 
-**Output Format (JSON):**
-{{
-  "is_suspicious": true/false,
-  "confidence": 0.0-1.0,
-  "reasoning": "detailed explanation",
-  "evidence": ["evidence 1", "evidence 2", ...]
-}}
+            **Output Format (JSON):**
+            {{
+            "is_suspicious": true/false,
+            "confidence": 0.0-1.0,
+            "reasoning": "detailed explanation",
+            "evidence": ["evidence 1", "evidence 2", ...]
+            }}
 
-Provide ONLY the JSON output."""
+            Provide ONLY the JSON output."""
 
         try:
             # 使用LLMAgent的perform_query方法
@@ -591,21 +591,21 @@ Provide ONLY the JSON output."""
             package_identifier = f"{package_name} ({package_manager})" if package_manager else package_name
             
             context_parts.append(f"""
-### Example {i} (Similarity: {match.similarity_score:.2f})
-**Source Package:** {package_identifier}
+                ### Example {i} (Similarity: {match.similarity_score:.2f})
+                **Source Package:** {package_identifier}
 
-**Code:**
-```
-{snippet.get('code_snippet', '')[:500]}...
-```
+                **Code:**
+                ```
+                {snippet.get('code_snippet', '')[:500]}...
+                ```
 
-**Behavior:** {snippet.get('code_behavior', '')}
+                **Behavior:** {snippet.get('code_behavior', '')}
 
-**Why Suspicious:** {malice.get('why_suspicious', '')}
+                **Why Suspicious:** {malice.get('why_suspicious', '')}
 
-**Key Indicators:**
-{chr(10).join('- ' + ind for ind in malice.get('key_indicators', []))}
-""")
+                **Key Indicators:**
+                {chr(10).join('- ' + ind for ind in malice.get('key_indicators', []))}
+                """)
         
         return "\n".join(context_parts)
     
