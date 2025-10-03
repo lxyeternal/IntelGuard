@@ -28,7 +28,7 @@ from datetime import datetime
 project_root = str(Path(__file__).parent.parent.parent)
 sys.path.insert(0, project_root)
 
-from Codes.utils.llmquery import LLMAgent
+from Codes.GPTAnalysis.llmquery import LLMAgent
 
 class LLMCodeSlicer:
     """
@@ -47,19 +47,17 @@ class LLMCodeSlicer:
         
     def _load_slicing_prompt(self) -> str:
         """Load the code slicing prompt template"""
-        prompt_path = "code_slicing_prompt.txt"
+        # Prompt文件在当前目录下
+        prompt_path = Path(__file__).parent / "code_slicing_prompt.txt"
         
         if prompt_path.exists():
             return prompt_path.read_text(encoding='utf-8')
         else:
-            return self._get_default_slicing_prompt()
+            raise FileNotFoundError(
+                f"Slicing prompt file not found at {prompt_path}. "
+                "Please ensure code_slicing_prompt.txt exists in Codes/Detect/"
+            )
     
-    def _get_default_slicing_prompt(self) -> str:
-        """Get minimal fallback prompt if file is missing"""
-        raise FileNotFoundError(
-            f"Slicing prompt file not found at {self.slicing_prompt_path}. "
-            "Please ensure the prompt file exists."
-        )
 
     def slice_code(self, code_content: str, file_path: str = None) -> Dict[str, Any]:
         """
@@ -172,7 +170,7 @@ class LLMCodeSlicer:
                 "analysis_summary": "Failed to parse LLM response properly"
             }
     
-    def slice_package(self, package_path: str) -> List[Dict[str, Any]]:
+    def slice_package(self, package_path: str) -> Dict[str, Any]:
         """
         Slice all Python files in a package
         
@@ -180,7 +178,7 @@ class LLMCodeSlicer:
             package_path: Path to the package directory
             
         Returns:
-            List of slicing results for all files
+            Dictionary with 'files' key containing list of slicing results
         """
         package_path = Path(package_path)
         results = []
@@ -205,7 +203,7 @@ class LLMCodeSlicer:
             else:
                 print(f"  ✗ Failed: {result.get('error', 'Unknown error')}")
         
-        return results
+        return {"files": results}
     
     def save_slices(self, slices_data: List[Dict[str, Any]], output_path: str):
         """

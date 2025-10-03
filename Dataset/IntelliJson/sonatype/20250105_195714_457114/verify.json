@@ -1,0 +1,98 @@
+{
+  "package_info": {
+    "package_name": "bcprov-jdk14, bcprov-jdk15on, bcprov-jdk16",
+    "package_manager": "Maven (Java)",
+    "package_versions": "< 1.47 (for bcprov-jdk14 and bcprov-jdk15on); all versions for bcprov-jdk16",
+    "why_malicious": "The affected Bouncy Castle provider packages implement the BKS (Bouncy Castle Keystore) v1 format using a 16-bit HMAC for password integrity verification. This cryptographic weakness allows attackers to brute-force keystore passwords extremely quickly and to exploit hash collisions, resulting in multiple passwords being accepted for the same keystore. As a result, attackers can easily recover keystore passwords and gain unauthorized access to sensitive cryptographic keys and metadata, leading to catastrophic information exposure."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when loading a BKS v1 keystore file)",
+        "file_location": "JDKKeyStore.class (engineLoad function)",
+        "required_permissions": [
+          "filesystem (read keystore file)"
+        ]
+      },
+      "code_snippet": "HMAC key derivation uses hmac_key_size//8, resulting in a 16-bit (2-byte) HMAC key for password integrity verification.",
+      "code_language": "java",
+      "code_behavior": "Derives a 16-bit HMAC key from the user-supplied password and uses it to verify the integrity of the keystore. This key length is far below cryptographic standards, making the HMAC trivial to brute-force and susceptible to hash collisions, which allows multiple passwords to be accepted for the same keystore.",
+      "malice_analysis": {
+        "why_suspicious": "A 16-bit HMAC is cryptographically insecure and can be brute-forced in seconds with modern hardware. This enables attackers to recover keystore passwords with minimal effort and to exploit hash collisions, resulting in multiple valid passwords for a single keystore file.",
+        "violated_expectations": "Keystore password verification should use a strong, cryptographically secure HMAC (e.g., 160 bits or more, such as HMAC-SHA1 or HMAC-SHA256). Using a 16-bit HMAC is a severe deviation from security best practices and exposes the keystore to trivial brute-force and collision attacks.",
+        "similar_legitimate_use": "Legitimate keystore implementations use strong HMACs (e.g., HMAC-SHA256 or HMAC-SHA1 with full digest size) for password verification, ensuring that brute-force attacks are computationally infeasible and that only the correct password is accepted.",
+        "key_indicators": [
+          "Use of 16-bit HMAC for password integrity verification",
+          "Integer division by 8 in HMAC key size calculation (hmac_key_size//8)",
+          "Password verification logic accepts multiple passwords due to HMAC hash collisions",
+          "HMAC key derived directly from password with insufficient entropy"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (external attack using brute-force script against BKS v1 keystore)",
+        "file_location": "External Python script (crackbks.py)",
+        "required_permissions": [
+          "filesystem (read keystore file)"
+        ]
+      },
+      "code_snippet": "#!/usr/bin/env python3\nimport os\nimport sys\nimport jks\n\ndef trypw(bksfile, pw):\n    try:\n        keystore = jks.bks.BksKeyStore.load(bksfile, pw)\n        if keystore:\n            print('Password for %s found: \"%s\"' % (bksfile, pw))\n            sys.exit(0)\n    except jks.util.KeystoreSignatureException:\n        pass\n    except UnicodeDecodeError:\n        pass\n\nwith open(sys.argv[1]) as h:\n    pwlist = h.readlines()\n\nfor pw in pwlist:\n    trypw(sys.argv[2], pw.rstrip())\nsys.exit(1)",
+      "code_language": "python",
+      "code_behavior": "Attempts to brute-force the keystore password by iterating through a list of candidate passwords and attempting to load the BKS keystore with each one. Due to the weak 16-bit HMAC, the script can rapidly find valid passwords, and hash collisions may result in multiple passwords being accepted for the same keystore.",
+      "malice_analysis": {
+        "why_suspicious": "The script demonstrates that brute-forcing the keystore password is trivial due to the weak 16-bit HMAC. The ability to find multiple valid passwords for a single keystore is a direct result of hash collisions, highlighting the severity of the cryptographic flaw.",
+        "violated_expectations": "Keystore passwords should be protected by strong cryptographic mechanisms that make brute-force attacks computationally infeasible. There should not be multiple valid passwords for a single keystore file.",
+        "similar_legitimate_use": "Password brute-forcing scripts are used for penetration testing or security auditing, but should not succeed rapidly against properly implemented keystores. In secure systems, such scripts would be ineffective due to strong password verification mechanisms.",
+        "key_indicators": [
+          "Brute-force attack on BKS keystore succeeds rapidly",
+          "Multiple passwords accepted for the same keystore file due to HMAC collisions",
+          "No rate limiting or lockout on failed password attempts",
+          "Use of external tools (e.g., crackbks.py) to automate password guessing"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker obtains a BKS v1 keystore file (e.g., from a compromised system, backup, or repository).",
+      "implemented_by": [],
+      "leads_to": "Brute-force attack on keystore password"
+    },
+    {
+      "step": 2,
+      "action": "Attacker uses a brute-force script to try all possible passwords, exploiting the weak 16-bit HMAC in the keystore's password verification.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Recovery of one or more valid passwords for the keystore"
+    },
+    {
+      "step": 3,
+      "action": "Attacker loads the keystore using the recovered password(s), gaining access to sensitive cryptographic keys and metadata stored within.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Information exposure and potential further compromise of systems relying on the keystore"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Keystore password verification using a 16-bit HMAC (unusually short HMAC length)",
+      "Multiple passwords accepted for a single BKS v1 keystore file (indicative of hash collisions)",
+      "Rapid, repeated access attempts to BKS keystore files (suggesting brute-force activity)"
+    ],
+    "file_indicators": [
+      "BKS v1 keystore files (typically with .bks extension)",
+      "Keystore files created with Bouncy Castle versions prior to 1.47",
+      "Presence of keystore files with weak HMAC parameters (16-bit HMAC) in their structure"
+    ],
+    "network_indicators": [
+      "N/A (attack is local to keystore file access; no network activity required)"
+    ],
+    "how_to_detect": "Scan for BKS keystore files created with Bouncy Castle versions prior to 1.47 by analyzing file metadata or structure. Inspect the keystore format to determine if a 16-bit HMAC is used for password verification. Monitor for rapid, repeated access attempts to keystore files, which may indicate brute-force activity. Flag any keystore implementation that accepts multiple different passwords for the same file as highly suspicious. Automated tools can attempt to load the same keystore with different passwords to detect the presence of hash collisions."
+  }
+}

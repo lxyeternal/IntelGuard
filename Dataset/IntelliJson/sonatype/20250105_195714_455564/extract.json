@@ -1,0 +1,114 @@
+{
+  "package_info": {
+    "package_name": "redis-py",
+    "package_manager": "PyPI",
+    "package_versions": "4.5.3, 5.0.0b1, and earlier vulnerable versions",
+    "why_malicious": "The package contains a race condition vulnerability in its asyncio cluster/client implementation, which can lead to cross-user data leakage and exposure of sensitive information (e.g., chat history, payment data) under high concurrency and request cancellation scenarios. This is not intentional malware, but the vulnerability enables severe confidentiality breaches."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (during async Redis command execution, especially under request cancellation)",
+        "file_location": "redis/asyncio/cluster.py",
+        "required_permissions": [
+          "network",
+          "memory access (to Redis connection pool)"
+        ]
+      },
+      "code_snippet": "return await self.parse_response(connection, args[0], **kwargs)",
+      "code_language": "python",
+      "code_behavior": "Parses the response from a Redis command and returns it to the caller. If a request is cancelled after being sent but before the response is received, the connection can become corrupted, causing the next request to receive leftover data from a previous, unrelated request.",
+      "malice_analysis": {
+        "why_suspicious": "This code does not properly handle the case where an asyncio.CancelledError occurs after a request is sent but before the response is received, leaving the connection in an unsafe state.",
+        "violated_expectations": "Normal behavior would ensure that each request/response pair is isolated and that connection state is always clean before reuse. Here, a cancelled request can pollute the connection, violating data isolation.",
+        "similar_legitimate_use": "Parsing responses from a Redis server is normal, but only when connection state is guaranteed to be clean and not shared across incomplete/cancelled requests.",
+        "key_indicators": [
+          "Lack of error handling for CancelledError in async context",
+          "Directly returning parsed response without connection state validation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when asyncio.CancelledError is raised during command execution)",
+        "file_location": "redis/asyncio/cluster.py",
+        "required_permissions": [
+          "network",
+          "memory access (to Redis connection pool)"
+        ]
+      },
+      "code_snippet": "except asyncio.CancelledError:\n    # should not be possible\n    await connection.disconnect(nowait=True)\n    raise",
+      "code_language": "python",
+      "code_behavior": "Handles the case where an asyncio.CancelledError is raised during command execution. The fix attempts to disconnect the corrupted connection to prevent reuse and re-raises the exception.",
+      "malice_analysis": {
+        "why_suspicious": "This code was missing in the vulnerable version, allowing corrupted connections to be returned to the pool. The fix ensures that any connection affected by a cancellation is disconnected and not reused.",
+        "violated_expectations": "Normal behavior would always clean up or reset connections on error/cancellation. The absence of this logic previously allowed data leakage.",
+        "similar_legitimate_use": "Disconnecting and cleaning up resources on error is standard, but the lack of this in the original code is what enabled the vulnerability.",
+        "key_indicators": [
+          "Explicit disconnect on CancelledError",
+          "Comment indicating this should not be possible (but it is in practice)"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "A user sends an async Redis command via redis-py using asyncio.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Request is queued and sent to Redis server."
+    },
+    {
+      "step": 2,
+      "action": "The request is cancelled after being sent but before the response is received (e.g., due to timeout or user abort).",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Connection is left in a corrupted state with leftover response data."
+    },
+    {
+      "step": 3,
+      "action": "The corrupted connection is returned to the pool and reused for another user's request.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Next user receives response data from previous, unrelated request (data leakage)."
+    },
+    {
+      "step": 4,
+      "action": "Sensitive data (chat history, payment info) is exposed to the wrong user.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Confidentiality breach and potential further exploitation."
+    },
+    {
+      "step": 5,
+      "action": "Patched code (snippet_2) disconnects corrupted connections on cancellation, preventing reuse and data leakage.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Mitigation of the vulnerability."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Async Redis client connections reused after request cancellation",
+      "Unexpected data returned from Redis cache (cross-user data leakage)",
+      "High rate of asyncio.CancelledError exceptions during Redis operations"
+    ],
+    "file_indicators": [
+      "redis/asyncio/cluster.py (affected code path)",
+      "Presence of custom or unpatched redis-py versions"
+    ],
+    "network_indicators": [
+      "Redis cluster traffic with mismatched request/response pairs",
+      "Unusual Redis error rates or data anomalies under high concurrency"
+    ],
+    "how_to_detect": "Monitor for asyncio.CancelledError exceptions during Redis operations and check if connections are properly disconnected and not returned to the pool. Audit for cross-user data returned from cache. Use static analysis to identify missing error handling for CancelledError in async Redis client code. Flag deployments using known vulnerable redis-py versions."
+  }
+}

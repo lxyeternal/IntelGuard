@@ -1,0 +1,77 @@
+{
+  "package_info": {
+    "package_name": "redis-py",
+    "package_manager": "PyPI",
+    "package_versions": "4.5.3, 5.0.0b1, and earlier (see CVE-2023-28858, CVE-2023-28859)",
+    "why_malicious": "The package contains a race condition vulnerability in its asyncio connection pool implementation, leading to a data leakage flaw. When async Redis commands are cancelled at high rates, the connection pool may return a connection to the pool without properly clearing its buffer, allowing responses intended for one user to be delivered to another. This results in unintended information disclosure, including sensitive data such as chat histories and payment information, violating user data isolation."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "During runtime, specifically when an async Redis command is cancelled after being sent but before a response is received",
+        "file_location": "redis-py/redis/asyncio/connection.py (connection pool management logic in cluster/client classes)",
+        "required_permissions": [
+          "network access to Redis server",
+          "memory access for connection pool management"
+        ]
+      },
+      "code_snippet": "// Pseudocode representation of the vulnerable logic\nasync def execute_command(cmd):\n    incoming_queue.push(cmd)\n    try:\n        response = await outgoing_queue.pop()\n    except CancelledError:\n        # Error handling insufficient here\n        pass\n    finally:\n        connection_pool.release(conn)\n",
+      "code_language": "python (asyncio pseudocode)",
+      "code_behavior": "Handles asynchronous Redis commands by pushing requests to an incoming queue and awaiting responses from an outgoing queue. If a request is cancelled after being sent but before the response is received, the connection is released back to the pool without clearing its buffer. This can result in subsequent requests receiving residual or unrelated data from the previous, cancelled request, leading to cross-user data leakage.",
+      "malice_analysis": {
+        "why_suspicious": "The code fails to reset or clean up the connection's buffer after a CancelledError, leaving residual data that can be delivered to the next user of the connection. This creates a risk of one user's data being exposed to another, especially in high-concurrency environments with frequent cancellations.",
+        "violated_expectations": "In secure async connection pooling, cancellation of a request should guarantee that no data from the cancelled operation is retained or leaked. Here, the connection is returned to the pool in a tainted state, violating the expectation of strict data isolation between users and requests.",
+        "similar_legitimate_use": "Async connection pooling and request cancellation are standard in high-performance systems, but legitimate implementations ensure that connections are fully reset or sanitized before reuse to prevent data leaks.",
+        "key_indicators": [
+          "Lack of buffer cleanup or reset after CancelledError in async connection pool",
+          "Connection returned to pool without verifying state integrity",
+          "Mixing of request/response queues without strict sequence or ownership enforcement",
+          "Potential for cross-user data exposure in high-cancellation scenarios"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "A user sends an async Redis command via redis-py; the command is pushed to the incoming queue.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Request is processed, but may be cancelled before response is received."
+    },
+    {
+      "step": 2,
+      "action": "The request is cancelled after being sent but before the response is received; error handling does not clear the connection buffer.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Connection is returned to the pool in a corrupted or tainted state."
+    },
+    {
+      "step": 3,
+      "action": "A subsequent, unrelated request reuses the tainted connection and receives residual data from the previous, cancelled request.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Unintended information disclosure to the wrong user (data leak)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Async Redis command cancellations followed by unexpected or unrelated data in responses",
+      "Cross-user data leakage events in high-concurrency or high-cancellation environments",
+      "Connections being reused without buffer cleanup after cancellation, leading to mismatched responses"
+    ],
+    "file_indicators": [
+      "redis-py versions 4.5.3, 5.0.0b1, and earlier",
+      "Presence of custom asyncio connection pool implementations in Redis clients, especially in redis/asyncio/connection.py"
+    ],
+    "network_indicators": [
+      "Redis protocol traffic showing out-of-sequence or mismatched request/response pairs",
+      "Unexpected Redis responses containing data from unrelated sessions or users"
+    ],
+    "how_to_detect": "Monitor for usage of redis-py client libraries in affected versions (4.5.3, 5.0.0b1, and earlier). Instrument application logs to detect when async Redis requests are cancelled and verify if subsequent requests receive unexpected or unrelated data. Analyze for patterns of cross-user data leakage, particularly in high-concurrency or high-cancellation environments. Use static analysis to identify connection pool implementations that do not properly clean up or reset buffers after cancellations, focusing on redis/asyncio/connection.py. Network monitoring should flag out-of-sequence or mismatched Redis responses that could indicate data leakage."
+  }
+}

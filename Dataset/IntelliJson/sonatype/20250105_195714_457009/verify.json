@@ -1,0 +1,136 @@
+{
+  "package_info": {
+    "package_name": "org.apache.tomcat:tomcat",
+    "package_manager": "Maven",
+    "package_versions": "[9.0.0.M1, 9.0.31), [8.0.0-RC1, 8.5.51), ( , 7.0.100)",
+    "why_malicious": "The default configuration of affected Tomcat versions enables the AJP/1.3 connector on port 8009, which is a highly trusted protocol intended only for internal use. When exposed to untrusted networks without authentication or IP restrictions, attackers can send specially crafted AJP requests to read arbitrary files from the server or, if file upload is possible, achieve remote code execution. This constitutes a critical security risk due to the potential for unauthorized file access and system compromise."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "startup/config-load",
+        "file_location": "conf/server.xml",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "<Connector port=\"8009\" protocol=\"AJP/1.3\" redirectPort=\"8443\" />",
+      "code_language": "xml",
+      "code_behavior": "Enables the AJP/1.3 protocol connector on port 8009, causing Tomcat to listen for AJP requests on all network interfaces by default. This exposes the AJP service to external networks if not explicitly restricted.",
+      "malice_analysis": {
+        "why_suspicious": "AJP is a trusted protocol designed for internal communication between Tomcat and a front-end web server. The default configuration exposes the AJP port to all interfaces without authentication or IP filtering, allowing untrusted clients to connect and potentially exploit the service.",
+        "violated_expectations": "AJP connectors should be bound to localhost or trusted internal interfaces and protected with a requiredSecret or IP-based access controls. Exposing the connector to all interfaces without restrictions is a significant security misconfiguration.",
+        "similar_legitimate_use": "AJP is legitimately used for integration with reverse proxies such as Apache HTTPD (mod_jk), but only when restricted to trusted internal networks and protected by authentication or firewall rules.",
+        "key_indicators": [
+          "AJP connector enabled on 0.0.0.0:8009",
+          "No requiredSecret attribute set in the connector",
+          "No address or IP restriction configured in server.xml"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "AJP-request-time",
+        "file_location": "org.apache.coyote.ajp.AbstractAjpProtocol, org.apache.coyote.ajp.AjpAprProtocol, org.apache.coyote.ajp.AjpProtocol, org.apache.coyote.ajp.AjpNioProtocol classes",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "prepareRequest() method accepts arbitrary request attributes and fails to enforce requiredSecret for AJP connections.",
+      "code_language": "java",
+      "code_behavior": "Processes incoming AJP requests and allows arbitrary attributes, including those that can specify local file paths for inclusion, without enforcing authentication or validating the attributes' safety.",
+      "malice_analysis": {
+        "why_suspicious": "By accepting arbitrary attributes in AJP requests and not enforcing the requiredSecret, the server allows attackers to craft requests that can trigger file inclusion or access sensitive files, bypassing normal authentication and input validation.",
+        "violated_expectations": "AJP connectors should enforce the requiredSecret for all connections and strictly validate all incoming attributes to prevent abuse. Accepting arbitrary attributes from unauthenticated sources is a critical security flaw.",
+        "similar_legitimate_use": "AJP attributes are used for legitimate request forwarding and metadata exchange between a reverse proxy and Tomcat, but only when the connection is trusted and attributes are validated.",
+        "key_indicators": [
+          "No requiredSecret check in AJP protocol handler",
+          "Arbitrary attribute acceptance in prepareRequest()",
+          "Lack of input validation for file path attributes"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "AJP-request-time",
+        "file_location": "org.apache.coyote.ajp.AjpProcessor, org.apache.coyote.ajp.AjpAprProcessor classes",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "Attacker sends crafted AJP request to port 8009 to read /WEB-INF/web.xml or /etc/passwd",
+      "code_language": "network-protocol",
+      "code_behavior": "Allows a remote attacker to send a specially crafted AJP request specifying a file path in request attributes, causing Tomcat to read and return the contents of arbitrary files from the server's filesystem.",
+      "malice_analysis": {
+        "why_suspicious": "Remote file read via a network protocol without authentication is a critical security violation, enabling attackers to access sensitive files such as configuration files, credentials, or system files.",
+        "violated_expectations": "AJP should never allow unauthenticated users to specify arbitrary file paths for inclusion or reading. File access should be strictly limited to the web application's normal processing context.",
+        "similar_legitimate_use": "File reads via AJP should only occur as part of normal web application processing, not as a result of arbitrary external input.",
+        "key_indicators": [
+          "AJP request with file path attribute (e.g., javax.servlet.include.request_uri)",
+          "AJP response contains contents of sensitive files (e.g., /WEB-INF/web.xml, /etc/passwd)"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Tomcat starts with the AJP connector enabled on port 8009, listening on all network interfaces due to default configuration.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "AJP port is exposed to the network, including untrusted sources"
+    },
+    {
+      "step": 2,
+      "action": "An attacker from an untrusted network sends a crafted AJP request to port 8009, specifying a local file path in request attributes to exploit the lack of authentication and input validation.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Tomcat processes the malicious request and reads the specified file from the server's filesystem"
+    },
+    {
+      "step": 3,
+      "action": "Tomcat returns the contents of the specified file to the attacker over the AJP connection, exposing sensitive data.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Attacker gains access to sensitive files (e.g., web.xml, /etc/passwd, credentials)"
+    },
+    {
+      "step": 4,
+      "action": "If the attacker can upload files (e.g., a malicious JSP) to the web root via another vulnerability, they can use the AJP connector to execute the uploaded file, achieving remote code execution.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Potential full system compromise through remote code execution"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "AJP connector enabled on 0.0.0.0:8009 or any public interface",
+      "AJP requests received from untrusted or external IP addresses",
+      "AJP requests containing suspicious attributes such as javax.servlet.include.request_uri or file path parameters",
+      "Unusual file read operations triggered by AJP requests"
+    ],
+    "file_indicators": [
+      "conf/server.xml with <Connector port=\"8009\" protocol=\"AJP/1.3\" ... /> present and enabled",
+      "AJP connector in server.xml missing requiredSecret attribute",
+      "AJP connector in server.xml missing address or IP restriction"
+    ],
+    "network_indicators": [
+      "Inbound connections to port 8009 from external or untrusted networks",
+      "AJP protocol traffic containing file inclusion or file path attributes",
+      "AJP requests with attributes referencing sensitive files (e.g., /WEB-INF/web.xml, /etc/passwd)"
+    ],
+    "how_to_detect": "Scan Tomcat's server.xml for enabled AJP connectors that lack a requiredSecret or IP address restriction. Monitor network traffic for AJP protocol connections from external or untrusted IP addresses, especially those containing attributes like javax.servlet.include.request_uri or referencing sensitive file paths. Alert on any AJP traffic from untrusted sources or attempts to read sensitive files via AJP requests. Correlate file access logs with AJP request activity to identify unauthorized file reads."
+  }
+}

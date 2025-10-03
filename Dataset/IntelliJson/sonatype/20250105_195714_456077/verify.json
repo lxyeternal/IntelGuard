@@ -1,0 +1,139 @@
+{
+  "package_info": {
+    "package_name": "N/A (Java deserialization attack vector)",
+    "package_manager": "N/A (Java application runtime)",
+    "package_versions": "All Java versions supporting standard serialization (notably pre-Java 8u121, but many apps remain vulnerable)",
+    "why_malicious": "This attack exploits Java's object deserialization mechanism by injecting malicious object streams into applications that deserialize untrusted data. The core issue is unsafe deserialization, which enables attackers to trigger remote code execution, privilege escalation, or denial-of-service by leveraging gadget chains, remote class loading, or resource exhaustion vectors. The threat is systemic to any Java application that deserializes untrusted input without proper validation or controls."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "deserialization-time",
+        "file_location": "Serialized object stream (network input, file, or IPC)",
+        "required_permissions": [
+          "filesystem (if reading from file)",
+          "network (if over socket)",
+          "JVM runtime"
+        ]
+      },
+      "code_snippet": "javax.naming.Reference (with remote codebase URL)",
+      "code_language": "java",
+      "code_behavior": "During deserialization, the javax.naming.Reference object is processed, causing the JVM to perform a JNDI lookup using an attacker-controlled remote codebase URL. This results in the JVM loading and instantiating a class from a remote server, enabling arbitrary code execution within the application context.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing javax.naming.Reference objects with attacker-controlled URLs allows the JVM to fetch and execute code from untrusted remote sources, which is a direct vector for remote code execution.",
+        "violated_expectations": "Normal deserialization should only reconstruct local objects and never trigger remote class loading or code execution. Loading code from untrusted URLs during object instantiation is highly abnormal and dangerous.",
+        "similar_legitimate_use": "JNDI and javax.naming.Reference are legitimately used for directory lookups and resource references in enterprise Java, but only with trusted, internal URLs. Use of attacker-controlled or external URLs is never legitimate in this context.",
+        "key_indicators": [
+          "Presence of javax.naming.Reference in serialized data",
+          "Remote codebase URL pointing outside trusted network or to attacker-controlled domains",
+          "Unexpected JNDI lookups or remote class loading during deserialization",
+          "JVM making outbound connections during deserialization"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "deserialization-time",
+        "file_location": "Serialized object stream (network input, file, or IPC)",
+        "required_permissions": [
+          "JVM runtime",
+          "access to java.lang.Runtime",
+          "potentially OS-level execution"
+        ]
+      },
+      "code_snippet": "Gadget chain: ObjectInputStream.readObject() → AnnotationInvocationHandler.readObject() → Map(Proxy).entrySet() → ... → Runtime.getRuntime().exec()",
+      "code_language": "java",
+      "code_behavior": "A crafted gadget chain is embedded in the serialized object stream. When deserialized, the chain abuses method invocations in classes such as AnnotationInvocationHandler and Proxy Map implementations, ultimately invoking Runtime.getRuntime().exec() to execute arbitrary OS commands on the host system.",
+      "malice_analysis": {
+        "why_suspicious": "The gadget chain is intentionally constructed to exploit method calls during deserialization, leading to arbitrary command execution. The use of known vulnerable classes and chaining to Runtime.exec() is a hallmark of deserialization attacks.",
+        "violated_expectations": "Deserialization should only reconstruct object state, not trigger method invocations that result in system command execution. The presence of Runtime.exec() in the deserialization call chain is never expected in legitimate application logic.",
+        "similar_legitimate_use": "While the involved classes (e.g., AnnotationInvocationHandler, Proxy, InvokerTransformer) are used in legitimate Java reflection and serialization scenarios, their combination in a chain leading to Runtime.exec() is never legitimate.",
+        "key_indicators": [
+          "Use of known gadget classes (e.g., AnnotationInvocationHandler, InvokerTransformer, CommonsCollections, etc.) in serialized data",
+          "Method invocation chains during deserialization",
+          "Presence of Runtime.getRuntime().exec() or similar OS command execution in the call stack",
+          "Deserialization stack traces involving unexpected class or method invocations"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "deserialization-time",
+        "file_location": "Serialized object stream (network input, file, or IPC)",
+        "required_permissions": [
+          "JVM runtime",
+          "memory allocation"
+        ]
+      },
+      "code_snippet": "field type\t[\nfield name\tids\nfield array type\tI\nfield array length\tINT_MAX\nfield array data\t1,2,3,4,5,6,7, ….",
+      "code_language": "java (serialized data format)",
+      "code_behavior": "The serialized object stream contains an array field with its length set to Integer.MAX_VALUE (or another excessively large value). When deserialized, the JVM attempts to allocate memory for the array, leading to OutOfMemoryError or JVM crash, resulting in denial-of-service.",
+      "malice_analysis": {
+        "why_suspicious": "Unusually large array sizes in serialized data are a classic sign of resource exhaustion attacks. Setting array length to INT_MAX is a deliberate attempt to crash the JVM or exhaust system resources.",
+        "violated_expectations": "Normal serialized arrays should have lengths consistent with application logic. Arrays of size INT_MAX or similar are never legitimate and indicate a malicious attempt to cause denial-of-service.",
+        "similar_legitimate_use": "There is no legitimate use case for serialized arrays with such extreme lengths in typical business or application logic.",
+        "key_indicators": [
+          "Array length set to Integer.MAX_VALUE or other excessive values in serialized data",
+          "Deserialization triggers OutOfMemoryError, JVM crash, or abnormal memory allocation",
+          "Serialized object streams with array fields far exceeding expected application sizes"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious serialized object stream containing either a javax.naming.Reference with a remote codebase, a deserialization gadget chain, or a resource-exhaustion array.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Deserialization by a vulnerable Java application"
+    },
+    {
+      "step": 2,
+      "action": "The vulnerable application deserializes the attacker-supplied object stream, processing the malicious payload.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Triggering of malicious behaviors: remote code execution, arbitrary command execution, or denial-of-service"
+    },
+    {
+      "step": 3,
+      "action": "Malicious code is executed (via remote class loading or gadget chain), or the application is crashed (via memory exhaustion).",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "System compromise (remote code execution or privilege escalation) or service outage (denial-of-service)"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Deserialization of untrusted data streams from network, file, or IPC sources",
+      "Unexpected remote class loading via JNDI or javax.naming.Reference during deserialization",
+      "Execution of Runtime.getRuntime().exec() or similar methods as a result of deserialization",
+      "OutOfMemoryError, JVM crash, or abnormal memory allocation during deserialization",
+      "Presence of known deserialization gadget chains in call stacks"
+    ],
+    "file_indicators": [
+      "Serialized object streams containing javax.naming.Reference objects",
+      "Serialized arrays with extremely large declared lengths (e.g., Integer.MAX_VALUE)",
+      "Presence of known gadget classes (e.g., AnnotationInvocationHandler, InvokerTransformer, CommonsCollections) in serialized data",
+      "Serialized data containing remote codebase URLs or external JNDI references"
+    ],
+    "network_indicators": [
+      "JVM making outbound connections to untrusted or unexpected remote codebase URLs during deserialization",
+      "Unusual JNDI lookups to attacker-controlled domains or IP addresses",
+      "Network activity from the JVM process to external servers immediately following deserialization"
+    ],
+    "how_to_detect": "Monitor for deserialization of untrusted data, especially from network or file sources. Inspect serialized streams for suspicious classes (javax.naming.Reference, known gadget classes) and abnormal array sizes. Detect outbound JNDI lookups or remote class loading attempts by monitoring JVM network activity. Alert on Runtime.getRuntime().exec() or similar calls during deserialization by instrumenting or tracing JVM execution. Use static analysis to identify code paths that deserialize untrusted input, and implement allow-lists for safe classes. Correlate JVM errors (e.g., OutOfMemoryError) with deserialization events to identify potential denial-of-service attempts."
+  }
+}

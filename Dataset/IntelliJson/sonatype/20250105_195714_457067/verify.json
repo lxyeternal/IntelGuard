@@ -1,0 +1,110 @@
+{
+  "package_info": {
+    "package_name": "jenkins-core",
+    "package_manager": "Maven (Java)",
+    "package_versions": "[2.205, 2.219) for Jenkins 2.205.x; ( , 2.204.2] for Jenkins LTS 2.204.x and below",
+    "why_malicious": "The package contains a critical vulnerability (CVE-2020-2100) in its UDP multicast/broadcast discovery protocol implementation. This flaw allows attackers to abuse the protocol for network amplification and reflection attacks, as well as to trigger infinite reply loops between Jenkins servers, resulting in denial of service (DoS) or distributed denial of service (DDoS) against arbitrary targets. The vulnerability is not intentional malware, but its impact is equivalent to enabling malicious exploitation."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "Receipt of any UDP packet on port 33848 (Jenkins discovery port)",
+        "file_location": "jenkins-core/src/main/java/hudson/UDPBroadcastThread.java (or equivalent Java class handling UDP multicast/broadcast discovery)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "// Pseudocode representing the vulnerable behavior\nonUdpPacketReceived(packet) {\n  // No validation of source IP or packet content\n  response = buildJenkinsMetadataResponse();\n  sendUdpResponse(packet.sourceIp, response);\n}",
+      "code_language": "java",
+      "code_behavior": "Upon receiving any UDP packet on port 33848, the code constructs and sends a large Jenkins metadata response to the source IP, without validating the sender or the packet content. This enables attackers to send small spoofed UDP packets and cause the server to send large responses to arbitrary victims, facilitating UDP amplification and reflection attacks.",
+      "malice_analysis": {
+        "why_suspicious": "The code responds to any UDP packet, including those with spoofed or untrusted source IPs, with a large metadata response. This behavior can be exploited for UDP amplification and reflection attacks, as a small request can trigger a much larger response to a third party.",
+        "violated_expectations": "A secure implementation would validate the source of discovery requests, restrict responses to trusted or local network clients, and limit the size and frequency of responses. The vulnerable code fails to perform any validation or rate limiting, violating standard security practices for network services.",
+        "similar_legitimate_use": "Service discovery protocols may legitimately respond to multicast or broadcast requests within a trusted local network, but should not respond indiscriminately to any packet from any source, especially over the internet.",
+        "key_indicators": [
+          "No source IP or packet content validation before responding",
+          "Large UDP response generated for any incoming packet",
+          "Response sent to arbitrary or external IP addresses",
+          "Listener active on UDP port 33848"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "Receipt of UDP discovery request from another Jenkins instance on port 33848",
+        "file_location": "jenkins-core/src/main/java/hudson/UDPBroadcastThread.java (or equivalent Java class handling UDP multicast/broadcast discovery)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "// Pseudocode for infinite reply loop\nonUdpPacketReceived(packet) {\n  if (packet.isFromJenkinsInstance()) {\n    // Responds to every request, including those from other Jenkins servers\n    response = buildJenkinsMetadataResponse();\n    sendUdpResponse(packet.sourceIp, response);\n  }\n}",
+      "code_language": "java",
+      "code_behavior": "When a UDP discovery request is received from another Jenkins server, the code responds unconditionally, even if the request originated from a peer. If two vulnerable Jenkins servers communicate, they will continuously reply to each other's discovery packets, creating an infinite loop of large UDP responses and rapidly exhausting system and network resources.",
+      "malice_analysis": {
+        "why_suspicious": "The code does not implement any mechanism to prevent reply loops or rate limit responses to peer discovery requests. This allows two Jenkins servers to enter an infinite reply loop, consuming CPU, memory, and network bandwidth, and potentially leading to denial of service.",
+        "violated_expectations": "A robust discovery protocol should include loop prevention (such as tracking recent requests or suppressing repeated replies), rate limiting, and validation to avoid resource exhaustion. The vulnerable code lacks these safeguards, making it susceptible to infinite reply chains.",
+        "similar_legitimate_use": "Legitimate service discovery may involve responding to peer requests, but should always include mechanisms to prevent reply storms or loops, especially in distributed environments.",
+        "key_indicators": [
+          "No loop prevention or suppression of repeated replies",
+          "Unconditional response to discovery requests from other Jenkins servers",
+          "Sustained, repetitive UDP traffic between Jenkins servers",
+          "Potential for rapid resource exhaustion (CPU, memory, bandwidth)"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a UDP packet with the victim's IP address as the source and sends it to a vulnerable Jenkins server on UDP port 33848.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The Jenkins server sends a large metadata response to the victim's IP, amplifying the attack traffic and reflecting it onto the victim."
+    },
+    {
+      "step": 2,
+      "action": "Jenkins server responds with a large UDP packet containing Jenkins metadata to the victim's IP address, regardless of the legitimacy of the request.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The victim receives unsolicited, amplified UDP traffic, potentially overwhelming their network and causing denial of service."
+    },
+    {
+      "step": 3,
+      "action": "Attacker crafts UDP packets with the source and destination IPs set to two different vulnerable Jenkins servers, causing each to believe the other is a legitimate discovery peer.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Both Jenkins servers begin responding to each other's discovery packets, entering an infinite reply loop."
+    },
+    {
+      "step": 4,
+      "action": "Infinite reply loop between the two Jenkins servers results in continuous exchange of large UDP packets.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Both Jenkins servers experience resource exhaustion (CPU, memory, bandwidth) and may become unresponsive or crash, resulting in denial of service."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unconditional UDP responses on port 33848 to any source IP",
+      "Large UDP responses (Jenkins metadata) to small incoming requests",
+      "Sustained or repetitive UDP traffic between Jenkins servers on port 33848",
+      "Repeated UDP packets with similar or identical payloads in both directions between two hosts"
+    ],
+    "file_indicators": [
+      "jenkins-core.jar (affected versions: [2.205, 2.219), ( , 2.204.2])",
+      "Presence of UDP listener on port 33848 in Jenkins process"
+    ],
+    "network_indicators": [
+      "Unsolicited UDP responses from Jenkins servers to external or non-local IP addresses on port 33848",
+      "High volume of outbound UDP traffic on port 33848 with large payloads",
+      "UDP packets containing Jenkins metadata structures (e.g., XML or serialized Java objects typical of Jenkins discovery responses)"
+    ],
+    "how_to_detect": "Monitor network traffic for Jenkins servers responding to UDP packets on port 33848, especially with large payloads sent to external or unexpected IP addresses. Look for patterns of repeated or sustained UDP traffic between Jenkins servers, which may indicate reply loops. Use network IDS/IPS to flag UDP amplification patterns and infinite reply chains. Scan for vulnerable jenkins-core.jar versions in your environment and verify if UDP discovery is enabled. Correlate network events with process and file indicators to confirm exploitation."
+  }
+}

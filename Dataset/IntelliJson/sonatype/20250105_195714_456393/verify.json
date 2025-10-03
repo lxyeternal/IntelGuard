@@ -1,0 +1,99 @@
+{
+  "package_info": {
+    "package_name": "Apache HTTP Server",
+    "package_manager": "source/binary distribution (not a package manager like npm/PyPI)",
+    "package_versions": "2.4.49 (also 2.4.50 for incomplete fix)",
+    "why_malicious": "Version 2.4.49 of Apache HTTP Server contains a critical path traversal vulnerability (CVE-2021-41773) due to incomplete path normalization logic in the core HTTP request handling code. This flaw allows attackers to craft URLs with percent-encoded traversal sequences, enabling unauthorized access to files outside the web root, including sensitive system files and source code. The vulnerability is not the result of intentionally malicious code, but it enables malicious exploitation. Version 2.4.50 attempted to fix the issue but did so incompletely, leaving the vulnerability exploitable in some cases."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "HTTP request handling at runtime, specifically when the server processes incoming URLs containing path traversal sequences",
+        "file_location": "server/protocol.c (core HTTP request path normalization logic)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "if (path[n + 1] == '.' && IS_SLASH_OR_NULL(path[n + 2])) { ... }",
+      "code_language": "C",
+      "code_behavior": "Attempts to remove '/../' segments from the URL path to prevent path traversal, but only checks for literal '.' and '/' characters. It fails to decode or recognize percent-encoded traversal sequences (such as '%2e' for '.'), allowing attackers to bypass the normalization and access files outside the document root.",
+      "malice_analysis": {
+        "why_suspicious": "The code is intended to prevent directory traversal by removing '/../' patterns, but it only matches literal characters and does not decode percent-encoded values. This oversight allows attackers to use encoded traversal sequences (e.g., '.%2e/') to evade the check and access restricted files.",
+        "violated_expectations": "Proper path normalization should decode all percent-encoded characters before checking for traversal patterns, ensuring that both encoded and unencoded traversal attempts are blocked. The actual implementation fails to do this, leaving the server vulnerable to encoded traversal attacks.",
+        "similar_legitimate_use": "Path normalization is a legitimate and necessary function in web servers to prevent directory traversal. However, it must be implemented securely by decoding all input before validation.",
+        "key_indicators": [
+          "Checks only for literal '.' and '/' characters in path traversal prevention logic",
+          "Does not decode or inspect percent-encoded traversal sequences (e.g., '%2e', '%2e%2e')",
+          "Allows crafted URLs with encoded traversal to access files outside the document root",
+          "Vulnerability is present in the core request path normalization code"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "HTTP request handling at runtime, when the server processes URLs containing percent-encoded traversal sequences",
+        "file_location": "server/protocol.c (core HTTP request path normalization logic, as part of the patch)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "if ((path[n] == '.' || (decode_unreserved && path[n] == '%' && path[n+1] == '2' && (path[n+2] == 'e' || path[n+2] == 'E'))) && IS_SLASH_OR_NULL(path[n + 1])) { ... }",
+      "code_language": "C",
+      "code_behavior": "This patched logic extends the check to include percent-encoded '.' characters (i.e., '%2e' or '%2E') in addition to literal dots. It closes the bypass by ensuring that encoded traversal attempts are also detected and removed during path normalization.",
+      "malice_analysis": {
+        "why_suspicious": "This code represents the patch that addresses the vulnerability in the original logic. Its presence highlights the flaw in the previous implementation, which failed to account for encoded traversal. The patch demonstrates the correct approach by explicitly checking for both literal and percent-encoded traversal patterns.",
+        "violated_expectations": "The original code failed to decode and check for encoded traversal, a common evasion technique. The patch corrects this by handling both encoded and unencoded traversal attempts, as should have been done initially.",
+        "similar_legitimate_use": "Legitimate path normalization should always decode and check for both encoded and unencoded traversal sequences to prevent directory traversal attacks.",
+        "key_indicators": [
+          "Explicit check for percent-encoded dot characters ('%2e', '%2E') in path traversal prevention logic",
+          "Patch directly addresses the encoded traversal bypass vector",
+          "Improved normalization logic in core HTTP request handling code"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted HTTP request with a path containing percent-encoded traversal sequences (e.g., /cgi-bin/.%2e/%2e%2e/%2e%2e/etc/passwd) to the vulnerable Apache HTTP Server.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The server's path normalization logic fails to properly decode and block the traversal, allowing the request to reach files outside the document root."
+    },
+    {
+      "step": 2,
+      "action": "The server processes the request and returns the contents of files outside the web root, such as /etc/passwd or CGI source code, to the attacker.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker gains unauthorized access to sensitive files or source code, potentially exposing credentials or system information."
+    },
+    {
+      "step": 3,
+      "action": "If the accessed file is a script (e.g., CGI), the attacker may obtain its source code, which could reveal further secrets or vulnerabilities.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Potential for further exploitation, including privilege escalation, lateral movement, or discovery of additional vulnerabilities."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "HTTP requests containing percent-encoded traversal sequences such as '%2e', '%2e%2e', '%2f', or mixed encoded/decoded traversal patterns in the URL path",
+      "Requests attempting to access files outside the document root (e.g., /etc/passwd, /proc/self/environ, configuration files) via HTTP",
+      "Unusual or repeated requests for sensitive files or directories not normally exposed by the web server"
+    ],
+    "file_indicators": [
+      "Access logs showing requests for files outside the web root, especially with percent-encoded traversal patterns in the URL",
+      "Log entries with URL paths containing encoded traversal sequences (e.g., '.%2e/', '%2e%2e/')"
+    ],
+    "network_indicators": [
+      "Inbound HTTP requests with encoded traversal patterns in the path (e.g., '%2e', '%2e%2e', '%2f')",
+      "Multiple or automated requests targeting sensitive system files or configuration files via HTTP"
+    ],
+    "how_to_detect": "Monitor HTTP access logs for requests containing percent-encoded traversal sequences (such as '%2e', '%2e%2e', '%2f') and attempts to access files outside the web root. Flag any HTTP request path that includes encoded traversal patterns or requests for sensitive files (e.g., /etc/passwd, /proc/self/environ, configuration files). Automated detection systems should correlate these patterns with the server version (2.4.49 or 2.4.50) to identify exploitation attempts. Additionally, alert on any successful responses to such requests, as this may indicate unauthorized file disclosure."
+  }
+}

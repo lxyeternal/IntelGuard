@@ -1,0 +1,79 @@
+{
+  "package_info": {
+    "package_name": "spring-security-oauth2-client",
+    "package_manager": "maven",
+    "package_versions": "[5.1.0.RELEASE, 5.2.11.RELEASE), [5.3.0.RELEASE, 5.3.10.RELEASE), [5.4.0, 5.4.7), [5.5.0, 5.5.1)",
+    "why_malicious": "The package is vulnerable to uncontrolled resource consumption (CVE-2021-22119). Specifically, it allows attackers to create an unlimited number of abandoned OAuth2 authorization requests, which are stored indefinitely in the user's session without any expiration or upper bound. This can be exploited to exhaust server memory and session storage, resulting in a denial of service (DoS) for legitimate users."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, during the handling of OAuth2 authorization requests (when a new OAuth2 authorization request is initiated by a user or client).",
+        "file_location": "org.springframework.security.oauth2.client.web.HttpSessionOAuth2AuthorizationRequestRepository (and org.springframework.security.oauth2.client.web.server.WebSessionOAuth2ServerAuthorizationRequestRepository)",
+        "required_permissions": [
+          "Access to HTTP session storage (in-memory or persistent session store)",
+          "Sufficient memory allocation for session data"
+        ]
+      },
+      "code_snippet": "Map<String, OAuth2AuthorizationRequest> authorizationRequests = this.getAuthorizationRequests(request);\nauthorizationRequests.put(state, authorizationRequest);\nrequest.getSession().setAttribute(this.sessionAttributeName, authorizationRequests);",
+      "code_language": "java",
+      "code_behavior": "Each new OAuth2 authorization request is stored in the user's session, keyed by the 'state' parameter. There is no limit or expiration on the number of requests stored, so repeated requests with unique states cause the session to grow indefinitely.",
+      "malice_analysis": {
+        "why_suspicious": "The code stores every incoming OAuth2 authorization request in the session without any mechanism to limit the number of stored requests or to expire old/abandoned ones. This enables an attacker to intentionally bloat the session by sending many requests with unique states.",
+        "violated_expectations": "Secure implementations should enforce a maximum number of stored authorization requests per session and/or implement expiration and cleanup of abandoned requests. The actual code lacks both, allowing unbounded accumulation.",
+        "similar_legitimate_use": "It is legitimate to store a small, bounded number of authorization requests per session to track ongoing OAuth2 flows. However, legitimate use would always include limits and cleanup to prevent resource exhaustion.",
+        "key_indicators": [
+          "No upper bound on the number of authorization requests stored in the session",
+          "No expiration or removal of abandoned authorization requests",
+          "Direct mapping of attacker-controlled 'state' values to session storage keys",
+          "Session attribute (e.g., SPRING_SECURITY_SAVED_REQUEST) grows with each new authorization request"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "The attacker sends repeated OAuth2 authorization requests to the application, each with a unique 'state' parameter value.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Each request is stored in the user's session, causing the session attribute map to grow with every new request."
+    },
+    {
+      "step": 2,
+      "action": "The attacker intentionally aborts the authorization flow before completion, leaving the stored requests abandoned in the session.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Abandoned authorization requests are never cleaned up or expired, so the session continues to accumulate data."
+    },
+    {
+      "step": 3,
+      "action": "The attacker repeats this process, causing the session storage (and server memory) to grow without bound.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Eventually, system resources are exhausted, resulting in a denial of service (DoS) for legitimate users."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unbounded growth of session attributes related to OAuth2 authorization requests (e.g., session attribute maps with hundreds or thousands of entries)",
+      "Repeated creation of session entries keyed by unique 'state' values in a short time frame",
+      "Absence of logic to expire or remove old/abandoned OAuth2 authorization requests from session storage",
+      "Sessions with unusually large memory footprints associated with OAuth2 flows"
+    ],
+    "file_indicators": [
+      "org/springframework/security/oauth2/client/web/HttpSessionOAuth2AuthorizationRequestRepository.class",
+      "org/springframework/security/oauth2/client/web/server/WebSessionOAuth2ServerAuthorizationRequestRepository.class",
+      "Session attributes named 'SPRING_SECURITY_SAVED_REQUEST' or similar, containing large maps of OAuth2AuthorizationRequest objects"
+    ],
+    "network_indicators": [
+      "High volume of OAuth2 authorization requests from a single user or IP address, each with a unique 'state' parameter",
+      "Frequent incomplete or aborted OAuth2 authorization flows (e.g., authorization requests without corresponding token exchanges or completions)"
+    ],
+    "how_to_detect": "Monitor session storage for unbounded growth in the number of OAuth2 authorization requests per session. Flag sessions where the count of stored authorization requests exceeds a reasonable threshold. Analyze application code for use of vulnerable versions of spring-security-oauth2-client and absence of request limiting or expiration logic. On the network side, detect high-frequency, incomplete OAuth2 authorization attempts from the same user or IP, especially where the 'state' parameter is always unique and flows are not completed."
+  }
+}
