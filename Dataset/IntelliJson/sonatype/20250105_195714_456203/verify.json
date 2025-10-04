@@ -1,0 +1,101 @@
+{
+  "package_info": {
+    "package_name": "Java Serialization (native mechanism)",
+    "package_manager": "JVM (Java platform)",
+    "package_versions": "All versions supporting native Java serialization",
+    "why_malicious": "The Java serialization mechanism itself is not inherently malicious, but its design allows attackers to craft serialized data streams that can instantiate arbitrary classes and trigger code execution during deserialization. Because the protocol is self-describing and does not restrict which classes can be instantiated, unguarded use with untrusted data enables attackers to exploit application logic and execute arbitrary code, making any application using untrusted Java serialization streams potentially vulnerable to remote code execution."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "deserialization (import-time or runtime, when ObjectInputStream is used)",
+        "file_location": "Serialized data stream (input to ObjectInputStream, e.g., file or network socket)",
+        "required_permissions": [
+          "filesystem (read access to serialized file or socket)",
+          "JVM classpath (access to application and attacker-supplied classes)"
+        ]
+      },
+      "code_snippet": "ObjectInputStream ois = new ObjectInputStream(new FileInputStream(f));\nHelloSerialisedWorld hw = (HelloSerialisedWorld) ois.readObject();",
+      "code_language": "java",
+      "code_behavior": "At deserialization time, the code uses ObjectInputStream to read a serialized object stream, instantiates objects as defined in the stream, and assigns them to application variables, resulting in execution of constructors or readObject methods of attacker-controlled classes.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing data from untrusted sources allows attackers to control which classes are instantiated, potentially triggering malicious code in constructors or deserialization hooks such as readObject, before any type checks or validation.",
+        "violated_expectations": "Normal behavior expects only safe, expected classes to be deserialized from trusted sources. Malicious behavior occurs when arbitrary or attacker-controlled classes are instantiated, leading to code execution outside the application's intended logic.",
+        "similar_legitimate_use": "Deserialization of trusted data from known, authenticated sources is legitimate in many applications, such as restoring application state or exchanging objects between trusted systems.",
+        "key_indicators": [
+          "Use of ObjectInputStream or similar APIs to deserialize data from untrusted or user-controlled sources",
+          "Absence of class whitelisting or validation during deserialization",
+          "Instantiation of classes not present in the application's expected object graph"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "deserialization (import-time or runtime, when crafted stream is processed)",
+        "file_location": "Serialized data stream (crafted by attacker, delivered via file or network)",
+        "required_permissions": [
+          "filesystem (read access to serialized file or socket)",
+          "JVM classpath (access to application and attacker-supplied classes)"
+        ]
+      },
+      "code_snippet": "Serialized stream with field value class name: java.lang.Integer (or attacker-controlled class with malicious code in constructor/readObject)",
+      "code_language": "java (serialized data format)",
+      "code_behavior": "At deserialization time, the code processes a serialized stream specifying a class name (e.g., java.lang.Integer or an attacker-supplied class), causing the JVM to instantiate the specified class and execute its constructor or deserialization hooks, even if assignment to the target field fails.",
+      "malice_analysis": {
+        "why_suspicious": "The deserialization process instantiates classes based on attacker-controlled input, allowing execution of code in constructors or deserialization hooks before any type assignment or validation occurs, enabling arbitrary code execution.",
+        "violated_expectations": "Expected behavior is to only instantiate safe, expected types as defined by the application. Malicious behavior occurs when arbitrary classes are instantiated from attacker-controlled data, leading to code execution regardless of assignment success.",
+        "similar_legitimate_use": "Legitimate use occurs when deserializing data from trusted sources with known, safe types, such as internal application state or secure inter-process communication.",
+        "key_indicators": [
+          "Serialized streams containing class names not present in the application's expected object model",
+          "Exceptions thrown after instantiation, indicating code in constructors or deserialization hooks was executed before type checks",
+          "Presence of attacker-supplied or unexpected class references in serialized data"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a serialized data stream specifying a malicious or unexpected class in a field value, embedding references to attacker-controlled classes.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Deserialization process receives and begins processing the attacker-crafted stream."
+    },
+    {
+      "step": 2,
+      "action": "Application deserializes the crafted stream using ObjectInputStream, instantiating the attacker-controlled class and executing its constructor or deserialization hooks (e.g., readObject).",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary code execution within the application context, prior to any type assignment or validation."
+    },
+    {
+      "step": 3,
+      "action": "Type assignment fails if the class does not match the expected type, resulting in an exception, but malicious code has already executed during instantiation.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Potential masking of the attack due to exception handling, while attacker achieves code execution."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Deserialization of data from untrusted or user-supplied sources using ObjectInputStream or similar APIs",
+      "Instantiation of unexpected or attacker-controlled classes during deserialization, especially those not present in the application's codebase",
+      "Execution of code in constructors or readObject methods during deserialization, observable via side effects or logs"
+    ],
+    "file_indicators": [
+      "Serialized files or streams containing unexpected class names in field values (e.g., classes not present in application logic)",
+      "Serialized data referencing attacker-supplied or external classes, especially those with known exploitation history (e.g., CommonsCollections, Groovy, etc.)"
+    ],
+    "network_indicators": [
+      "Inbound or outbound transfer of serialized Java objects from or to untrusted sources (e.g., over HTTP, RMI, or custom protocols)",
+      "Unusual network activity or connections initiated immediately following deserialization events"
+    ],
+    "how_to_detect": "Monitor application code and runtime for deserialization of data from untrusted sources, especially via ObjectInputStream or similar APIs. Implement class whitelisting or validation to restrict which classes can be instantiated during deserialization. Analyze serialized data streams for unexpected or unauthorized class references. Alert on exceptions during deserialization that occur after object instantiation, as this may indicate exploitation attempts. Correlate deserialization events with subsequent network activity or process launches to identify potential code execution."
+  }
+}

@@ -1,0 +1,155 @@
+{
+  "package_info": {
+    "package_name": "spring-cloud-function",
+    "package_manager": "Maven",
+    "package_versions": "< 3.2.6",
+    "why_malicious": "The package contains vulnerabilities that allow remote attackers to cause denial of service (DoS) by exhausting memory via function cache flooding, and to invoke unintended internal or third-party functions, potentially leading to remote code execution (RCE) or unauthorized configuration changes. These issues stem from improper input validation, unbounded cache growth, and unsafe exposure of internal beans and configuration endpoints."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP POST to function endpoint)",
+        "file_location": "SimpleFunctionRegistry.lookup() (Java source)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "String[] functionNames = StringUtils.delimitedListToStringArray(functionDefinition.replaceAll(\",\", \"|\"), \"|\").trim();",
+      "code_language": "java",
+      "code_behavior": "At runtime, when an HTTP POST is made to a function endpoint, the code splits the user-supplied function name string by ',' or '|', generates permutations of function names, and adds each permutation to the function cache without bounds, resulting in unbounded cache growth and memory exhaustion.",
+      "malice_analysis": {
+        "why_suspicious": "Permitting arbitrary permutations of function names to be cached without any size limitation allows attackers to flood the cache with unique entries, leading to denial of service by exhausting server memory.",
+        "violated_expectations": "Normal behavior would restrict cache entries to unique, valid function names and enforce cache size limits. Here, the cache is populated with attacker-controlled permutations, with no deduplication or size restriction.",
+        "similar_legitimate_use": "Chaining functions is a legitimate feature for composing business logic, but should not result in unbounded cache entries or allow user input to dictate cache growth.",
+        "key_indicators": [
+          "Cache population based on user-controlled input",
+          "No deduplication or limit on cache size",
+          "Permutations of known functions are treated as unique cache entries",
+          "Function cache grows rapidly in response to crafted HTTP requests"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (function invocation via HTTP endpoint)",
+        "file_location": "SimpleFunctionRegistry.lookup() and normalizeFunctionDefinition() (Java source)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "Object functionCandidate = this.discoverFunctionInBeanFactory(functionName);\nif (functionCandidate != null) {\n  FunctionRegistration functionRegistration = new FunctionRegistration(functionCandidate, functionName).type(functionType);\n  if (functionRegistration != null) {\n    this.register(functionRegistration);\n  }\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, when a function is invoked via HTTP endpoint, the code attempts to discover and register any bean in the ApplicationContext as an invokable function based on the user-supplied function name, exposing internal or third-party beans to HTTP requests and making them accessible for remote invocation.",
+      "malice_analysis": {
+        "why_suspicious": "Exposing internal beans as HTTP-invokable functions can lead to unintended access, configuration changes, or even code execution if the bean processes attacker-controlled input. This breaks the intended isolation of internal components.",
+        "violated_expectations": "Only explicitly defined and intended functions should be exposed via HTTP endpoints. Here, arbitrary beans may be exposed based solely on user input, without strict filtering or access control.",
+        "similar_legitimate_use": "Dynamic function discovery is useful for extensibility in microservices, but should be tightly controlled and limited to explicitly allowed beans.",
+        "key_indicators": [
+          "Bean discovery based on user-supplied function name",
+          "Lack of strict filtering for eligible functions",
+          "Potential for arbitrary bean invocation",
+          "Exposure of internal or third-party beans as HTTP endpoints"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (HTTP POST to arbitrary bean endpoint)",
+        "file_location": "User-defined bean (e.g., RabbitTest, Get) in ApplicationContext",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "POST http://springhost/rabbitTest\n{\"mandatoryExpressionString\":\"T(java.lang.Runtime).getRuntime().exec(\\\"open -a /System/Applications/Calculator.app\\\")\"}",
+      "code_language": "java (Spring Expression Language injection)",
+      "code_behavior": "At runtime, when an HTTP POST is made to an exposed bean endpoint, the code evaluates attacker-supplied SpEL expressions in the context of a bean method, resulting in arbitrary code execution (RCE) on the server if the expression invokes sensitive Java APIs.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing user input to be evaluated as a SpEL expression is a well-known code injection vector, especially when exposed via HTTP. This enables attackers to execute arbitrary Java code, leading to full server compromise.",
+        "violated_expectations": "User input should never be directly evaluated as code. Here, attacker input is executed as Java code without validation or sandboxing, violating basic security principles.",
+        "similar_legitimate_use": "SpEL is used for dynamic configuration and expression evaluation, but should be sandboxed and never exposed to untrusted input from HTTP requests.",
+        "key_indicators": [
+          "Direct evaluation of user-supplied SpEL",
+          "Ability to invoke Runtime.exec() from HTTP request",
+          "No input validation or sandboxing",
+          "POST payloads containing SpEL expressions targeting sensitive Java classes"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (HTTP POST to okHttpClientFactory endpoint)",
+        "file_location": "org.springframework.cloud.commons.httpclient.DefaultOkHttpClientFactory#createBuilder",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "POST http://localhost:9090/okHttpClientFactory\ntrue",
+      "code_language": "java",
+      "code_behavior": "At runtime, when an HTTP POST is made to the okHttpClientFactory endpoint, the code allows remote HTTP requests to change global SSL validation settings by invoking a bean method with attacker-controlled input, potentially disabling SSL verification for all subsequent requests and weakening application security.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing remote users to change global security settings (like SSL validation) via HTTP is a serious misconfiguration risk, as it enables attackers to disable SSL verification and facilitate man-in-the-middle attacks.",
+        "violated_expectations": "Configuration changes should be restricted to trusted administrators and protected endpoints, not exposed via public HTTP endpoints without authentication or authorization.",
+        "similar_legitimate_use": "Dynamic configuration is legitimate for operational flexibility, but should be authenticated, authorized, and restricted to trusted users.",
+        "key_indicators": [
+          "Global configuration change via HTTP POST",
+          "No authentication or authorization checks",
+          "Affects security posture of the application",
+          "Ability to disable SSL verification remotely"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends HTTP POST requests with crafted function names (using ',' or '|') to flood the function cache.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Denial of service via memory exhaustion."
+    },
+    {
+      "step": 2,
+      "action": "Attacker enumerates and invokes unintended beans by supplying their names as function endpoints.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Exposure of internal beans and potential for further exploitation."
+    },
+    {
+      "step": 3,
+      "action": "Attacker supplies malicious SpEL expressions or configuration-altering payloads to exposed beans.",
+      "implemented_by": [
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Remote code execution or unauthorized configuration changes."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unusually high number of function cache entries or registrations in the function registry",
+      "HTTP requests to /<function_name>, /<bean_name>, or /<function_name>,<other_function> endpoints with varying permutations",
+      "POST payloads containing SpEL expressions or suspicious Java code (e.g., references to java.lang.Runtime, exec, or system commands)",
+      "Unexpected invocation of internal or third-party beans via HTTP endpoints",
+      "Configuration changes (such as SSL validation settings) triggered by unauthenticated HTTP requests"
+    ],
+    "file_indicators": [
+      "Rapid growth of functionRegistrations or similar cache structures in application memory",
+      "Beans exposed as HTTP endpoints not explicitly defined by developers in configuration",
+      "Presence of user-defined beans (e.g., RabbitTest, Get) accessible via HTTP endpoints"
+    ],
+    "network_indicators": [
+      "Burst of POST requests to function endpoints with varying permutations of function names (using ',' or '|')",
+      "Requests targeting internal bean names as HTTP endpoints (e.g., /rabbitTest, /okHttpClientFactory)",
+      "POST requests with payloads containing SpEL expressions or Java code targeting sensitive classes"
+    ],
+    "how_to_detect": "Monitor application logs and memory usage for excessive cache growth in the function registry, and for HTTP requests with function name permutations (',' or '|'). Inspect POST payloads for SpEL expressions or suspicious Java code, especially those referencing java.lang.Runtime or exec. Alert on exposure of internal beans as HTTP endpoints and on configuration changes (such as SSL validation) triggered via HTTP. Use automated scanning to detect beans exposed as endpoints that are not explicitly defined, and correlate with network activity to identify enumeration or exploitation attempts."
+  }
+}

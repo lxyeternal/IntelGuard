@@ -1,0 +1,125 @@
+{
+  "package_info": {
+    "package_name": "KubeHound",
+    "package_manager": "GitHub Releases (binary distribution)",
+    "package_versions": "all released versions (as of report date)",
+    "why_malicious": "KubeHound is not a malicious package. It is an open-source security tool designed to help defenders and red teams visualize and analyze attack paths in Kubernetes clusters. The tool itself does not contain or execute malicious code, but it models and documents known Kubernetes attack techniques for simulation and analysis purposes."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when a vulnerable pod is deployed and running)",
+        "file_location": "Kubernetes Pod YAML (apiVersion: v1, kind: Pod, spec)",
+        "required_permissions": [
+          "hostPID",
+          "privileged container",
+          "container exec"
+        ]
+      },
+      "code_snippet": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: nsenter-pod\n  labels:\n    app: kubehound-edge-test\nspec:\n  hostPID: true\n  containers:\n    - name: nsenter-pod\n      securityContext:\n        privileged: true\n      command: [ \"/bin/sh\", \"-c\", \"--\" ]\n      args: [ \"while true; do sleep 30; done;\" ]",
+      "code_language": "yaml",
+      "code_behavior": "At runtime, the pod is deployed with hostPID: true and privileged: true, allowing processes inside the container to access and manipulate the host's process namespace, enabling container escape via nsenter or similar tools.",
+      "malice_analysis": {
+        "why_suspicious": "Running a container with both hostPID enabled and privileged mode grants the container full access to the host's process namespace, which is a well-known vector for container escape attacks.",
+        "violated_expectations": "Normal containers should be isolated from the host's process namespace and should not require privileged access unless absolutely necessary. This configuration breaks the security boundary between the container and the host.",
+        "similar_legitimate_use": "Some system-level agents (e.g., CNI plugins, monitoring agents) may require privileged access and hostPID, but these should be tightly controlled and audited.",
+        "key_indicators": [
+          "hostPID: true in pod spec",
+          "securityContext.privileged: true",
+          "Long-running shell command (while true; do sleep 30; done;)"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when KubeHound Go binary is executed against a cluster)",
+        "file_location": "KubeHound Go binary (collector component)",
+        "required_permissions": [
+          "network (Kubernetes API access)",
+          "read access to all Kubernetes objects"
+        ]
+      },
+      "code_snippet": "Collector: Collects all Kubernetes objects from the API server of a target cluster\nAPI rate: 100 requests/sec\nBuffer page size: 10 mb\nNumber of elements per page: 500",
+      "code_language": "go (description, not direct code)",
+      "code_behavior": "At runtime, the collector component makes high-volume API requests to the Kubernetes API server, retrieving all objects (Roles, Pods, RoleBindings, Containers, etc.) for analysis and attack path computation.",
+      "malice_analysis": {
+        "why_suspicious": "While not inherently malicious, high-volume, automated enumeration of all cluster resources is a common reconnaissance technique used by attackers to map the environment and identify potential attack paths.",
+        "violated_expectations": "Normal cluster operations do not require bulk enumeration of all objects at high rates. This behavior is typical of security scanners or attackers performing reconnaissance.",
+        "similar_legitimate_use": "Security auditing tools and inventory management systems may perform similar enumeration for compliance or monitoring.",
+        "key_indicators": [
+          "Automated, high-rate API requests to Kubernetes API server",
+          "Enumeration of all resource types (pods, roles, bindings, etc.)"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (when KubeHound Go binary is executed)",
+        "file_location": "KubeHound Go binary (graph builder component)",
+        "required_permissions": [
+          "filesystem (temporary NoSQL storage)",
+          "network (JanusGraph DB access)"
+        ]
+      },
+      "code_snippet": "NoSQL writer: Used as temporary storage during the calculation of the attack paths (MongoDB)\nGraph builder: Computes and determines attack paths, then stores them in JanusGraph",
+      "code_language": "go (description, not direct code)",
+      "code_behavior": "At runtime, the tool writes all ingested and enriched Kubernetes objects to a local or remote MongoDB instance, then builds a graph of attack paths and stores it in JanusGraph for later querying and visualization.",
+      "malice_analysis": {
+        "why_suspicious": "Storing a full copy of all cluster objects and attack path data in external databases could be abused for data exfiltration or persistence if the tool or its storage is compromised.",
+        "violated_expectations": "Normal cluster operations do not require exporting all resource data to external databases. This is typical of security tools or attackers collecting data for offline analysis.",
+        "similar_legitimate_use": "Security analytics and compliance tools may use similar patterns for reporting and visualization.",
+        "key_indicators": [
+          "Bulk export of cluster data to external NoSQL/graph databases",
+          "Creation of detailed attack path graphs"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Deploy a pod with hostPID and privileged access enabled, creating a container escape opportunity.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker gains access to host process namespace and can potentially escalate privileges to the node."
+    },
+    {
+      "step": 2,
+      "action": "Enumerate all Kubernetes resources via high-volume API requests to map the environment and identify attack paths.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker or tool identifies vulnerable configurations and possible lateral movement opportunities."
+    },
+    {
+      "step": 3,
+      "action": "Store and analyze all collected data in external databases to compute and visualize attack paths.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Attacker or analyst can query and visualize shortest paths to critical assets, enabling targeted attacks or prioritized defense."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Deployment of pods with hostPID: true and privileged: true",
+      "High-rate enumeration of Kubernetes API resources",
+      "Bulk export of cluster state to external databases",
+      "Graph-based analysis of attack paths"
+    ],
+    "file_indicators": [
+      "Pod specs with hostPID: true and securityContext.privileged: true",
+      "Long-running shell commands in container args (e.g., while true; do sleep 30; done;)",
+      "Temporary MongoDB or JanusGraph database files associated with cluster data"
+    ],
+    "network_indicators": [
+      "Large volumes of API requests to Kubernetes API server endpoints",
+      "Connections to external MongoDB or JanusGraph instances from within the cluster"
+    ],
+    "how_to_detect": "Monitor for pods deployed with both hostPID and privileged access enabled, as these are high-risk for container escape. Detect high-rate, automated enumeration of Kubernetes API resources, which may indicate reconnaissance by attackers or security tools. Watch for bulk export of cluster data to external databases, especially if these are not part of normal operations. Alert on the creation of graph-based attack path visualizations if not part of approved security tooling."
+  }
+}

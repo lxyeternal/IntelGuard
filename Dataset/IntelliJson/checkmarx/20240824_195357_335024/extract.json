@@ -1,0 +1,102 @@
+{
+  "package_info": {
+    "package_name": "org.apache.dubbo.dubbo",
+    "package_manager": "Maven",
+    "package_versions": "<=2.7.3 (critical RCE with FastJSON gadget), <=2.7.6 (implementation dependent), <=2.7.9 (unsafe deserialization possible with extra gadgets)",
+    "why_malicious": "The package allows unauthenticated remote code execution via unsafe deserialization of attacker-controlled data in the default Dubbo protocol, due to the ability to select insecure deserializers (Kryo/FST) and the lack of strict class whitelisting. This enables attackers to send malicious serialized objects that are executed on the server."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "network request (runtime, upon receiving a Dubbo protocol request)",
+        "file_location": "Dubbo protocol handler (server-side, network listener on default Dubbo port)",
+        "required_permissions": [
+          "network",
+          "process execution",
+          "filesystem (if payload writes files)"
+        ]
+      },
+      "code_snippet": "Attacker sends a crafted Dubbo protocol packet with:\n- Preamble: 0xdabb\n- Flags: set to select Kryo or FST deserializer\n- Length: total stream length\n- Service/Method/Args: arbitrary strings to satisfy readUTF\n- Malicious serialized object (e.g., FastJSON gadget chain) as method argument\n\nThe server reads the stream, selects the deserializer based on the flag, and deserializes the attacker-supplied object, triggering the gadget chain.",
+      "code_language": "java (binary protocol, but deserialization occurs in Java)",
+      "code_behavior": "At runtime, upon receiving a network request, the code reads a binary stream, selects a deserializer based on a flag, and deserializes attacker-controlled data, resulting in arbitrary code execution on the server.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing untrusted data from the network without strict class whitelisting is a well-known vector for remote code execution. Allowing the client to select the deserializer increases the attack surface.",
+        "violated_expectations": "Normal behavior would restrict deserialization to safe classes and a single, hardened deserializer. Here, the protocol allows arbitrary deserializer selection and deserializes attacker-supplied objects.",
+        "similar_legitimate_use": "Deserialization of trusted, internal data for RPC is legitimate, but only when both endpoints are trusted and strict class whitelisting is enforced.",
+        "key_indicators": [
+          "Deserializer selection via user-controlled flag",
+          "Deserialization of untrusted network data",
+          "No authentication or authorization required",
+          "Known gadget chains (e.g., FastJSON) are exploitable"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (deserialization of method arguments in Dubbo protocol)",
+        "file_location": "Dubbo protocol pipeline (method argument deserialization)",
+        "required_permissions": [
+          "network",
+          "process execution"
+        ]
+      },
+      "code_snippet": "Malicious serialized object (e.g., FastJSON gadget chain) embedded as a method argument in the Dubbo protocol stream. When deserialized, this object triggers a chain that executes arbitrary commands (e.g., Runtime.getRuntime().exec(\"calc.exe\")).",
+      "code_language": "java (serialized object, triggers Java code execution)",
+      "code_behavior": "At runtime, the code deserializes a method argument from the network stream, which is a malicious gadget chain, leading to arbitrary command execution on the server.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing attacker-supplied objects as method arguments is highly dangerous, especially when known gadget chains are present in the classpath.",
+        "violated_expectations": "Expected behavior is to only deserialize safe, whitelisted classes. Here, any object can be deserialized, including those with dangerous side effects.",
+        "similar_legitimate_use": "Legitimate RPC frameworks deserialize method arguments, but only from trusted sources and with strict controls.",
+        "key_indicators": [
+          "Deserialization of attacker-controlled objects",
+          "Presence of known exploitable gadget chains",
+          "No input validation or class whitelisting"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a Dubbo protocol packet with a malicious serialized object and sets the deserializer flag to Kryo or FST.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Packet is sent to the exposed Dubbo service port."
+    },
+    {
+      "step": 2,
+      "action": "Dubbo server receives the packet, parses the preamble and flags, and selects the deserializer as specified by the attacker.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Server proceeds to deserialize the method argument."
+    },
+    {
+      "step": 3,
+      "action": "Server deserializes the attacker-supplied object, which is a gadget chain (e.g., FastJSON) that triggers arbitrary code execution.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains remote code execution on the server."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Dubbo protocol packets with non-default deserializer flags (Kryo/FST)",
+      "Deserialization of untrusted network data in RPC handlers",
+      "Unexpected process execution (e.g., calc.exe, /bin/sh) by the Dubbo service"
+    ],
+    "file_indicators": [
+      "Presence of dubbo-serialization-kryo or dubbo-serialization-fst packages in classpath",
+      "Dubbo protocol handler code that allows deserializer selection via network input"
+    ],
+    "network_indicators": [
+      "Inbound TCP connections to Dubbo service port (default 20880) with non-standard protocol flags",
+      "Unusual or malformed Dubbo protocol traffic (e.g., arbitrary service/method names, large binary payloads)"
+    ],
+    "how_to_detect": "Monitor Dubbo service ports for packets with deserializer flags set to Kryo or FST. Inspect for deserialization of untrusted data and look for process execution spawned by the Dubbo service. Alert on the presence of dubbo-serialization-kryo/fst in the classpath and on any unauthenticated inbound requests that result in deserialization of complex objects. Use network IDS/IPS to flag Dubbo protocol anomalies and endpoint EDR to detect suspicious child processes."
+  }
+}

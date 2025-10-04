@@ -1,0 +1,141 @@
+{
+  "package_info": {
+    "package_name": "D(HE)at attack (protocol-level, not a software package)",
+    "package_manager": "N/A (protocol-level vulnerability affecting cryptographic libraries and servers implementing DHE key exchange, e.g., OpenSSL, GnuTLS, etc.)",
+    "package_versions": "Older protocol versions (e.g., TLS < 1.3), cryptographic libraries with long exponents or improper public key validation (e.g., OpenSSL with CVE-2022-40735, CVE-2024-41996)",
+    "why_malicious": "The D(HE)at attack exploits protocol and implementation flaws in Diffie-Hellman Ephemeral (DHE) key exchange, allowing an attacker to force a server to perform expensive modular exponentiation operations with minimal client effort, leading to denial-of-service (DoS) by CPU exhaustion."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "TLS/SSH handshake initiation (runtime, connection setup)",
+        "file_location": "Protocol message exchange (ClientHello, ServerHello, ServerKeyExchange, ClientKeyExchange)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "Client skips public key computation and sends a random value as its public key in the key exchange message.",
+      "code_language": "protocol manipulation (conceptual, not code in a specific language)",
+      "code_behavior": "During handshake initiation, the client sends a random value as its public key instead of a valid Diffie-Hellman computation, causing the server to perform modular exponentiation with an invalid input, resulting in wasted CPU cycles.",
+      "malice_analysis": {
+        "why_suspicious": "Legitimate clients must perform modular exponentiation to generate a valid public key, but the attacker avoids this computation and sends arbitrary data, offloading all computational cost to the server.",
+        "violated_expectations": "Normal behavior expects both client and server to perform similar cryptographic computations; here, only the server does the work.",
+        "similar_legitimate_use": "None; clients are always expected to perform their own key computation.",
+        "key_indicators": [
+          "Client public key is random or malformed",
+          "No corresponding modular exponentiation on client side",
+          "Server performs expensive computation with no proof-of-work from client"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "Server-side key exchange processing (runtime, handshake processing)",
+        "file_location": "Cryptographic library function handling ClientKeyExchange (e.g., OpenSSL, GnuTLS, etc.)",
+        "required_permissions": [
+          "CPU (high computation)",
+          "network"
+        ]
+      },
+      "code_snippet": "Server receives arbitrary public key from client and performs modular exponentiation: shared_secret = (client_pubkey) ** server_privkey mod p",
+      "code_language": "C / cryptographic library pseudo-code",
+      "code_behavior": "Upon receiving the client's (random) public key, the server performs modular exponentiation to compute the shared secret, consuming significant CPU resources even though the handshake will ultimately fail.",
+      "malice_analysis": {
+        "why_suspicious": "The server is forced to perform expensive cryptographic operations with no guarantee that the client has done any work or that the handshake will succeed.",
+        "violated_expectations": "Normally, both parties contribute valid keys and share the computational burden; here, the server is tricked into unnecessary computation.",
+        "similar_legitimate_use": "None; modular exponentiation should only be performed with valid, protocol-compliant keys.",
+        "key_indicators": [
+          "Server performs modular exponentiation with unvalidated or random client public key",
+          "Handshake fails after expensive computation",
+          "High CPU usage with many failed handshakes"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "Server-side public key validation (runtime, handshake processing)",
+        "file_location": "Cryptographic library public key validation routine (e.g., OpenSSL, GnuTLS)",
+        "required_permissions": [
+          "CPU (high computation)"
+        ]
+      },
+      "code_snippet": "Server performs subgroup validation on client public key, even when using safe-prime groups: validate_order(client_pubkey, group_params)",
+      "code_language": "C / cryptographic library pseudo-code",
+      "code_behavior": "During handshake, the server performs additional subgroup validation on the client public key, which is computationally expensive and unnecessary for safe-prime groups, further increasing CPU load.",
+      "malice_analysis": {
+        "why_suspicious": "Unnecessary validation increases computational cost and can be triggered repeatedly by an attacker, amplifying the DoS effect.",
+        "violated_expectations": "Validation should be optimized and only performed when necessary; here, it is always performed, regardless of group safety.",
+        "similar_legitimate_use": "Subgroup validation is legitimate for non-safe-prime groups, but not always needed for safe-prime groups.",
+        "key_indicators": [
+          "Unconditional public key validation",
+          "Excessive CPU usage during handshake",
+          "Triggered by attacker-controlled input"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker initiates handshake, advertising support for DHE key exchange.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Server prepares to perform DHE key exchange."
+    },
+    {
+      "step": 2,
+      "action": "Attacker sends a random value as its public key, skipping expensive computation.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Server receives and processes the (invalid) public key."
+    },
+    {
+      "step": 3,
+      "action": "Server performs modular exponentiation with the attacker's random public key.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Server expends significant CPU resources."
+    },
+    {
+      "step": 4,
+      "action": "Server performs unnecessary public key validation (if implemented).",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Further CPU exhaustion."
+    },
+    {
+      "step": 5,
+      "action": "Handshake fails, attacker repeats the process, causing denial-of-service.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Sustained CPU exhaustion and service unavailability."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "High rate of failed DHE handshakes from the same client IP",
+      "Server performing modular exponentiation with random or malformed client public keys",
+      "Excessive CPU usage during handshake processing",
+      "Repeated public key validation failures"
+    ],
+    "file_indicators": [
+      "No specific files; protocol-level anomaly, but logs may show handshake failures or malformed public keys"
+    ],
+    "network_indicators": [
+      "Burst of handshake initiation packets (e.g., ClientHello) from a single source",
+      "Unusually high number of incomplete or failed TLS/SSH handshakes",
+      "No corresponding encrypted data transfer after handshake"
+    ],
+    "how_to_detect": "Monitor server logs for a high volume of failed DHE handshakes, especially where the client public key is invalid or random. Track CPU usage spikes correlated with handshake attempts. Implement rate limiting and alert on repeated handshake failures from the same IP. Analyze cryptographic library logs for excessive modular exponentiation or public key validation failures."
+  }
+}

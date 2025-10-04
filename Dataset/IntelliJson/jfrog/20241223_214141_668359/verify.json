@@ -1,0 +1,128 @@
+{
+  "package_info": {
+    "package_name": "vanna",
+    "package_manager": "PyPI",
+    "package_versions": "all versions prior to the fix for CVE-2024-5565",
+    "why_malicious": "The package allows user-controlled input to be incorporated into prompts sent to an LLM, which generates Python code that is then executed via the exec() function. This design enables remote code execution (RCE) through prompt injection, allowing attackers to run arbitrary Python code on the host system without proper input sanitization or code validation."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when user asks a question with visualization enabled)",
+        "file_location": "vanna/base.py (get_plotly_figure method)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "python code execution"
+        ]
+      },
+      "code_snippet": "exec(plotly_code, globals(), ldict)",
+      "code_language": "python",
+      "code_behavior": "At runtime, when a user asks a question with visualization enabled, the method executes dynamically generated Python code (plotly_code) in the global context using exec(), allowing attacker-supplied code to run on the host system.",
+      "malice_analysis": {
+        "why_suspicious": "The use of exec() to execute code generated from user-influenced LLM output is highly dangerous, as it enables arbitrary code execution if the input is maliciously crafted.",
+        "violated_expectations": "Normal behavior would require strict sanitization or validation of any code before execution, and would never execute code directly derived from untrusted user input.",
+        "similar_legitimate_use": "Dynamic code execution may be used in controlled, internal data science environments with trusted users, but never with untrusted or unsanitized input in production systems.",
+        "key_indicators": [
+          "Use of exec() on LLM-generated code",
+          "No input sanitization or code validation before execution",
+          "Direct propagation of user input to code execution",
+          "Execution context includes global scope, increasing risk"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when user asks a question with visualization enabled)",
+        "file_location": "vanna/base.py (generate_plotly_code method)",
+        "required_permissions": [
+          "network (LLM API)",
+          "python code execution"
+        ]
+      },
+      "code_snippet": "plotly_code = self.submit_prompt(message_log, kwargs=kwargs)\nreturn self._sanitize_plotly_code(self._extract_python_code(plotly_code))",
+      "code_language": "python",
+      "code_behavior": "At runtime, when a user asks a question with visualization enabled, the method sends user-controlled input to an LLM via API, receives generated Python code, extracts it, and returns it for execution, enabling attacker-crafted code to be executed.",
+      "malice_analysis": {
+        "why_suspicious": "LLM-generated code is based on user input, which can be manipulated to inject malicious payloads that will be executed if not properly sanitized.",
+        "violated_expectations": "Normal behavior would restrict LLM output to safe templates or validate and sandbox any generated code before execution, preventing arbitrary code execution.",
+        "similar_legitimate_use": "LLMs can generate code for trusted users in isolated, non-production environments, but direct execution of LLM output based on untrusted input is never safe.",
+        "key_indicators": [
+          "LLM prompt includes user-controlled input",
+          "No robust output validation or sandboxing",
+          "Generated code is returned for direct execution",
+          "Potential for prompt injection leading to RCE"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (user prompt injection)",
+        "file_location": "user input via ask() method, propagating to SQL and question parameters",
+        "required_permissions": [
+          "python code execution"
+        ]
+      },
+      "code_snippet": "print(os.system(\"dir\"))",
+      "code_language": "python",
+      "code_behavior": "At runtime, when an attacker submits a crafted prompt via the ask() method, the input is injected into the LLM prompt, causing the LLM to generate Python code that executes arbitrary OS commands (such as listing directory contents) on the host system.",
+      "malice_analysis": {
+        "why_suspicious": "User input is able to directly influence code that is executed on the host system, enabling remote code execution through prompt injection.",
+        "violated_expectations": "User input should never be able to trigger arbitrary code execution in a production environment; proper input validation and code execution controls are expected.",
+        "similar_legitimate_use": "There is no legitimate use case for allowing untrusted user input to result in arbitrary OS command execution via dynamically generated code.",
+        "key_indicators": [
+          "User input appears in executed code",
+          "No input sanitization or validation",
+          "Ability to run OS commands via LLM-generated code",
+          "Prompt injection leads to code execution"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits a crafted prompt via the ask() method, embedding a payload in the question or SQL.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "LLM prompt construction with attacker-controlled content"
+    },
+    {
+      "step": 2,
+      "action": "The generate_plotly_code method constructs an LLM prompt including the attacker's input and requests Python code generation.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "LLM generates malicious Python code"
+    },
+    {
+      "step": 3,
+      "action": "The get_plotly_figure method executes the LLM-generated code using exec(), running the attacker's payload on the host.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Remote code execution on the server (final goal)"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Dynamic execution of LLM-generated code via exec() with user input influence",
+      "User input directly propagating to code that is executed at runtime",
+      "LLM prompt construction that includes unsanitized user-controlled data",
+      "Absence of code validation or sandboxing before execution"
+    ],
+    "file_indicators": [
+      "vanna/base.py containing exec(plotly_code, globals(), ldict)",
+      "Any codebase where LLM output is executed without sanitization or validation"
+    ],
+    "network_indicators": [
+      "Outbound requests to LLM APIs (e.g., OpenAI, Anthropic) with user input present in the prompt payload",
+      "Unexpected or anomalous network activity following user queries, especially to LLM providers"
+    ],
+    "how_to_detect": "Detect usage of exec() or eval() on code generated from LLMs where user input is included in the prompt. Use static analysis to trace data flow from user input (e.g., ask() method) to code execution functions. Monitor for user input that appears in dynamically executed code. Flag any code paths where LLM output is executed without strict validation or sandboxing. Correlate outbound LLM API requests containing user input with subsequent code execution events."
+  }
+}

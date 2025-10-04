@@ -1,0 +1,126 @@
+{
+  "package_info": {
+    "package_name": "Atlassian Confluence Server/Data Center",
+    "package_manager": "proprietary (Atlassian distribution)",
+    "package_versions": "8.0.0 - 8.0.4, 8.1.0 - 8.1.4, 8.2.0 - 8.2.3, 8.3.0 - 8.3.2, 8.4.0 - 8.4.3, 8.5.0 - 8.5.1",
+    "why_malicious": "These versions contain a broken access control vulnerability (CVE-2023-22515) that allows unauthenticated attackers to re-enable the setup process and create new administrator accounts, granting full control of the Confluence instance to unauthorized users. This enables privilege escalation and persistent compromise of the affected system."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "unauthenticated HTTP request",
+        "file_location": "web application endpoint: /server-info.action",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "GET /server-info.action?bootstrapStatusProvider.applicationConfig.setupComplete=false",
+      "code_language": "HTTP",
+      "code_behavior": "Upon receiving an unauthenticated HTTP GET request to /server-info.action with the setupComplete parameter set to false, the application disables the setup completion flag, re-enabling the setup process and exposing setup endpoints to unauthenticated users.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing an unauthenticated GET request to re-enable the setup process exposes critical administrative functionality to attackers, bypassing expected access controls.",
+        "violated_expectations": "Normally, setup endpoints are locked after initial configuration and require authentication; this behavior allows bypassing that restriction and exposes sensitive setup functionality to unauthenticated users.",
+        "similar_legitimate_use": "Initial installation or legitimate reconfiguration by an authenticated administrator during the first-time setup process.",
+        "key_indicators": [
+          "Unauthenticated GET request to /server-info.action with setupComplete parameter set to false or 0",
+          "Access to setup-related endpoints without prior authentication",
+          "Modification of setupComplete state via HTTP request"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "unauthenticated HTTP request after setup re-enabled",
+        "file_location": "web application endpoint: /setup/setupadministrator.action",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "POST /setup/setupadministrator.action",
+      "code_language": "HTTP",
+      "code_behavior": "After the setup process is re-enabled, an unauthenticated HTTP POST request to /setup/setupadministrator.action is processed by the application, allowing the creation of a new administrator account without requiring prior authentication, resulting in privilege escalation.",
+      "malice_analysis": {
+        "why_suspicious": "Creating administrator accounts should require authentication and strict access controls; allowing unauthenticated creation of admin users enables attackers to gain full control of the application.",
+        "violated_expectations": "Normal behavior is that only authenticated users or those in a secure setup state can create admin accounts; this bypasses that control and allows arbitrary admin creation.",
+        "similar_legitimate_use": "Legitimate setup process during initial installation, when no admin accounts exist and setup is expected to be open.",
+        "key_indicators": [
+          "Unauthenticated POST request to /setup/setupadministrator.action",
+          "Creation of new administrator accounts outside of normal provisioning workflows",
+          "Admin user creation events not associated with authenticated sessions"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "optional unauthenticated HTTP request after admin creation",
+        "file_location": "web application endpoint: /setup/finishsetup.action",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "POST /setup/finishsetup.action",
+      "code_language": "HTTP",
+      "code_behavior": "Following the creation of a new administrator account, an unauthenticated HTTP POST request to /setup/finishsetup.action finalizes the setup process, re-locking the setup endpoints and potentially concealing evidence of exploitation by restoring the application to a post-setup state.",
+      "malice_analysis": {
+        "why_suspicious": "Finalizing the setup process without authentication allows attackers to cover their tracks by closing the setup window after malicious admin creation, making detection more difficult.",
+        "violated_expectations": "Setup finalization should be restricted to authenticated users and not accessible post-setup; this behavior allows unauthenticated users to manipulate the application state.",
+        "similar_legitimate_use": "Legitimate finalization during initial setup by an administrator completing the installation process.",
+        "key_indicators": [
+          "Unauthenticated POST request to /setup/finishsetup.action",
+          "Setup process manipulation after initial installation",
+          "Transition of setup state without corresponding authenticated user activity"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends an unauthenticated GET request to /server-info.action with setupComplete=false to re-enable the setup process.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Allows access to setup endpoints without authentication, exposing administrative setup functionality."
+    },
+    {
+      "step": 2,
+      "action": "Attacker sends an unauthenticated POST request to /setup/setupadministrator.action to create a new administrator account.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains administrator access to the Confluence instance, enabling full control over the application."
+    },
+    {
+      "step": 3,
+      "action": "Attacker optionally sends an unauthenticated POST request to /setup/finishsetup.action to finalize the setup and potentially hide evidence of exploitation.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Setup process is closed, attacker retains admin access, and evidence of the attack may be concealed."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unauthenticated GET requests to /server-info.action with setupComplete parameter set to false or 0",
+      "Unauthenticated POST requests to /setup/setupadministrator.action",
+      "Creation of new administrator accounts outside of normal provisioning workflows or without corresponding authenticated sessions",
+      "Unauthenticated POST requests to /setup/finishsetup.action",
+      "Sequence of unauthenticated requests to setup endpoints in a short time window"
+    ],
+    "file_indicators": [
+      "Audit logs showing new admin user creation not linked to authenticated sessions",
+      "Access logs with /server-info.action?bootstrapStatusProvider.applicationConfig.setupComplete=false or setupComplete=0",
+      "Access logs with POST /setup/setupadministrator.action",
+      "Access logs with POST /setup/finishsetup.action"
+    ],
+    "network_indicators": [
+      "Source IPs making unauthenticated requests to setup endpoints (/server-info.action, /setup/setupadministrator.action, /setup/finishsetup.action)",
+      "Known malicious IP addresses (e.g., 136.244.104.119, 139.144.177.101, 185.225.73.244, 185.104.45.27, 185.160.151.176, 45.66.230.220, 45.66.230.221, 45.66.230.222, 45.66.230.223, 45.66.230.224, 45.66.230.225, 45.66.230.226, 45.66.230.227, 45.66.230.228, 45.66.230.229, 45.66.230.230, 45.66.230.231, 45.66.230.232, 45.66.230.233, 45.66.230.234, 45.66.230.235, 45.66.230.236, 45.66.230.237, 45.66.230.238, 45.66.230.239, 45.66.230.240, 45.66.230.241, 45.66.230.242, 45.66.230.243, 45.66.230.244, 45.66.230.245, 45.66.230.246, 45.66.230.247, 45.66.230.248, 45.66.230.249, 45.66.230.250, 45.66.230.251, 45.66.230.252, 45.66.230.253, 45.66.230.254, 45.66.230.255)",
+      "Suspicious user agents (e.g., github.com/Chocapikk/CVE-2023-22515, Nuclei, Assetnote/1.0.0)"
+    ],
+    "how_to_detect": "Monitor HTTP access logs for unauthenticated requests to /server-info.action with setupComplete=false or 0, and POST requests to /setup/setupadministrator.action and /setup/finishsetup.action. Correlate these events with the creation of new administrator accounts, especially if the account creation is not associated with an authenticated session. Flag any such activity, particularly if originating from known malicious IP addresses or using suspicious user agents. Review admin user creation logs for unexpected or suspicious accounts, and investigate sequences of unauthenticated requests to setup endpoints within a short time frame."
+  }
+}

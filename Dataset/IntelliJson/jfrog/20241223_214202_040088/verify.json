@@ -1,0 +1,162 @@
+{
+  "package_info": {
+    "package_name": "xz-utils",
+    "package_manager": "source tarball (Linux distributions)",
+    "package_versions": "5.6.0, 5.6.1",
+    "why_malicious": "The xz-utils package (versions 5.6.0 and 5.6.1) contains a highly obfuscated backdoor embedded in the liblzma library. This backdoor is designed to be triggered when the library is loaded by OpenSSH (sshd) and allows remote attackers, possessing a specific private key, to execute arbitrary code or bypass SSH authentication before the authentication step. The malicious code is deeply concealed, evades standard code review, and is only activated under attacker-controlled conditions, granting full control over the affected system."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "build-time (package compilation)",
+        "file_location": "build-to-host.m4 (executed during build), tests/files/bad-3-corrupt_lzma2.xz, tests/files/good-large_compressed.lzma",
+        "required_permissions": [
+          "filesystem",
+          "build environment"
+        ]
+      },
+      "code_snippet": "Obfuscated M4 macros in build-to-host.m4 extract disguised object code from test files (tests/files/bad-3-corrupt_lzma2.xz and tests/files/good-large_compressed.lzma) and inject it into the liblzma build, resulting in a modified library containing the backdoor.",
+      "code_language": "m4, binary (object code)",
+      "code_behavior": "During build-time, obfuscated macros in build-to-host.m4 extract hidden object code from test files, inject this code into the liblzma build process, and produce a modified liblzma library with embedded malicious hooks, resulting in a backdoored binary.",
+      "malice_analysis": {
+        "why_suspicious": "Extracting and injecting prebuilt object code from disguised test files into a production library is highly abnormal and designed to evade source-level review, indicating intentional concealment of malicious functionality.",
+        "violated_expectations": "Standard build processes should only compile from transparent source code and use test files for validation, not for injecting hidden binaries into production libraries.",
+        "similar_legitimate_use": "None; legitimate builds never extract and inject object code from test files into production binaries.",
+        "key_indicators": [
+          "Obfuscated M4 macros in build-to-host.m4",
+          "Extraction of object code from test files (bad-3-corrupt_lzma2.xz, good-large_compressed.lzma)",
+          "Injection of binary code into liblzma during build"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when liblzma is loaded by sshd/OpenSSH)",
+        "file_location": "liblzma (maliciously modified during build)",
+        "required_permissions": [
+          "process memory",
+          "network (if commands are executed)",
+          "system shell"
+        ]
+      },
+      "code_snippet": "Malicious hook on the RSA_public_decrypt function in liblzma inspects the RSA modulus from incoming SSH connections. If the modulus matches attacker criteria, the code decrypts a payload using a hardcoded ChaCha20 key, verifies an Ed448 signature, and prepares to execute attacker-supplied commands or authentication bypass logic.",
+      "code_language": "C (compiled to binary, injected into liblzma)",
+      "code_behavior": "At runtime, when OpenSSH loads the malicious liblzma, the backdoor hooks the RSA_public_decrypt function, inspects the RSA modulus from the SSH client, decrypts a payload with a hardcoded ChaCha20 key if the modulus matches attacker criteria, verifies an Ed448 signature, and enables execution of attacker-supplied commands or authentication bypass before SSH authentication completes.",
+      "malice_analysis": {
+        "why_suspicious": "Intercepting cryptographic functions to process attacker-controlled input and enable code execution or authentication bypass is a classic backdoor technique, especially when triggered by non-standard cryptographic data.",
+        "violated_expectations": "liblzma should not hook or alter cryptographic routines in OpenSSH, nor should it process SSH client input to enable code execution or authentication bypass.",
+        "similar_legitimate_use": "None; cryptographic hooks in compression libraries are never used for command execution or authentication manipulation.",
+        "key_indicators": [
+          "Hooking of RSA_public_decrypt in liblzma",
+          "Use of hardcoded ChaCha20 and Ed448 keys",
+          "Processing of SSH client cryptographic input to trigger malicious logic"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (when attacker sends crafted SSH connection)",
+        "file_location": "liblzma (injected into sshd process memory)",
+        "required_permissions": [
+          "system shell",
+          "process memory"
+        ]
+      },
+      "code_snippet": "After successful signature verification, the decrypted payload is interpreted as a NULL-terminated shell command string (e.g., cat /etc/shadow) and passed directly to system() for execution with the privileges of the sshd process.",
+      "code_language": "C (binary payload, executed via system())",
+      "code_behavior": "At runtime, after the backdoor verifies the attacker's signature, the decrypted payload is parsed as a shell command and executed via system() with the privileges of the sshd process, enabling arbitrary remote code execution before authentication.",
+      "malice_analysis": {
+        "why_suspicious": "Executing arbitrary shell commands from attacker-supplied cryptographic payloads is a hallmark of remote code execution backdoors and provides full system compromise.",
+        "violated_expectations": "No legitimate code should execute shell commands based on SSH cryptographic handshake data, especially before authentication.",
+        "similar_legitimate_use": "None; this behavior is exclusively malicious.",
+        "key_indicators": [
+          "Direct use of system() on attacker-supplied decrypted payload",
+          "Execution of shell commands during SSH handshake, before authentication"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (when attacker sends crafted SSH connection)",
+        "file_location": "liblzma (injected into sshd process memory)",
+        "required_permissions": [
+          "process memory",
+          "authentication routines"
+        ]
+      },
+      "code_snippet": "If the decrypted payload contains command 0x01, the backdoor logic in liblzma triggers SSH authentication bypass, allowing the attacker to log in with any password.",
+      "code_language": "C (binary logic in malicious liblzma)",
+      "code_behavior": "At runtime, when the attacker sends a payload with command 0x01, the backdoor in liblzma bypasses SSH authentication, granting access to the attacker regardless of the password provided.",
+      "malice_analysis": {
+        "why_suspicious": "Bypassing authentication based on attacker-controlled cryptographic input is a direct violation of security boundaries and is only seen in backdoors.",
+        "violated_expectations": "Authentication routines should never be bypassed or altered based on SSH handshake data or external cryptographic input.",
+        "similar_legitimate_use": "None; authentication bypass via cryptographic payload is never legitimate.",
+        "key_indicators": [
+          "Authentication bypass logic triggered by command 0x01 in decrypted payload",
+          "Ability to log in with any password when backdoor is triggered"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Obfuscated M4 macros in build-to-host.m4 extract disguised object code from test files and inject it into liblzma during the build process.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "liblzma library is now backdoored and ready to be loaded by dependent applications."
+    },
+    {
+      "step": 2,
+      "action": "When OpenSSH (sshd) loads the malicious liblzma, the backdoor hook is active in process memory.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Backdoor is now able to intercept cryptographic operations in SSH connections."
+    },
+    {
+      "step": 3,
+      "action": "Attacker connects to SSH and sends a specially crafted RSA public key modulus, triggering the backdoor logic in liblzma.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Backdoor decrypts and verifies attacker-supplied payload."
+    },
+    {
+      "step": 4,
+      "action": "If the payload is valid, the backdoor either executes arbitrary shell commands or bypasses SSH authentication, depending on the command in the payload.",
+      "implemented_by": [
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Attacker gains remote code execution or unauthorized SSH access (final goal)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "xz-utils/liblzma build process extracting object code from test files (bad-3-corrupt_lzma2.xz, good-large_compressed.lzma)",
+      "Presence of obfuscated macros in build-to-host.m4 that manipulate test files during build",
+      "liblzma hooking cryptographic functions (e.g., RSA_public_decrypt) in dependent processes such as sshd",
+      "Execution of shell commands from within liblzma during SSH handshake, prior to authentication",
+      "SSH authentication bypass triggered by attacker-controlled cryptographic input"
+    ],
+    "file_indicators": [
+      "tests/files/bad-3-corrupt_lzma2.xz (contains embedded object code)",
+      "tests/files/good-large_compressed.lzma (contains embedded object code)",
+      "build-to-host.m4 (contains obfuscated macros for code injection)",
+      "liblzma.so with unexpected binary differences or additional sections compared to official source"
+    ],
+    "network_indicators": [
+      "SSH connections with non-standard RSA modulus values (first 16 bytes match attacker pattern to trigger backdoor)",
+      "SSH handshake traffic containing ChaCha20-encrypted payloads",
+      "Unusual SSH logins without valid authentication, especially on systems with xz-utils 5.6.0/5.6.1",
+      "SSH traffic with payloads that, when decrypted, contain command 0x01 or shell command strings"
+    ],
+    "how_to_detect": "Scan for xz-utils/liblzma versions 5.6.0 and 5.6.1. Analyze build logs for extraction of object code from test files and presence of obfuscated macros in build-to-host.m4. Inspect liblzma.so for unexpected binary sections, hooks on cryptographic functions, or hardcoded keys. Monitor sshd for authentication bypass or execution of shell commands during handshake. Use YARA rules to detect hardcoded keys or suspicious strings (e.g., yolAbejyiejuvnup=Evjtgvsh5okmkAvj, Shutdown) in liblzma binaries. Monitor for SSH connections with unusual RSA modulus patterns or unexplained successful logins."
+  }
+}

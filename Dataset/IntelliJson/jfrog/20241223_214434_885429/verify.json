@@ -1,0 +1,158 @@
+{
+  "package_info": {
+    "package_name": "mod_sed",
+    "package_manager": "apache-httpd-module",
+    "package_versions": "2.4.53",
+    "why_malicious": "The mod_sed module in Apache HTTP Server 2.4.53 contains a vulnerability (CVE-2022-30522) that allows remote attackers to cause a Denial of Service (DoS) by sending or requesting large (>=2GB) payloads. This is due to improper buffer size calculations and memory allocation logic, which fail to enforce upper bounds or handle integer overflows. Exploitation can crash all handler processes, rendering the server unavailable."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (on HTTP request/response processing)",
+        "file_location": "mod_sed source code (sed1.c:103, sed1.c:129, sed1.c:163, sed1.c:429, mod_sed.c:477/363)",
+        "required_permissions": [
+          "filesystem",
+          "memory"
+        ]
+      },
+      "code_snippet": "if (newsize < *cursize * 2) {\n    newsize = *cursize * 2;\n}\nnewsize = (newsize  + ((1 << 12) - 1)) & ~((1 << 12) - 1);\nnewbuffer = apr_pcalloc(pool, newsize);",
+      "code_language": "c",
+      "code_behavior": "At runtime during HTTP request or response processing, the code attempts to grow the buffer size by doubling the current size and aligning it to a 4KB boundary, then allocates memory for the new buffer using apr_pcalloc. If the requested size, derived from user-controlled input, exceeds APR_UINT32_MAX (such as when handling >=2GB data), the allocation fails, resulting in process abort and Denial of Service.",
+      "malice_analysis": {
+        "why_suspicious": "This buffer growth logic does not validate the maximum allowed buffer size or check for integer overflows, allowing a remote attacker to trigger an out-of-memory condition by sending or requesting large payloads. The absence of upper bounds on allocation size directly exposes the server to resource exhaustion.",
+        "violated_expectations": "Normal buffer management should include strict upper bounds and checks to prevent excessive or unsafe memory allocations based on user input. Here, the code allows unbounded growth and fails to handle allocation errors gracefully, violating safe memory management practices.",
+        "similar_legitimate_use": "Buffer resizing is common in stream processing, but should always include strict upper bounds and robust error handling to prevent resource exhaustion.",
+        "key_indicators": [
+          "Unbounded buffer growth based on user-controlled input",
+          "Lack of upper limit checks before memory allocation",
+          "Direct use of user data size to determine allocation size",
+          "No integer overflow protection in buffer size calculation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (on HTTP POST or large file GET)",
+        "file_location": "mod_sed source code (sed_finalize_eval, sed_eval_buffer)",
+        "required_permissions": [
+          "filesystem",
+          "memory"
+        ]
+      },
+      "code_snippet": "allocator_alloc(pool, size > APR_UINT32_MAX) // returns NULL\nap_abort_on_oom() // process aborts",
+      "code_language": "c",
+      "code_behavior": "At runtime, when processing a request or response with a body size >=2GB, the code attempts to allocate a buffer larger than APR_UINT32_MAX. allocator_alloc returns NULL due to the excessive size, which triggers ap_abort_on_oom, causing the process to abort and resulting in Denial of Service.",
+      "malice_analysis": {
+        "why_suspicious": "The code path allows a remote client to deterministically crash the server by sending or requesting large payloads, which is a classic Denial of Service vector. The lack of preemptive validation of allocation size before attempting memory allocation is a critical flaw.",
+        "violated_expectations": "Robust server code should never allow user input to directly cause process aborts or out-of-memory conditions. Proper error handling should prevent process termination and instead return an error to the client.",
+        "similar_legitimate_use": "Graceful error handling for allocation failures is legitimate, but terminating the process in response to user input is not.",
+        "key_indicators": [
+          "Process abort triggered by allocation failure on user input",
+          "No preemptive size validation before allocation",
+          "ap_abort_on_oom called after failed allocation",
+          "Allocation size derived directly from HTTP request/response size"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "configuration-time (enables attack vector at runtime)",
+        "file_location": "httpd.conf (example shown in report)",
+        "required_permissions": [
+          "none (configuration)"
+        ]
+      },
+      "code_snippet": "<Directory />\n  AllowOverride none\n  Require all denied\n  AddInputFilter Sed html\n  InputSed \"s/\\(\\.\\)/Z/g\"\n</Directory>",
+      "code_language": "apache-config",
+      "code_behavior": "At configuration-time, when this configuration is present in httpd.conf, all HTML requests are processed by mod_sed's input filter, enabling the vulnerable code path. At runtime, attackers can POST large payloads to trigger the Denial of Service condition.",
+      "malice_analysis": {
+        "why_suspicious": "This configuration enables the vulnerable code path, making the server susceptible to remote Denial of Service attacks by allowing user-controlled input to be processed by mod_sed without size restrictions.",
+        "violated_expectations": "Input filters should not expose the server to resource exhaustion based on user input. Secure configurations should limit the size of data processed by such filters.",
+        "similar_legitimate_use": "Input filtering is legitimate for content transformation, but should be implemented with safeguards against large payloads.",
+        "key_indicators": [
+          "Presence of AddInputFilter Sed with any non-empty InputSed pattern in httpd.conf",
+          "InputSed directive present and not empty",
+          "mod_sed input filter applied to HTML or other routes"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "configuration-time (enables attack vector at runtime)",
+        "file_location": "httpd.conf (example shown in report)",
+        "required_permissions": [
+          "none (configuration)"
+        ]
+      },
+      "code_snippet": "<Directory />\n  AllowOverride none\n  Require all denied\n  AddOutputFilter Sed html\n  OutputSed \"s/\\(FOO\\)/A/g\"\n</Directory>",
+      "code_language": "apache-config",
+      "code_behavior": "At configuration-time, when this configuration is present in httpd.conf, all HTML responses are processed by mod_sed's output filter, enabling the vulnerable code path. At runtime, attackers can request large files to trigger the Denial of Service condition.",
+      "malice_analysis": {
+        "why_suspicious": "This configuration enables the vulnerable code path for responses, making the server susceptible to remote Denial of Service attacks via large file requests processed by mod_sed without size restrictions.",
+        "violated_expectations": "Output filters should not expose the server to resource exhaustion based on response size. Secure configurations should enforce limits on the size of data processed by such filters.",
+        "similar_legitimate_use": "Output filtering is legitimate for content transformation, but should be implemented with safeguards against large responses.",
+        "key_indicators": [
+          "Presence of AddOutputFilter Sed with any non-empty OutputSed pattern in httpd.conf",
+          "OutputSed directive present and not empty",
+          "mod_sed output filter applied to HTML or other routes"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker identifies a server running Apache httpd 2.4.53 with mod_sed input or output filter enabled via configuration.",
+      "implemented_by": [
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Attack vector is enabled for remote exploitation."
+    },
+    {
+      "step": 2,
+      "action": "Attacker sends a POST request with a body size >=2GB or requests a file >=2GB in size to a route processed by mod_sed.",
+      "implemented_by": [],
+      "leads_to": "Triggers vulnerable buffer growth and allocation logic in mod_sed."
+    },
+    {
+      "step": 3,
+      "action": "mod_sed attempts to allocate a buffer larger than APR_UINT32_MAX, allocation fails, and ap_abort_on_oom is called, aborting the process.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Single handler process crashes; repeated requests can crash all processes."
+    },
+    {
+      "step": 4,
+      "action": "Multiple requests cause all handler processes to crash, resulting in complete Denial of Service.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Server is unable to handle any requests (DoS achieved)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "mod_sed input or output filter enabled on HTTP routes",
+      "Large (>=2GB) HTTP POST requests or file downloads immediately preceding process aborts",
+      "ap_abort_on_oom triggered in Apache error logs after large request or response",
+      "Repeated process crashes correlated with large HTTP payloads"
+    ],
+    "file_indicators": [
+      "Presence of AddInputFilter Sed or AddOutputFilter Sed directives in httpd.conf",
+      "Non-empty InputSed or OutputSed directives in httpd.conf"
+    ],
+    "network_indicators": [
+      "Unusually large HTTP POST requests (>=2GB) to routes with mod_sed input filter",
+      "Unusually large HTTP GET requests for files (>=2GB) to routes with mod_sed output filter"
+    ],
+    "how_to_detect": "Monitor Apache httpd configuration files for AddInputFilter Sed or AddOutputFilter Sed directives with non-empty InputSed or OutputSed patterns. Alert on any HTTP POST or GET requests with bodies or responses >=2GB, especially if followed by process aborts or ap_abort_on_oom log entries. Correlate repeated large requests with server unavailability or repeated process crashes to identify active exploitation of the vulnerability."
+  }
+}

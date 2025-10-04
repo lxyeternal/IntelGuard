@@ -1,0 +1,83 @@
+{
+  "package_info": {
+    "package_name": "celery",
+    "package_manager": "PyPI",
+    "package_versions": "all versions prior to 5.2.2",
+    "why_malicious": "The package contains a vulnerability (CVE-2021-23727) in which user-controlled data from a backend can be deserialized and used to perform recursive attribute lookups and arbitrary function calls, leading to potential remote code execution (RCE) via command injection. This is due to the lack of validation on module and attribute names and the direct invocation of potentially dangerous functions with attacker-supplied arguments."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when deserializing and handling backend exception data)",
+        "file_location": "celery/backends/base.py (Backend.exception_to_python)",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "cls = importlib.import_module(exc['exc_module'])\nfor name in exc['exc_type'].split('.'):\n    cls = getattr(cls, name)\nreturn cls(exc['exc_message'])",
+      "code_language": "python",
+      "code_behavior": "At runtime, the code imports a module and recursively traverses its attributes using attacker-controlled values from a deserialized dictionary, then calls the resolved function with attacker-controlled arguments, resulting in arbitrary code execution.",
+      "malice_analysis": {
+        "why_suspicious": "This code allows user-controlled data to dictate both the module and attribute/function to be accessed and called, with no validation or sanitization. This enables attackers to invoke dangerous functions such as os.system with arbitrary arguments.",
+        "violated_expectations": "Normally, deserialized data should not be used to control code execution paths or function calls, especially not for importing modules or calling arbitrary functions. The expected behavior is to only handle known, safe exception types and messages.",
+        "similar_legitimate_use": "Dynamic exception reconstruction from trusted sources, where only whitelisted modules and attributes are allowed, and input is strictly validated.",
+        "key_indicators": [
+          "Recursive getattr pattern on user-controlled input",
+          "Direct import and invocation of arbitrary modules/functions",
+          "No validation of module or attribute names",
+          "Function called with attacker-controlled argument"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker injects a crafted dictionary (exc) into the Celery backend, controlling exc_module, exc_type, and exc_message.",
+      "implemented_by": [],
+      "leads_to": "Deserialization and processing by vulnerable function"
+    },
+    {
+      "step": 2,
+      "action": "Celery's Backend.exception_to_python method deserializes the exc dict and uses exc_module to import an arbitrary module.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Recursive attribute traversal"
+    },
+    {
+      "step": 3,
+      "action": "The code recursively traverses attributes specified by exc_type, potentially resolving to a dangerous function (e.g., os.system).",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Arbitrary function reference"
+    },
+    {
+      "step": 4,
+      "action": "The resolved function is called with exc_message as its argument, enabling arbitrary command execution.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Remote code execution (RCE) or system compromise"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Recursive getattr or attribute traversal on user-controlled input",
+      "Dynamic import of modules based on deserialized data",
+      "Invocation of arbitrary functions with attacker-supplied arguments"
+    ],
+    "file_indicators": [
+      "celery/backends/base.py",
+      "exception_to_python function",
+      "Patterns of getattr in a loop over split user input"
+    ],
+    "network_indicators": [
+      "Unusual backend data containing exc_module, exc_type, exc_message fields with values like 'os', 'system', and shell commands"
+    ],
+    "how_to_detect": "Statically analyze code for recursive getattr or attribute traversal patterns where the attribute names are derived from deserialized or user-controlled data. Monitor runtime logs for unexpected module imports or function calls with arguments matching backend data. Flag any use of importlib.import_module or getattr in loops where the source is not strictly validated. Additionally, inspect backend data for suspicious exc_module or exc_type values referencing sensitive modules or functions."
+  }
+}

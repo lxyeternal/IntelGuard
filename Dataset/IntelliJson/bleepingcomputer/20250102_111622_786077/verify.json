@@ -2,31 +2,31 @@
   "package_info": {
     "package_name": "netmask",
     "package_manager": "npm",
-    "package_versions": "All versions prior to 2.0.1 (CVE-2021-29418), including 2.0.0 (CVE-2021-28918)",
-    "why_malicious": "The package contains a critical parsing vulnerability in its IP address handling logic. Specifically, it fails to correctly interpret IPv4 octets with leading zeros as octal values, instead treating them as decimal. This allows attackers to craft IP addresses that bypass IP-based access controls, anti-SSRF protections, and blocklists, resulting in potential SSRF, Remote File Inclusion, and other security bypasses."
+    "package_versions": "all versions < 2.0.1",
+    "why_malicious": "The package contains a critical parsing vulnerability (CVE-2021-28918, CVE-2021-29418) that allows attackers to bypass IP-based access controls, anti-SSRF protections, and blocklists by exploiting improper handling of IPv4 addresses with leading zeros. Specifically, the parsing logic incorrectly interprets octets with leading zeros as decimal rather than octal, enabling attackers to craft IP addresses that evade security controls, resulting in potential SSRF, RFI, and unauthorized access attacks."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
-        "trigger": "runtime (whenever IP parsing is invoked by application logic)",
-        "file_location": "netmask.js (core IP parsing logic, typically in the Netmask constructor or parse method)",
+        "trigger": "runtime",
+        "file_location": "netmask.js (core IP parsing logic)",
         "required_permissions": [
-          "none (parsing logic itself requires no special permissions, but can impact network/file access depending on how the application uses the parsed IPs)"
+          "none (parsing logic itself requires no special permissions, but can impact network/file access depending on application usage)"
         ]
       },
-      "code_snippet": "if (octet[0] === '0') octet = octet.slice(1); // strips leading zero, treats as decimal",
+      "code_snippet": "// Pseudocode representation of the vulnerable logic\nfunction parseIP(ip) {\n  // Strips leading zeros, treats all octets as decimal\n  let parts = ip.split('.').map(Number);\n  // ... further processing\n  return parts;\n}\n// Example: parseIP('0127.0.0.1') => [127, 0, 0, 1] (should be [87, 0, 0, 1] if octal)",
       "code_language": "javascript",
-      "code_behavior": "Removes leading zeros from each IPv4 octet and interprets the result as a decimal value, ignoring the possibility of octal notation. This causes IP addresses like '0127.0.0.1' to be parsed as '127.0.0.1' instead of '87.0.0.1', leading to incorrect IP range validation.",
+      "code_behavior": "At runtime, the code parses IPv4 addresses by splitting on dots and converting each octet to a number using Number(), stripping leading zeros and treating all octets as decimal, which results in incorrect IP interpretation and validation, allowing attacker-supplied octal-formatted IPs to bypass access controls.",
       "malice_analysis": {
-        "why_suspicious": "This code fails to recognize that a leading zero in an IPv4 octet can indicate octal notation, which is supported by some network stacks and legacy systems. By stripping the leading zero and treating the octet as decimal, the library misinterprets the true address, allowing attackers to bypass IP-based security controls by submitting ambiguous or specially crafted IPs.",
-        "violated_expectations": "Standard-compliant IP parsers either interpret octets with leading zeros as octal or reject ambiguous input. The expected behavior is to either parse '0127.0.0.1' as '87.0.0.1' (octal) or reject it as invalid. The actual behavior silently converts to decimal, leading to incorrect IP range checks and potential security bypass.",
-        "similar_legitimate_use": "Stripping leading zeros is sometimes used for input normalization in non-security-critical contexts, such as user interface display or logging. However, in security-sensitive IP parsing, this practice is unsafe and not legitimate.",
+        "why_suspicious": "This behavior is suspicious because it fails to properly interpret octal-formatted IPv4 addresses, which can be used by attackers to supply ambiguous or deceptive input that bypasses security controls relying on accurate IP parsing.",
+        "violated_expectations": "Normal behavior would be to interpret octet values with leading zeros as octal (per legacy standards) or to reject ambiguous formats outright. The actual behavior strips leading zeros and treats all octets as decimal, which is non-standard and allows bypass of IP-based security checks.",
+        "similar_legitimate_use": "Legitimate IP parsing should strictly validate input and either normalize to a canonical form or reject ambiguous formats. Silently misinterpreting octal-formatted IPs as decimal is not a legitimate use case and introduces security risk.",
         "key_indicators": [
-          "Presence of code that strips leading zeros from IPv4 octets",
-          "No validation or rejection of ambiguous IP formats with leading zeros",
-          "All octets are parsed as decimal regardless of input format",
-          "Mismatch between parsed IP and actual network stack interpretation"
+          "Use of Number() or parseInt() without specifying radix when parsing IP octets",
+          "Stripping of leading zeros from IP address octets during parsing",
+          "Absence of input validation or rejection for ambiguous IP formats (e.g., octal or hexadecimal)",
+          "Incorrect IP range validation when presented with non-canonical IP input"
         ]
       }
     }
@@ -34,45 +34,45 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker submits an IP address with one or more octets containing leading zeros (e.g., 0177.0.0.1 or 0127.0.0.1) to a web application that uses netmask for IP validation.",
+      "action": "Attacker crafts an IP address with one or more octets in octal format (e.g., 0177.0.0.1 for 127.0.0.1) to exploit the parsing vulnerability.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "The netmask library parses the IP incorrectly, treating octets with leading zeros as decimal values instead of octal."
+      "leads_to": "IP address is parsed incorrectly by netmask, resulting in the application treating the attacker-supplied address as a different, potentially authorized or internal address."
     },
     {
       "step": 2,
-      "action": "The application uses netmask to check if the submitted IP is within a private or blocklisted range (e.g., 127.0.0.1).",
+      "action": "Application using netmask validates the attacker-supplied IP against an allowlist, blocklist, or for SSRF protection, relying on the incorrect parsing result.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Netmask incorrectly validates the IP as private or allowed, allowing the request to proceed past security controls."
+      "leads_to": "Validation is bypassed, as the IP is misinterpreted and may be incorrectly accepted or rejected, allowing the attacker to evade security controls."
     },
     {
       "step": 3,
-      "action": "The network stack or downstream component interprets the octal IP correctly (e.g., 0177.0.0.1 as 127.0.0.1, or 0127.0.0.1 as 87.0.0.1), resulting in SSRF, RFI, or blocklist bypass.",
+      "action": "Attacker leverages the bypass to perform SSRF, RFI, or to circumvent IP-based ACLs, potentially accessing internal resources or sensitive endpoints.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Attacker achieves SSRF, RFI, or bypasses IP-based access controls, potentially accessing internal resources or restricted files."
+      "leads_to": "Final goal: unauthorized access to internal services, data exfiltration, or further exploitation of protected resources."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Parsing of IPv4 addresses with leading zeros in octets without octal interpretation",
-      "IP validation logic that strips or ignores leading zeros in octets instead of rejecting or properly parsing them",
-      "Mismatch between application-level IP validation and actual network stack interpretation of IP addresses"
+      "Parsing of IPv4 addresses with leading zeros without octal interpretation or rejection",
+      "IP validation logic that strips leading zeros and treats all octets as decimal values",
+      "Acceptance of ambiguous or non-canonical IP formats in access control or SSRF protection code",
+      "Use of Number() or parseInt() without explicit radix in IP parsing routines"
     ],
     "file_indicators": [
-      "netmask.js or equivalent IP parsing logic in dependencies",
-      "Presence of the netmask library in package.json or the application's dependency tree",
-      "Custom or third-party IP parsing code that strips leading zeros from octets"
+      "netmask.js or similar IP parsing libraries present in the dependency tree",
+      "Custom or legacy IP parsing code that uses Number() or parseInt() without specifying radix",
+      "References to vulnerable netmask versions (<2.0.1) in package-lock.json or yarn.lock"
     ],
     "network_indicators": [
-      "Inbound requests containing IPv4 addresses with leading zeros in any octet",
-      "Outbound requests to internal or private IPs using octal notation (e.g., 0177.0.0.1, 0127.0.0.1)",
-      "Log entries or network traces showing ambiguous or non-standard IP formats"
+      "Requests to internal or protected resources using octal-formatted IPs (e.g., 0177.0.0.1, 012.34.56.78)",
+      "Log entries or access attempts with non-canonical or ambiguous IP address formats (e.g., leading zeros in octets)"
     ],
-    "how_to_detect": "Audit application code and dependencies for use of the netmask library (versions prior to 2.0.1) or similar IP parsing logic that strips leading zeros from octets. Monitor for inbound or outbound network requests using IPv4 addresses with leading zeros in any octet. Implement input validation to reject ambiguous or non-standard IP formats at the application boundary. Compare the results of application-level IP validation with the actual interpretation by the network stack to detect mismatches. Review logs for evidence of IP addresses with leading zeros being accepted or processed."
+    "how_to_detect": "Audit application code and dependencies for use of netmask versions <2.0.1 or similar IP parsing logic. Use static analysis to flag IP parsing code that does not handle octal or hexadecimal formats correctly, especially where Number() or parseInt() is used without specifying radix. Monitor application and access logs for requests or access attempts using IPv4 addresses with leading zeros or ambiguous formats. Test SSRF and ACL protections by submitting octal-formatted IPs to identify potential bypasses. Review dependency manifests (package-lock.json, yarn.lock) for vulnerable netmask versions."
   }
 }

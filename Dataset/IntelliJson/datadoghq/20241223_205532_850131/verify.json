@@ -1,0 +1,212 @@
+{
+  "package_info": {
+    "package_name": "CVE-2023-0386 OverlayFS Privilege Escalation Exploit",
+    "package_manager": "N/A (Linux kernel vulnerability, not a package manager ecosystem)",
+    "package_versions": "Linux kernel < 6.2 (varies by distribution)",
+    "why_malicious": "The exploit leverages a flaw in the Linux kernel's OverlayFS implementation to allow an unprivileged user to create a root-owned SUID binary in a world-writable directory, enabling local privilege escalation to root. The exploit chain abuses namespace isolation, FUSE filesystems, and OverlayFS copy-up logic to bypass normal permission checks, resulting in unauthorized root access."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (exploit execution)",
+        "file_location": "FUSE filesystem implementation (userland code, e.g., ovlcap/lower/file)",
+        "required_permissions": [
+          "filesystem",
+          "FUSE mount capability"
+        ]
+      },
+      "code_snippet": "// Pseudocode for FUSE file presenting a root-owned SUID binary\nfuse_file = {\n  path: '/file',\n  owner_uid: 0, // root\n  owner_gid: 0, // root\n  mode: 04755,  // SUID bit set, executable\n  content: compiled_setuid_shell_binary\n}",
+      "code_language": "C (FUSE userland), binary payload",
+      "code_behavior": "At runtime, the FUSE filesystem presents a file with root ownership and the SUID bit set, containing a shell-spawning binary, to the OverlayFS lowerdir, allowing the kernel to copy the file with these privileged attributes, resulting in a root-owned SUID binary being available for further exploitation.",
+      "malice_analysis": {
+        "why_suspicious": "Presenting a root-owned SUID binary as an unprivileged user is not possible on a normal filesystem; using FUSE to simulate this is a clear privilege escalation technique that subverts standard permission models.",
+        "violated_expectations": "Normal FUSE filesystems should not present files with root ownership or SUID bits unless run by root. Here, an unprivileged user is able to create such a file, violating expected privilege boundaries.",
+        "similar_legitimate_use": "FUSE is used for userland filesystems, but not to simulate privileged files for escalation. Legitimate FUSE filesystems do not create root-owned SUID binaries accessible to unprivileged users.",
+        "key_indicators": [
+          "FUSE filesystem presenting root-owned SUID files",
+          "SUID bit set on files created by unprivileged users",
+          "FUSE lowerdir containing privileged binaries"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (exploit execution)",
+        "file_location": "Namespace manipulation via unshare system call",
+        "required_permissions": [
+          "user namespace creation",
+          "mount namespace creation"
+        ]
+      },
+      "code_snippet": "unshare --user --map-user 0 --mount",
+      "code_language": "shell/system call",
+      "code_behavior": "At runtime, the exploit creates a new user and mount namespace, mapping the current unprivileged user to root inside the namespace, enabling privileged operations like mounting OverlayFS, which would otherwise require root privileges.",
+      "malice_analysis": {
+        "why_suspicious": "Creating a user namespace and mapping the current user to root is a common step in container escapes and privilege escalation exploits, as it allows unprivileged users to perform privileged operations within the namespace.",
+        "violated_expectations": "Normal user processes do not create new namespaces and remap UIDs to root for the purpose of mounting filesystems. This behavior is abnormal outside of container or sandbox initialization.",
+        "similar_legitimate_use": "Containers and sandboxing tools use namespaces for isolation, but not for privilege escalation or to bypass filesystem restrictions.",
+        "key_indicators": [
+          "unshare with --user and --mount",
+          "UID mapping to root inside a namespace",
+          "Namespace creation followed by privileged mount operations"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (exploit execution)",
+        "file_location": "OverlayFS mount command",
+        "required_permissions": [
+          "mount capability in user namespace",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "mount overlay -t overlay -o lowerdir=./fusefs,upperdir=/tmp,workdir=./workdir /mnt/overlay",
+      "code_language": "shell/system call",
+      "code_behavior": "At runtime, the exploit mounts an OverlayFS with the FUSE filesystem as the lowerdir and a world-writable directory (e.g., /tmp) as the upperdir, setting up the environment for the copy-up attack, which enables the transfer of privileged file attributes to a user-accessible location.",
+      "malice_analysis": {
+        "why_suspicious": "Mounting OverlayFS with a FUSE lowerdir containing a root SUID binary and a world-writable upperdir is a clear setup for privilege escalation, as it enables the copy-up of privileged files to locations accessible by unprivileged users.",
+        "violated_expectations": "OverlayFS is not normally used by unprivileged users to merge FUSE filesystems with /tmp. Such usage is highly atypical and indicative of exploitation.",
+        "similar_legitimate_use": "OverlayFS is used in container runtimes and for layering filesystems, but not in this privilege escalation pattern or with these directory combinations.",
+        "key_indicators": [
+          "OverlayFS mount with FUSE lowerdir and /tmp upperdir",
+          "Mounting filesystems in user namespaces by non-root users",
+          "OverlayFS mounts involving world-writable directories"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (exploit execution, after OverlayFS mount)",
+        "file_location": "/mnt/overlay/file (triggered by file access, e.g., touch)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "touch /mnt/overlay/file",
+      "code_language": "shell",
+      "code_behavior": "At runtime, accessing the file in the overlay mount triggers the kernel to copy the root-owned SUID binary from the FUSE lowerdir to the upperdir (/tmp), preserving its privileged attributes, resulting in a root-owned SUID binary appearing in a world-writable directory.",
+      "malice_analysis": {
+        "why_suspicious": "Triggering a copy-up of a privileged file from a user-controlled FUSE filesystem to a world-writable directory is a key step in the exploit, as it results in a root-owned SUID binary being created outside of privileged control.",
+        "violated_expectations": "Normal file access should not result in a root-owned SUID binary appearing in /tmp. This violates standard privilege separation and file creation policies.",
+        "similar_legitimate_use": "Copy-up is a normal OverlayFS operation, but not for privilege escalation or for transferring privileged files to world-writable locations.",
+        "key_indicators": [
+          "File access triggers SUID binary creation in /tmp",
+          "Copy-up from FUSE to OverlayFS upperdir",
+          "Root-owned files created in world-writable directories"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "runtime (post-exploit, after exiting namespace)",
+        "file_location": "/tmp/file (now root-owned SUID binary)",
+        "required_permissions": [
+          "filesystem",
+          "execute"
+        ]
+      },
+      "code_snippet": "./tmp/file",
+      "code_language": "shell",
+      "code_behavior": "At runtime, after exiting the namespace, the attacker executes the root-owned SUID binary in /tmp, which spawns a root shell by calling setuid(0) and system('/bin/bash'), resulting in full root access for the attacker.",
+      "malice_analysis": {
+        "why_suspicious": "Execution of a recently created root-owned SUID binary in /tmp by a non-root user is highly anomalous and indicative of privilege escalation, as it grants unauthorized root access.",
+        "violated_expectations": "SUID binaries in /tmp are rare and should not be executed by unprivileged users. Legitimate SUID binaries are typically found in protected system directories.",
+        "similar_legitimate_use": "Legitimate SUID binaries are typically in system directories, not /tmp, and are not created or executed by unprivileged users.",
+        "key_indicators": [
+          "Execution of SUID binary in /tmp",
+          "Process effective UID changes to 0",
+          "Root shell spawned from non-standard location"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_6",
+      "execution_context": {
+        "trigger": "runtime (inside SUID binary execution)",
+        "file_location": "setuid shell binary (compiled C code)",
+        "required_permissions": [
+          "execute",
+          "setuid syscall"
+        ]
+      },
+      "code_snippet": "#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\n#include <errno.h>\n#include <string.h>\n\nint main(void) {\n    int result;\n\n    result = setuid(0);\n    if (result != 0 ) {\n      printf(\"could not setuid(0): %s\\n\", strerror(errno));\n      return result;\n    }\n\n    result = setgid(0);\n    if (result != 0) {\n      printf(\"could not setguid(0): %s\\n\", strerror(errno));\n      return result;\n    }\n\n    printf(\"Starting root shell...\\n\");\n    system(\"/bin/bash\");\n    return 0;\n}",
+      "code_language": "C",
+      "code_behavior": "At runtime, when the SUID binary is executed, the code calls setuid(0) and setgid(0) to escalate privileges, then spawns a root shell using system('/bin/bash'), resulting in the attacker gaining a root shell.",
+      "malice_analysis": {
+        "why_suspicious": "A binary that attempts to setuid(0) and spawn a shell is a classic privilege escalation payload, as it directly attempts to gain root privileges and provide shell access.",
+        "violated_expectations": "Normal binaries do not attempt to escalate privileges and spawn shells unless explicitly designed for administrative use. Such behavior is highly suspicious outside of system utilities.",
+        "similar_legitimate_use": "Some system utilities use setuid, but not in /tmp or by unprivileged users. Legitimate use is tightly controlled and audited.",
+        "key_indicators": [
+          "setuid(0) and setgid(0) calls",
+          "system('/bin/bash') invocation",
+          "Privilege escalation logic in binaries outside system paths"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Create a FUSE filesystem presenting a root-owned SUID binary.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Preparation for OverlayFS copy-up attack"
+    },
+    {
+      "step": 2,
+      "action": "Enter a new user and mount namespace, mapping the current user to root.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Ability to mount OverlayFS as root inside namespace"
+    },
+    {
+      "step": 3,
+      "action": "Mount OverlayFS with FUSE as lowerdir and /tmp as upperdir.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "OverlayFS environment set up for copy-up"
+    },
+    {
+      "step": 4,
+      "action": "Trigger copy-up by accessing the file in the overlay mount.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Root-owned SUID binary appears in /tmp"
+    },
+    {
+      "step": 5,
+      "action": "Exit the namespace and execute the SUID binary in /tmp.",
+      "implemented_by": [
+        "snippet_5",
+        "snippet_6"
+      ],
+      "leads_to": "Attacker gains root shell (privilege escalation complete)"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Creation of root-owned SUID binaries in world-writable directories (e.g., /tmp) by non-root users",
+      "Execution of SUID binaries in /tmp by non-root users",
+      "Processes where effective UID changes to 0 after executing a non-standard SUID binary",
+      "OverlayFS mounts with FUSE lowerdir and /tmp upperdir by unprivileged users",
+      "Recent modification of SUID binaries in non-standard locations followed by execution"
+    ],
+    "file_indicators": [
+      "SUID binaries in /tmp or other world-writable directories",
+      "FUSE filesystems presenting root-owned SUID files",
+      "OverlayFS mount points with unusual lowerdir/upperdir combinations (e.g., FUSE lowerdir, /tmp upperdir)"
+    ],
+    "network_indicators": [],
+    "how_to_detect": "Monitor for the creation and execution of SUID binaries in world-writable directories such as /tmp, especially when owned by root and executed by non-root users. Use auditd or EDR rules to alert on setuid(0) or seteuid(0) calls by non-root users, and on OverlayFS mounts involving FUSE filesystems and /tmp. Search for recently modified SUID binaries outside standard system paths. For post-mortem, scan the filesystem for SUID binaries in non-standard locations and correlate with recent namespace and mount activity."
+  }
+}

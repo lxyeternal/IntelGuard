@@ -1,0 +1,120 @@
+{
+  "package_info": {
+    "package_name": "impacket",
+    "package_manager": "PyPI",
+    "package_versions": "All versions prior to the May 3, 2021 fix (pre-v0.9.24)",
+    "why_malicious": "The package contains a critical path traversal vulnerability in its SMB server implementation (smbserver.py), allowing attackers to read and write files outside the intended working directory, leading to arbitrary file write and potential remote code execution (RCE)."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (SMB request handling)",
+        "file_location": "impacket/smbserver.py (lines 3485, 876)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "pwd = ntpath.join(self._pwd, wildcard)",
+      "code_language": "python",
+      "code_behavior": "During SMB request handling, the code concatenates user-supplied paths (wildcard) with the server's working directory without sanitization, allowing directory traversal and arbitrary file system access.",
+      "malice_analysis": {
+        "why_suspicious": "Accepting and joining user-supplied paths without validation enables attackers to escape the intended directory and access sensitive files.",
+        "violated_expectations": "Normal SMB servers restrict file access to a configured share directory; this code allows access to any path on the system.",
+        "similar_legitimate_use": "Legitimate file servers may allow subdirectory navigation, but always with strict path sanitization.",
+        "key_indicators": [
+          "Direct use of user input in file path operations",
+          "Lack of path normalization or validation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (SMB request handling)",
+        "file_location": "impacket/smbserver.py (lines 2008, 2958)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "fh = open(filename, 'wb')\nfh.write(data)",
+      "code_language": "python",
+      "code_behavior": "During SMB file write operations, the code writes data to a user-supplied filename without ensuring the path is within the intended working directory, enabling arbitrary file writes.",
+      "malice_analysis": {
+        "why_suspicious": "Writing to arbitrary file paths based on unvalidated user input can be exploited to overwrite system files or inject malicious code.",
+        "violated_expectations": "Expected behavior is to restrict file writes to the SMB share directory; this code allows writing anywhere on the filesystem.",
+        "similar_legitimate_use": "Legitimate file servers may allow file uploads, but only within a controlled directory.",
+        "key_indicators": [
+          "No path validation before file write",
+          "Direct use of user-supplied filename in open()"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (client-side exploitation)",
+        "file_location": "smbclient.py (do_ls_exploit, do_put_exploit)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "def do_ls_exploit(self, wildcard, display=True):\n    pwd = ntpath.join(self._pwd, wildcard)\n    ...\ndef do_put_exploit(self, line):\n    finalpath = line.split(' ')[0]\n    ...",
+      "code_language": "python",
+      "code_behavior": "On the client side, these functions allow sending path traversal strings (e.g., '../') to the server, bypassing client-side sanitization and exploiting the server's lack of validation to list or write files outside the intended directory.",
+      "malice_analysis": {
+        "why_suspicious": "These functions are intentionally crafted to exploit the server's vulnerability by omitting path sanitization.",
+        "violated_expectations": "Normal clients sanitize paths to prevent traversal; these functions deliberately bypass such checks.",
+        "similar_legitimate_use": "Testing or penetration testing tools may use similar code for security assessments.",
+        "key_indicators": [
+          "Omission of path sanitization",
+          "Direct use of user input for file operations"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker connects to a vulnerable smbserver instance using a modified client.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Ability to send crafted SMB requests with path traversal payloads."
+    },
+    {
+      "step": 2,
+      "action": "Attacker issues directory listing or file write requests with '../' in the path.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Server processes requests and accesses or writes files outside the intended share directory."
+    },
+    {
+      "step": 3,
+      "action": "Attacker reads sensitive files or writes malicious files (e.g., webshells, SSH keys) to arbitrary locations.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Potential remote code execution or system compromise."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "SMB server handling file paths containing '../' or other traversal sequences",
+      "SMB server writing files outside configured share directories",
+      "Unexpected file system access patterns from SMB server process"
+    ],
+    "file_indicators": [
+      "SMB server log entries with suspicious file paths",
+      "Creation or modification of files in system directories by the SMB server process"
+    ],
+    "network_indicators": [
+      "SMB requests containing path traversal payloads (e.g., '../')",
+      "Unusual SMB traffic patterns from untrusted clients"
+    ],
+    "how_to_detect": "Monitor SMB server logs for file operations involving path traversal sequences (e.g., '../'). Alert on any file write or read operations targeting locations outside the configured share directory. Use file integrity monitoring to detect unauthorized file creation or modification by the SMB server process. Inspect network traffic for SMB requests with suspicious file paths."
+  }
+}

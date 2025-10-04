@@ -2,30 +2,30 @@
   "package_info": {
     "package_name": "org.eclipse.jetty.http2:jetty-http2-common",
     "package_manager": "Maven",
-    "package_versions": "Affected versions prior to patch for CVE-2023-44487 (exact versions not specified in the report)",
-    "why_malicious": "The package is vulnerable to a protocol-level flaw (HTTP/2 Rapid Reset, CVE-2023-44487) that allows remote attackers to trigger Denial of Service (DoS) by exploiting insufficient limits on certain HTTP/2 frame types, enabling hyper-volumetric DDoS attacks."
+    "package_versions": "Affected versions prior to patch for CVE-2023-44487",
+    "why_malicious": "The package is vulnerable to a protocol-level flaw (CVE-2023-44487) that allows remote attackers to trigger Denial of Service (DoS) by exploiting insufficient limits on HTTP/2 frame handling, specifically rapid succession of RST_STREAM frames, leading to resource exhaustion."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
-        "trigger": "runtime (when handling HTTP/2 connections)",
+        "trigger": "runtime",
         "file_location": "org/eclipse/jetty/http2/parser/ContinuationBodyParser.class",
         "required_permissions": [
           "network"
         ]
       },
-      "code_snippet": "// Pseudocode representation of the vulnerable logic\nif (frame.type == RST_STREAM) {\n  // No sufficient limit on number of resets\n  transitionRequestStateToClosed();\n}\n// ...\nif (frame.type == HEADERS) {\n  // Accepts new requests\n  transitionRequestStateToOpen();\n}",
+      "code_snippet": "The methods in the classes listed below fail to enforce a sufficient limit on the number of certain frame types, such as RST_STREAM, received from clients. When combined with crafted HEADERS frames, such requests may transition from an open to closed state before servers can process the cancellation.",
       "code_language": "java",
-      "code_behavior": "Fails to enforce a sufficient limit on the number of RST_STREAM frames received from clients, allowing rapid transitions between open and closed states for requests.",
+      "code_behavior": "At runtime, the code fails to limit the number of RST_STREAM frames received from clients, allowing attackers to rapidly send reset requests and transition streams from open to closed state, exhausting server resources and resulting in a Denial of Service condition.",
       "malice_analysis": {
-        "why_suspicious": "Allows an unbounded number of reset requests in rapid succession, which can be abused to exhaust server resources.",
-        "violated_expectations": "Normal HTTP/2 server implementations should enforce limits on the number of concurrent streams and reset frames to prevent resource exhaustion. This code fails to do so.",
-        "similar_legitimate_use": "Legitimate use would involve handling occasional RST_STREAM frames for client-initiated cancellations, but not at unbounded rates.",
+        "why_suspicious": "The absence of rate limiting or connection limiting on RST_STREAM frames allows attackers to overwhelm the server with rapid reset requests, which is a classic vector for resource exhaustion attacks.",
+        "violated_expectations": "Normal HTTP/2 server implementations should enforce limits on the number and rate of control frames (like RST_STREAM) to prevent abuse. The actual behavior allows unbounded resets, violating this expectation.",
+        "similar_legitimate_use": "Legitimate clients may occasionally reset streams, but not in rapid, unbounded succession.",
         "key_indicators": [
-          "No rate limiting or cap on RST_STREAM frames",
-          "Allows rapid open/close transitions of streams",
-          "Directly impacts connection pool exhaustion"
+          "No limit on RST_STREAM frame handling",
+          "Transition of streams from open to closed state without server-side throttling",
+          "Potential for unbounded concurrent connections"
         ]
       }
     }
@@ -33,35 +33,35 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker sends a large number of HTTP/2 RST_STREAM frames in rapid succession to the server.",
+      "action": "Attacker sends a large number of RST_STREAM frames in rapid succession to the server.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Server transitions requests between open and closed states without processing, exhausting connection pool."
+      "leads_to": "Exhaustion of the server's connection pool and resources."
     },
     {
       "step": 2,
-      "action": "Server resources are exhausted due to unbounded concurrent connections and state transitions.",
+      "action": "Server transitions streams from open to closed state faster than it can process cancellations.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Denial of Service (DoS) for legitimate users."
+      "leads_to": "Denial of Service condition for legitimate users."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Unusually high rate of RST_STREAM frames from a single client or IP",
+      "Unusually high rate of RST_STREAM frames from a single client",
       "Rapid open/close transitions of HTTP/2 streams",
-      "Sudden exhaustion of connection pools or thread pools"
+      "Sudden exhaustion of connection pools"
     ],
     "file_indicators": [
-      "org/eclipse/jetty/http2/parser/ContinuationBodyParser.class (in vulnerable versions)",
-      "No explicit rate limiting logic for RST_STREAM in HTTP/2 frame handling code"
+      "org/eclipse/jetty/http2/parser/ContinuationBodyParser.class (vulnerable implementation)",
+      "Absence of rate limiting logic for RST_STREAM in HTTP/2 handling code"
     ],
     "network_indicators": [
       "Burst traffic patterns with high frequency of HTTP/2 RST_STREAM frames",
-      "Multiple incomplete or rapidly reset HTTP/2 streams from the same source"
+      "Multiple connections from the same source rapidly opening and closing"
     ],
-    "how_to_detect": "Monitor HTTP/2 traffic for excessive RST_STREAM frames per client or connection. Inspect server logs for rapid stream state transitions and connection pool exhaustion. Review HTTP/2 frame handling code for absence of rate limiting or maximum concurrent stream enforcement."
+    "how_to_detect": "Monitor HTTP/2 traffic for abnormal rates of RST_STREAM frames and rapid stream state transitions. Implement network-level or application-level rate limiting and alert on patterns indicative of resource exhaustion attempts. Review server logs for excessive connection churn and failed stream processing."
   }
 }

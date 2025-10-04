@@ -1,0 +1,103 @@
+{
+  "package_info": {
+    "package_name": "Atlassian Confluence Server and Data Center",
+    "package_manager": "custom/enterprise (Java application, not a public package manager)",
+    "package_versions": "All versions prior to 7.4.17, 7.13.7, 7.14.3, 7.15.2, 7.16.4, 7.17.4, and 7.18.1",
+    "why_malicious": "All affected versions are vulnerable to unauthenticated OGNL injection (CVE-2022-26134), allowing remote attackers to execute arbitrary code on the server without authentication. This enables full system compromise via remote code execution, as attackers can run arbitrary system commands with the privileges of the Confluence server process."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "HTTP request containing a crafted OGNL expression in the URL path (runtime, pre-authentication)",
+        "file_location": "URL path parsed by the Confluence web application, specifically during namespace mapping and OGNL evaluation in the translateVariables function",
+        "required_permissions": [
+          "network",
+          "web application access (no authentication required)"
+        ]
+      },
+      "code_snippet": "/%24%7B%40java.lang.Runtime%40getRuntime%28%29.exec%28%22touch%20/tmp/pwned%22%29%7D/",
+      "code_language": "OGNL (Object-Graph Navigation Language) / Java",
+      "code_behavior": "At HTTP request time, the server receives a URL path containing a malicious OGNL expression; the translateVariables function evaluates this expression, resulting in execution of the system command 'touch /tmp/pwned' on the server, creating a file and demonstrating arbitrary code execution.",
+      "malice_analysis": {
+        "why_suspicious": "This code enables unauthenticated remote attackers to execute arbitrary system commands on the server by injecting OGNL expressions into the URL path, which are then evaluated by the server. This is a critical security violation, as it bypasses all authentication and authorization controls.",
+        "violated_expectations": "Web applications should treat URL paths as data, not as executable code. Evaluating user-supplied input as OGNL expressions, especially from unauthenticated sources, is a severe violation of secure coding practices.",
+        "similar_legitimate_use": "OGNL expressions are legitimately used in Java frameworks for internal data binding and template rendering, but never for direct evaluation of user-supplied input from HTTP requests or URL paths.",
+        "key_indicators": [
+          "OGNL expression embedded in HTTP request URL path",
+          "Use of java.lang.Runtime.getRuntime().exec() within OGNL",
+          "translateVariables function evaluating user-controlled input",
+          "No authentication required for code execution"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "OGNL evaluation during namespace parsing as part of HTTP request handling (runtime, pre-authentication)",
+        "file_location": "translateVariables utility in Confluence, specifically via TextParseUtil usage in ActionChainResult.java",
+        "required_permissions": [
+          "filesystem access",
+          "process execution"
+        ]
+      },
+      "code_snippet": "{@java.lang.Runtime@getRuntime().exec(\"touch /tmp/pwned\")}",
+      "code_language": "OGNL (Object-Graph Navigation Language) / Java",
+      "code_behavior": "During HTTP request processing, the server's translateVariables function evaluates the injected OGNL expression, causing the Java process to execute the system command 'touch /tmp/pwned', resulting in file creation on the server and demonstrating arbitrary command execution.",
+      "malice_analysis": {
+        "why_suspicious": "This code allows arbitrary command execution via OGNL injection, a well-known attack vector for remote code execution vulnerabilities. The injected OGNL expression is evaluated with the privileges of the Confluence server process, enabling full system compromise.",
+        "violated_expectations": "User-supplied input should never be evaluated as code, especially not with system-level privileges. The use of OGNL for evaluating untrusted input from HTTP requests is a critical design flaw and violates secure input handling standards.",
+        "similar_legitimate_use": "OGNL is used for safe data binding in Java web frameworks, but not for evaluating user-controlled expressions from HTTP requests or URL paths.",
+        "key_indicators": [
+          "Direct use of java.lang.Runtime in OGNL expression",
+          "System command execution triggered from web request context",
+          "translateVariables function acting as code execution sink",
+          "OGNL injection point in namespace parsing"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts and sends an HTTP request with a malicious OGNL expression embedded in the URL path.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "OGNL expression is parsed from the URL and passed to the server for evaluation."
+    },
+    {
+      "step": 2,
+      "action": "Confluence server parses the URL, maps it to a namespace and action, and passes the namespace through the translateVariables function, which evaluates the OGNL expression.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary system command is executed on the server (e.g., creating a file, spawning a shell, or running a reverse shell)."
+    },
+    {
+      "step": 3,
+      "action": "Attacker gains remote code execution, potentially establishing persistence, exfiltrating data, or pivoting further into the environment.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Full system compromise and post-exploitation activity, including lateral movement or data theft."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Java web application process (e.g., Confluence) spawning unexpected shell or system utility processes (e.g., /bin/sh, /bin/bash, /usr/bin/curl, /usr/bin/wget)",
+      "OGNL expressions containing java.lang.Runtime or exec() observed in HTTP request paths or parameters",
+      "Unusual file creation in /tmp or other non-standard locations (e.g., /tmp/pwned) by the Confluence server process",
+      "Confluence server process making outbound network connections to external or suspicious domains"
+    ],
+    "file_indicators": [
+      "Creation of files such as /tmp/pwned or other attacker-controlled artifacts on the server",
+      "Modification or replacement of xwork-1.0.3-atlassian-10.jar or ActionChainResult.java (in the context of mitigation or post-exploitation tampering)"
+    ],
+    "network_indicators": [
+      "Outbound connections from the Confluence server to uncommon or suspicious domains (e.g., ngrok.io, webhook.site)",
+      "Unexpected network activity or reverse shell connections initiated by Java processes running as the Confluence server"
+    ],
+    "how_to_detect": "Monitor for Java (Confluence) processes spawning shell utilities (e.g., /bin/sh, /bin/bash, /usr/bin/curl, /usr/bin/wget). Inspect HTTP request logs for OGNL expressions or suspicious patterns in URL paths, such as encoded or unencoded OGNL payloads. Look for file creation in /tmp or other unusual locations by the Confluence process. Use network monitoring to detect outbound connections to known attacker infrastructure or uncommon domains from Confluence servers. Correlate process, file, and network activity for high-confidence detection of exploitation attempts."
+  }
+}

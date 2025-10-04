@@ -1,0 +1,131 @@
+{
+  "package_info": {
+    "package_name": "Unified Automation C++ OPC UA Server SDK (Demo Server)",
+    "package_manager": "proprietary/ICS vendor",
+    "package_versions": "< 1.7.7",
+    "why_malicious": "The package contains multiple memory corruption vulnerabilities, including an information leak and a heap overflow, which can be chained by authenticated users to achieve remote code execution. Attackers can exploit these flaws to leak heap memory, bypass ASLR, and overwrite function pointers, ultimately gaining arbitrary code execution on the server."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (Read request on string node)",
+        "file_location": "UaUniString::UaUniString (C++ source code)",
+        "required_permissions": [
+          "filesystem",
+          "memory",
+          "authenticated high-privilege user"
+        ]
+      },
+      "code_snippet": "void __thiscall UaUniString::UaUniString(UaUniString *this, const char *other) {\n  ...\n  if ( other ) {\n    iWLen = 0;\n    for ( i = 0; other[i]; ++i ) {\n      c = other[i];\n      if ( c >= 128 ) {\n        if ( (c & 0xE0) == '\\xC0' ) {\n          ++i;\n          ++iWLen;\n        } else if ( (c & 0xF0) == '\\xE0' ) {\n          i += 2;\n          ++iWLen;\n        } else if ( (c & 0xF8) == '\\xF0' ) {\n          i += 3;\n          ++iWLen;\n        }\n        ...\n      } else {\n        ++iWLen;\n      }\n    }\n    iLen = i;\n    pData = OpcUa_Memory_Alloc(2 * iWLen + 2);\n    iLenUsed = 0;\n    for ( ia = 0; ia <= iLen; ++ia ) {\n      v5 = other[ia];\n      if ( v5 >= 0x80 ) {\n        ...\n        else if ( (v5 & 0xF8) == '\\xF0' ) {\n          pData[iLenUsed++] = '?';\n          ia += 3;\n        }\n        else if ( (v5 & 0xFC) == '\\xF8' ) {\n          pData[iLenUsed++] = '?';\n          ia += 4;\n        }\n        else if ( (v5 & 0xFE) == '\\xFC' ) {\n          pData[iLenUsed++] = '?';\n          ia += 5;\n        }\n      } else {\n        pData[iLenUsed++] = other[ia];\n      }\n    }\n  }\n}",
+      "code_language": "cpp",
+      "code_behavior": "At runtime, when a Read request is made on a string node, the function miscalculates the length of a UTF-8 string, allocates a buffer based on this incorrect length, and copies memory past the end of the input buffer, resulting in out-of-bounds heap memory being returned to the client.",
+      "malice_analysis": {
+        "why_suspicious": "The function increments the index variable incorrectly when parsing multi-byte UTF-8 characters, causing it to read and copy memory beyond the null terminator of the input string. This results in uninitialized or sensitive heap memory being leaked to the client.",
+        "violated_expectations": "Normal string conversion routines must strictly respect input buffer boundaries and never read or copy memory past the null terminator. This code violates that expectation, leading to memory disclosure.",
+        "similar_legitimate_use": "Legitimate string conversion would always include bounds checks and would never leak heap memory contents to the client.",
+        "key_indicators": [
+          "Incorrect index incrementing in UTF-8 parsing loop",
+          "No bounds check on input buffer length",
+          "Heap memory contents returned in response to client",
+          "Out-of-bounds read and copy in string conversion"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (PubSub configuration upload by admin user)",
+        "file_location": "UaString::arg() / replaceArgEscapes() (C++ source code)",
+        "required_permissions": [
+          "filesystem",
+          "memory",
+          "authenticated admin user"
+        ]
+      },
+      "code_snippet": "UaString *replaceArgEscapes(UaString *result, const UaString *fmt_string, const ArgEscapeData *d, int field_width, const UaString *arg, const UaChar *fillChar) {\n   ...\n   v__field_width_abs = uaAbs(&field_width);\n   v__fmt_string_size = UaString::size((UaString *)fmt_string);\n   v__arg_size = UaString::size((UaString *)arg);\n   v__size_without_escape_len = v__fmt_string_size - d->escape_len;\n   len = *uaMax(&v__field_width_abs, &v__arg_size) * d->occurrences + v__size_without_escape_len;\n   buf = (char *)OpcUa_Memory_Alloc(len + 1);\n   ...\n   // later, memcpy() writes argument data into buf, possibly overflowing\n}",
+      "code_language": "cpp",
+      "code_behavior": "At runtime, when an admin uploads a specially crafted PubSub configuration, the function calculates a buffer size using attacker-controlled values, causing an integer overflow and under-allocating the buffer. Subsequent memcpy operations write attacker-controlled data out-of-bounds, resulting in heap corruption and enabling remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The buffer allocation size is derived from attacker-controlled input, and the calculation can overflow, resulting in a buffer that is too small. The code then performs memcpy operations without verifying the buffer size, leading to a classic heap overflow vulnerability.",
+        "violated_expectations": "Normal string formatting functions must validate all user-controlled values and prevent integer overflows or buffer overflows. This code allows user input to control allocation size and does not check for overflows, violating secure coding practices.",
+        "similar_legitimate_use": "Legitimate string formatting would use safe allocation routines and enforce strict bounds checks to prevent overflows.",
+        "key_indicators": [
+          "Attacker-controlled values used in buffer size calculation",
+          "Integer overflow in allocation length computation",
+          "No validation of allocation size before memcpy",
+          "Heap overflow via unchecked memcpy"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (authentication, prior to exploit chain)",
+        "file_location": "MyServerCallback::logonSessionUser (C++ source code)",
+        "required_permissions": [
+          "network",
+          "authenticated user"
+        ]
+      },
+      "code_snippet": "if ((pUserPwToken->sUserName == \"root\" && pUserPwToken->sPassword == \"secret\") ||\n    (pUserPwToken->sUserName == \"joe\" && pUserPwToken->sPassword == \"god\") ||\n    (pUserPwToken->sUserName == \"john\" && pUserPwToken->sPassword == \"master\") ||\n    (pUserPwToken->sUserName == \"sue\" && pUserPwToken->sPassword == \"curly\") ||\n    (pUserPwToken->sUserName == \"sam\" && pUserPwToken->sPassword == \"serious\"))\n{ ... }",
+      "code_language": "cpp",
+      "code_behavior": "At runtime, during authentication, the server checks for hardcoded plaintext credentials, allowing attackers to authenticate as privileged users and gain access to exploit further vulnerabilities.",
+      "malice_analysis": {
+        "why_suspicious": "The use of hardcoded credentials in production code is a critical security flaw, as it enables attackers to trivially gain administrative access by using known username and password pairs.",
+        "violated_expectations": "Secure authentication systems must use hashed and salted passwords, never hardcoded plaintext credentials. This code directly compares user input to hardcoded values, violating basic security principles.",
+        "similar_legitimate_use": "Hardcoded credentials may be used in test or demo environments, but should never be present in production or distributed binaries.",
+        "key_indicators": [
+          "Presence of hardcoded admin usernames and passwords",
+          "Plaintext password comparison in authentication logic",
+          "No password hashing or secure verification",
+          "No rate limiting or brute-force protection"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker authenticates as admin using hardcoded credentials.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Ability to send privileged requests to the server"
+    },
+    {
+      "step": 2,
+      "action": "Attacker triggers UaUniString info leak via crafted Read request to leak heap memory and bypass ASLR.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Knowledge of memory layout and vtable addresses for ROP"
+    },
+    {
+      "step": 3,
+      "action": "Attacker uploads malicious PubSub configuration to trigger heap overflow in replaceArgEscapes(), overwriting function pointers.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Remote code execution (RCE) via hijacked control flow"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Read requests on string nodes returning excessive or unexpected heap data",
+      "Large or malformed PubSub configuration uploads with excessive %1 patterns or unusually large string fields",
+      "Authentication attempts using known hardcoded credentials (e.g., 'root:secret', 'joe:god')"
+    ],
+    "file_indicators": [
+      "PubSub configuration files containing repetitive or abnormally large string fields",
+      "Heap corruption or crash logs referencing UaUniString or UaString::arg",
+      "Server logs showing authentication with hardcoded usernames"
+    ],
+    "network_indicators": [
+      "Repeated Read requests to string nodes from a single client IP",
+      "Large PubSub configuration uploads from a single IP address",
+      "Brute-force or rapid login attempts using known usernames (root, joe, john, sue, sam)"
+    ],
+    "how_to_detect": "Monitor for Read requests on string nodes that return abnormally large or nonconforming data, which may indicate exploitation of the info leak. Flag PubSub configuration uploads with excessive use of %1 patterns or unusually large string fields, as these may be attempts to trigger the heap overflow. Alert on authentication attempts using known hardcoded credentials. Correlate heap corruption or crash events with recent configuration uploads or Read requests. Implement memory integrity monitoring to detect out-of-bounds reads/writes in UaUniString and UaString::arg. Cross-reference authentication logs for use of hardcoded usernames and passwords."
+  }
+}

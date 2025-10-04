@@ -1,0 +1,101 @@
+{
+  "package_info": {
+    "package_name": "Kubernetes",
+    "package_manager": "N/A (core infrastructure, not a package manager)",
+    "package_versions": "All versions prior to PR 81056 / issue #1711 fix",
+    "why_malicious": "A race condition vulnerability in Kubernetes allowed nodes with duplicate hostnames to overwrite each other's state in etcd, leading to cluster instability and potential denial of service. While not a traditional 'malicious package', this logic flaw could be exploited by an attacker with node-joining privileges to disrupt or crash the cluster."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "node join (cluster registration)",
+        "file_location": "Kubernetes Master etcd key management (/registry/minions/HOSTNAME)",
+        "required_permissions": [
+          "cluster node join privileges",
+          "network (to communicate with master)",
+          "ability to set hostname or use --hostname-override"
+        ]
+      },
+      "code_snippet": "etcd key: /registry/minions/HOSTNAME\n# HOSTNAME is not enforced to be unique\n# Each node update overwrites the same key if hostnames are duplicated",
+      "code_language": "Go (Kubernetes core logic, conceptual etcd key usage)",
+      "code_behavior": "When a node joins the cluster, it registers its state under /registry/minions/HOSTNAME in etcd. If two nodes share the same hostname, each update overwrites the same key, causing a race condition and cluster instability.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing multiple nodes to register with the same hostname enables a race condition that can be triggered intentionally to disrupt cluster operations.",
+        "violated_expectations": "Normally, each node should have a unique identifier in the cluster state store. Allowing duplicate hostnames violates this expectation and undermines cluster integrity.",
+        "similar_legitimate_use": "Legitimate use would be a node rejoining after a reboot, but not multiple active nodes with the same name.",
+        "key_indicators": [
+          "No uniqueness check on node hostname during join",
+          "etcd key overwrites for /registry/minions/HOSTNAME",
+          "Cluster instability and high CPU load on master"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "node join (with --hostname-override)",
+        "file_location": "Kubelet process startup (command-line argument)",
+        "required_permissions": [
+          "cluster node join privileges",
+          "ability to set --hostname-override"
+        ]
+      },
+      "code_snippet": "kubelet --hostname-override=EXISTING_HOSTNAME",
+      "code_language": "shell/command-line",
+      "code_behavior": "When a node is started with --hostname-override set to an existing node's hostname, it registers under the same etcd key, causing the same race condition and instability.",
+      "malice_analysis": {
+        "why_suspicious": "The --hostname-override flag can be abused to intentionally create duplicate node identities, triggering the vulnerability.",
+        "violated_expectations": "Normally, --hostname-override is used for legitimate renaming, not for duplicating existing node identities.",
+        "similar_legitimate_use": "Used in cloud environments to set a custom node name, but not to duplicate an existing one.",
+        "key_indicators": [
+          "Use of --hostname-override with a duplicate value",
+          "Multiple nodes reporting the same hostname"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker provisions a new node and sets its hostname (or uses --hostname-override) to match an existing node in the cluster.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Node joins cluster with duplicate identity."
+    },
+    {
+      "step": 2,
+      "action": "Both nodes periodically update their state in etcd under the same key (/registry/minions/HOSTNAME), causing a race condition.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Cluster state becomes unstable; master node experiences high CPU load."
+    },
+    {
+      "step": 3,
+      "action": "Cluster instability escalates, potentially leading to denial of service or crash of the master node.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Cluster crash or severe disruption."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Multiple nodes reporting the same hostname in cluster state",
+      "Frequent overwrites of the same etcd key (/registry/minions/HOSTNAME)",
+      "Unusual spike in master node CPU usage after node join events"
+    ],
+    "file_indicators": [
+      "Duplicate entries in etcd for /registry/minions/HOSTNAME",
+      "Kubelet logs showing --hostname-override usage"
+    ],
+    "network_indicators": [
+      "Multiple nodes with the same hostname communicating with the master",
+      "Repeated registration requests from different IPs with the same node name"
+    ],
+    "how_to_detect": "Monitor etcd for frequent updates to the same /registry/minions/HOSTNAME key from different node IPs. Alert if multiple nodes report the same hostname or if --hostname-override is used with a value matching an existing node. Investigate spikes in master node CPU usage following node join events."
+  }
+}

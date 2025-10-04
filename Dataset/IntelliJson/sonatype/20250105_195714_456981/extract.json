@@ -1,16 +1,16 @@
 {
   "package_info": {
-    "package_name": "spring-ws-core, spring-xml",
-    "package_manager": "Maven (Java)",
-    "package_versions": "spring-ws-core: <3.0.5.RELEASE (3.x), <2.4.4.RELEASE (1.x/2.x); spring-xml: all versions",
-    "why_malicious": "Vulnerable versions of these packages fail to restrict XML External Entity (XXE) processing, allowing attackers to inject malicious XML that can exfiltrate sensitive data, perform SSRF, or cause denial of service."
+    "package_name": "org.springframework.ws:spring-ws-core",
+    "package_manager": "Maven",
+    "package_versions": "All versions prior to 3.0.5.RELEASE (3.x), all versions prior to 2.4.4.RELEASE (1.x, 2.x)",
+    "why_malicious": "The package fails to restrict XML External Entity (XXE) processing in its XML parsing utilities, allowing attackers to inject malicious XML that can exfiltrate sensitive data or perform other attacks."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
         "trigger": "runtime (XML parsing)",
-        "file_location": "Any Java class using DocumentBuilderFactory, XMLInputFactory, or similar XML parsing utilities",
+        "file_location": "Any code path using DocumentBuilderFactory, XMLInputFactory, or similar XML parsing utilities in spring-ws-core or spring-xml",
         "required_permissions": [
           "filesystem",
           "network (if external entities reference remote resources)"
@@ -18,39 +18,15 @@
       },
       "code_snippet": "<?xml version=\"1.0\"?>\n<!DOCTYPE stockCheck [ <!ENTITY xxe SYSTEM \"file:///etc/passwd\"> ]>\n<stockCheck>\n    <productId>&xxe;</productId>\n</stockCheck>",
       "code_language": "xml",
-      "code_behavior": "This XML payload defines an external entity 'xxe' that references a sensitive file (/etc/passwd). When parsed by a vulnerable XML parser, the entity is expanded and the file's contents are included in the parsed data, potentially exfiltrating sensitive information.",
+      "code_behavior": "At runtime, the XML parser processes a crafted XML document containing an external entity reference, causing the application to read the contents of /etc/passwd and potentially return or transmit this data to the attacker.",
       "malice_analysis": {
-        "why_suspicious": "The use of external entities in XML input is a classic vector for XXE attacks, which can lead to data exfiltration, SSRF, or DoS.",
-        "violated_expectations": "Normal XML input should not allow arbitrary file or network access via entity expansion. The parser should restrict or disable external entity resolution.",
-        "similar_legitimate_use": "External entities are sometimes used in legitimate XML DTDs for modularization, but should never reference sensitive local files or untrusted remote resources in user-supplied XML.",
+        "why_suspicious": "The code allows external entity resolution, which can be abused to read arbitrary files or interact with remote resources, leading to data exfiltration or SSRF.",
+        "violated_expectations": "Normal XML parsing should not allow untrusted input to reference external files or URLs. The actual behavior allows attackers to inject DTDs and access sensitive resources.",
+        "similar_legitimate_use": "Legitimate use of external entities is rare and typically only in trusted, internal XML workflows.",
         "key_indicators": [
-          "Presence of <!DOCTYPE ... [ <!ENTITY ... SYSTEM ...> ]> in user-supplied XML",
-          "Entity references that resolve to local files or remote URLs",
-          "Expansion of user-controlled entities in parsed XML"
-        ]
-      }
-    },
-    {
-      "snippet_id": "snippet_2",
-      "execution_context": {
-        "trigger": "runtime (XML parsing)",
-        "file_location": "Java code using DocumentBuilderFactory, XMLInputFactory, or similar, without secure configuration",
-        "required_permissions": [
-          "filesystem",
-          "network"
-        ]
-      },
-      "code_snippet": "DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();\nDocumentBuilder db = dbf.newDocumentBuilder();\nDocument doc = db.parse(inputStream);",
-      "code_language": "java",
-      "code_behavior": "This Java code creates a DocumentBuilderFactory and parses XML input without disabling external entity resolution, making it vulnerable to XXE attacks if the input is attacker-controlled.",
-      "malice_analysis": {
-        "why_suspicious": "Failure to disable external entity resolution in XML parsers is a well-known security risk, especially when parsing untrusted input.",
-        "violated_expectations": "Secure XML parsing should explicitly disable external entity resolution and DTD processing.",
-        "similar_legitimate_use": "Parsing trusted, static XML files may not require these protections, but user-supplied or dynamic XML must be handled securely.",
-        "key_indicators": [
-          "No calls to setFeature(\"http://apache.org/xml/features/disallow-doctype-decl\", true) or similar",
-          "No explicit disabling of external entity resolution",
-          "Parsing of user-supplied XML"
+          "Presence of <!DOCTYPE ... [ <!ENTITY ... SYSTEM ...> ]> in XML input",
+          "Use of XML parser factories without secure configuration",
+          "Access to sensitive files or remote URLs during XML parsing"
         ]
       }
     }
@@ -58,44 +34,43 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker submits malicious XML containing an external entity referencing a sensitive file or remote resource.",
+      "action": "Attacker submits malicious XML containing an external entity reference.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "XML parser processes the input and expands the external entity."
+      "leads_to": "XML parser processes the external entity."
     },
     {
       "step": 2,
-      "action": "Vulnerable XML parser (e.g., DocumentBuilderFactory) processes the XML without restricting external entity resolution.",
+      "action": "XML parser resolves the external entity, reading sensitive file contents (e.g., /etc/passwd).",
       "implemented_by": [
-        "snippet_2"
+        "snippet_1"
       ],
-      "leads_to": "Sensitive data is read from the file system or a network request is made."
+      "leads_to": "Sensitive data is included in the application's XML processing output."
     },
     {
       "step": 3,
-      "action": "Sensitive data is included in the application's XML processing result, potentially exfiltrated to the attacker.",
+      "action": "Application may return or transmit the sensitive data to the attacker (e.g., in an API response).",
       "implemented_by": [
-        "snippet_1",
-        "snippet_2"
+        "snippet_1"
       ],
-      "leads_to": "Data breach, SSRF, or denial of service."
+      "leads_to": "Attacker gains access to sensitive server data."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "XML input containing <!DOCTYPE ... [ <!ENTITY ... SYSTEM ...> ]>",
+      "XML parsing of untrusted input with external entity resolution enabled",
       "Unexpected file or network access during XML parsing",
-      "Expansion of user-controlled XML entities"
+      "Presence of <!DOCTYPE> and <!ENTITY ... SYSTEM ...> in XML payloads"
     ],
     "file_indicators": [
-      "XML files or payloads with DOCTYPE and SYSTEM entity references",
-      "Java code using DocumentBuilderFactory, XMLInputFactory, or similar without secure configuration"
+      "XML files or payloads containing DOCTYPE and ENTITY definitions",
+      "Access to sensitive files (e.g., /etc/passwd, /proc/self/environ) during XML processing"
     ],
     "network_indicators": [
       "Outbound requests to attacker-controlled domains during XML parsing",
-      "Unexpected access to internal resources via SSRF"
+      "Unexpected DNS or HTTP requests triggered by XML entity resolution"
     ],
-    "how_to_detect": "Monitor XML parsing operations for the presence of DOCTYPE declarations and SYSTEM entity references in user-supplied XML. Review Java code for secure configuration of XML parsers (e.g., disabling external entity resolution). Use static analysis to flag code that does not set secure features on XML parser factories. Monitor for unexpected file or network access patterns during XML processing."
+    "how_to_detect": "Monitor XML parsing code for use of DocumentBuilderFactory, XMLInputFactory, or similar without secure configuration. Inspect logs for XML payloads containing DOCTYPE and ENTITY definitions. Monitor for unexpected file or network access patterns during XML processing, especially when handling user-supplied XML."
   }
 }

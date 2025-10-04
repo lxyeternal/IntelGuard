@@ -1,0 +1,93 @@
+{
+  "package_info": {
+    "package_name": "spring-boot-starter-tomcat (embedded Apache Tomcat)",
+    "package_manager": "Maven",
+    "package_versions": "2.2.0-RELEASE (and all Tomcat versions prior to the fix for CVE-2020-9484)",
+    "why_malicious": "The embedded Apache Tomcat version in this Spring Boot package is vulnerable to a remote code execution (RCE) flaw (CVE-2020-9484) when configured with PersistentManager and FileStore. Attackers can exploit path traversal in session file loading to trigger deserialization of attacker-controlled data, leading to arbitrary code execution."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, when the server receives an HTTP request with a crafted JSESSIONID cookie containing path traversal sequences",
+        "file_location": "Tomcat session management logic (PersistentManager with FileStore configuration)",
+        "required_permissions": [
+          "filesystem (read access to session storage directories)",
+          "network (to receive HTTP requests)"
+        ]
+      },
+      "code_snippet": "JSESSIONID=../../../../../../../foo/mysession",
+      "code_language": "HTTP (session identifier manipulation affecting Java backend)",
+      "code_behavior": "At runtime, when the server processes an HTTP request with a JSESSIONID containing path traversal, Tomcat's PersistentManager attempts to load a session file from the attacker-specified location, resulting in deserialization of attacker-controlled data and potential remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The use of path traversal in the JSESSIONID allows an attacker to direct the server to load arbitrary files as session data. When these files are deserialized without validation, it enables execution of malicious payloads embedded in serialized objects.",
+        "violated_expectations": "Session IDs are expected to be opaque, server-generated tokens that do not influence file paths or access. Allowing user-supplied session IDs to dictate file loading paths violates the principle of input validation and trust boundaries.",
+        "similar_legitimate_use": "Session IDs are legitimately used to track user sessions, but should never be interpreted as file paths or used to access arbitrary files on the server.",
+        "key_indicators": [
+          "JSESSIONID cookie containing path traversal sequences (e.g., ../../..)",
+          "Session file loading based on user-supplied input",
+          "Deserialization of files outside the intended session storage directory"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "At runtime, when a session file is present in a directory accessible via path traversal and the server attempts to load it",
+        "file_location": "foo/mysession.session (arbitrary file placed in the server's session storage directory or a directory accessible via path traversal)",
+        "required_permissions": [
+          "filesystem (write access to session storage directories or directories accessible via path traversal)"
+        ]
+      },
+      "code_snippet": "Attacker uploads a crafted serialized Java object as mysession.session in a directory accessible via path traversal.",
+      "code_language": "Java (serialized object file)",
+      "code_behavior": "At runtime, when Tomcat attempts to load a session file from a path specified by a manipulated JSESSIONID, it deserializes the attacker-uploaded session file containing a malicious Java object, resulting in arbitrary code execution if a suitable gadget chain is present.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing attackers to upload or place arbitrary serialized objects in locations that the server will later deserialize is a classic vector for remote code execution, especially in Java environments where deserialization vulnerabilities are well-known.",
+        "violated_expectations": "Session files should be created and managed exclusively by the server, and only trusted, validated data should be deserialized. Accepting and deserializing untrusted files from user-controlled locations breaks this security model.",
+        "similar_legitimate_use": "File uploads are legitimate in some applications, but session files should never be user-supplied or deserialized unless their integrity and origin are strictly verified.",
+        "key_indicators": [
+          "Presence of attacker-controlled .session files in non-standard directories",
+          "Deserialization of untrusted serialized Java objects",
+          "Session file names and locations not matching expected server patterns"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker uploads or places a malicious serialized Java object as a session file (mysession.session) in a directory accessible by the Tomcat server via path traversal.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker prepares the environment for exploitation by ensuring a malicious session file is available for loading."
+    },
+    {
+      "step": 2,
+      "action": "Attacker sends an HTTP request with a crafted JSESSIONID containing path traversal (JSESSIONID=../../../../../../../foo/mysession), causing Tomcat to load and deserialize the malicious session file.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Deserialization of attacker-controlled data, leading to remote code execution if a suitable gadget is present."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Session file loading based on user-supplied JSESSIONID values containing path traversal sequences",
+      "Deserialization of session files from directories outside the configured session storage location",
+      "Unusual or unauthorized file creation in session storage directories",
+      "HTTP requests with JSESSIONID values that do not match expected session ID patterns"
+    ],
+    "file_indicators": [
+      "Presence of .session files in unexpected or non-standard directories (e.g., foo/mysession.session)",
+      "Session files with names or locations that do not conform to server-generated patterns",
+      "Serialized Java objects detected in session files outside the default session storage directory"
+    ],
+    "network_indicators": [
+      "HTTP requests with JSESSIONID containing path traversal sequences (e.g., ../../..)",
+      "Repeated or anomalous session ID values in HTTP requests targeting session management endpoints"
+    ],
+    "how_to_detect": "Monitor HTTP requests for JSESSIONID values containing path traversal patterns (e.g., '../'). Audit file system activity for creation or access of .session files in non-standard directories. Detect deserialization operations on session files located outside the configured session storage path. Use application security monitoring to flag deserialization of untrusted data and path traversal attempts in session management logic. Correlate anomalous file creation with suspicious network activity to identify exploitation attempts."
+  }
+}

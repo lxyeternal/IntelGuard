@@ -1,0 +1,104 @@
+{
+  "package_info": {
+    "package_name": "Apache Unomi",
+    "package_manager": "custom/Java (not a typical package manager, but distributed as a Java application)",
+    "package_versions": "1.5.1 and below",
+    "why_malicious": "The package is vulnerable to unauthenticated remote code execution (RCE) via Expression Language (EL) injection in public endpoints, allowing attackers to execute arbitrary OS commands with the privileges of the Unomi application. The vulnerability arises from insufficient restrictions on MVEL and OGNL expression evaluation, which can be exploited remotely without authentication."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP request to public endpoint)",
+        "file_location": "Evaluated in-memory by Unomi server when processing /context.json endpoint",
+        "required_permissions": [
+          "network",
+          "OS command execution"
+        ]
+      },
+      "code_snippet": "script::Runtime r = Runtime.getRuntime(); r.exec(\"touch /tmp/POC\");",
+      "code_language": "MVEL (embedded in JSON HTTP request)",
+      "code_behavior": "At runtime, the code instantiates a Java Runtime object and executes an OS command ('touch /tmp/POC') on the server, resulting in arbitrary command execution.",
+      "malice_analysis": {
+        "why_suspicious": "This code allows arbitrary OS command execution via user-supplied input, which is a classic RCE vector.",
+        "violated_expectations": "Normally, user-supplied expressions should be strictly sandboxed and not allow access to system-level classes or command execution.",
+        "similar_legitimate_use": "Legitimate use of MVEL expressions for data filtering or transformation, but never for OS command execution.",
+        "key_indicators": [
+          "Direct use of Runtime.getRuntime().exec() in user-supplied input",
+          "No authentication or authorization required",
+          "Execution of arbitrary shell commands"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (HTTP request to public endpoint)",
+        "file_location": "Evaluated in-memory by Unomi server when processing /context.json endpoint",
+        "required_permissions": [
+          "network",
+          "OS command execution",
+          "Java reflection"
+        ]
+      },
+      "code_snippet": "#runtimeclass = #this.getClass().forName(\"java.lang.Runtime\")).(#getruntimemethod = #runtimeclass.getDeclaredMethods().{^#this.name.equals(\"getRuntime\")}[0]).(#rtobj = #getruntimemethod.invoke(null,null)).(#execmethod = #runtimeclass.getDeclaredMethods().{^#this.name.equals(\"exec\")}.{? #this.getParameters()[0].getType().getName().equals(\"java.lang.String\")}[0]).(#execmethod.invoke(#rtobj,\"touch /tmp/POC\"))",
+      "code_language": "OGNL (embedded in JSON HTTP request)",
+      "code_behavior": "At runtime, the code uses Java reflection to obtain the Runtime class and its methods, then invokes the 'exec' method to execute an OS command ('touch /tmp/POC'), resulting in arbitrary command execution.",
+      "malice_analysis": {
+        "why_suspicious": "This code leverages reflection to bypass classloader restrictions and execute arbitrary OS commands, a hallmark of advanced RCE exploits.",
+        "violated_expectations": "OGNL expressions should not allow access to reflection or system-level classes from user input.",
+        "similar_legitimate_use": "Reflection may be used internally for framework logic, but never exposed to user-controlled input for command execution.",
+        "key_indicators": [
+          "Use of reflection to access java.lang.Runtime",
+          "Dynamic invocation of 'exec' method",
+          "Complex OGNL payload in user-supplied data"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious HTTP POST request to the public /context.json endpoint, embedding a malicious MVEL or OGNL expression.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Expression is evaluated by the Unomi server."
+    },
+    {
+      "step": 2,
+      "action": "Unomi server evaluates the user-supplied expression without proper sandboxing, allowing arbitrary Java class access and OS command execution.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary OS command is executed on the server with Unomi application privileges."
+    },
+    {
+      "step": 3,
+      "action": "Attacker gains remote code execution, potentially using the server as an entry point for further lateral movement within the internal network.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Full compromise of server and potential pivot to other internal systems."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "User-supplied MVEL or OGNL expressions evaluated at runtime",
+      "Expressions containing references to java.lang.Runtime, getRuntime, or exec",
+      "Reflection-based access to system classes in user input"
+    ],
+    "file_indicators": [
+      "Unexpected creation of files such as /tmp/POC",
+      "Unusual modifications to Unomi configuration or data files"
+    ],
+    "network_indicators": [
+      "Unusual or unauthenticated POST requests to /context.json endpoint",
+      "Large or complex JSON payloads containing suspicious script:: or OGNL syntax"
+    ],
+    "how_to_detect": "Monitor HTTP POST requests to the /context.json endpoint for payloads containing MVEL or OGNL expressions, especially those referencing java.lang.Runtime, getRuntime, exec, or using reflection. Alert on any user-supplied expressions that attempt to access system classes or execute OS commands. Monitor the server for unexpected file creation (e.g., /tmp/POC) and review logs for evidence of command execution initiated by the Unomi process."
+  }
+}

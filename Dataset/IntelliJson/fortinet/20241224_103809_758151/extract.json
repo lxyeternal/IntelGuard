@@ -1,0 +1,229 @@
+{
+  "package_info": {
+    "package_name": "WINTAPIX (WinTapix.sys, SRVNET2.SYS)",
+    "package_manager": "Windows Kernel Driver (manual/third-party loader)",
+    "package_versions": "WinTapix.sys (8578bff36e3b02cc71495b647db88c67c3c5ca710b5a2bd539148550595d0330, 1485c0ed3e875cbdfc6786a5bd26d18ea9d31727deb8df290a1c00c780419a4e), SRVNET2.SYS (f6c316e2385f2694d47e936b0ac4bc9b55e279d530dd5e805f0d963cb47c3c0d)",
+    "why_malicious": "The driver is a malicious kernel-mode loader that injects shellcode into privileged processes, establishes persistence (including in Safe Boot), monitors and restores its own presence, and ultimately deploys a .NET backdoor with command execution and proxy capabilities. Its behaviors enable remote code execution, persistent access, and covert control of compromised systems."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "driver load (kernel-mode)",
+        "file_location": "WinTapix.sys / SRVNET2.SYS",
+        "required_permissions": [
+          "kernel",
+          "process_injection",
+          "filesystem",
+          "registry"
+        ]
+      },
+      "code_snippet": "Find a 32-bit process running as Local System (not in blocklist), open it with ZwOpenProcess(), allocate memory with ZwAllocateVirtualMemory(), and inject embedded shellcode using NtWriteVirtualMemory().",
+      "code_language": "C (Windows kernel API)",
+      "code_behavior": "At driver load, the code locates a suitable privileged process, injects shellcode into its memory, and executes it, enabling execution of arbitrary payloads with SYSTEM privileges.",
+      "malice_analysis": {
+        "why_suspicious": "Kernel drivers should not inject shellcode into user-mode processes, especially with SYSTEM privileges.",
+        "violated_expectations": "Legitimate drivers do not perform process injection or arbitrary code execution in other processes.",
+        "similar_legitimate_use": "Some security or debugging tools may inject code for monitoring, but never in this covert, privilege-escalating manner.",
+        "key_indicators": [
+          "Process injection from kernel mode",
+          "Targeting SYSTEM processes",
+          "Avoidance of critical system processes (blocklist)",
+          "Use of direct system calls (ZwOpenProcess, NtWriteVirtualMemory)"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "driver load (persistence setup)",
+        "file_location": "WinTapix.sys / registry",
+        "required_permissions": [
+          "registry",
+          "filesystem",
+          "kernel"
+        ]
+      },
+      "code_snippet": "Create registry keys: \\\\REGISTRY\\\\MACHINE\\\\SYSTEM\\\\CurrentControlSet\\\\Services\\\\WinTapix, \\\\REGISTRY\\\\MACHINE\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\SafeBoot\\\\Minimal\\\\WinTapix.sys, \\\\REGISTRY\\\\MACHINE\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\SafeBoot\\\\Network\\\\WinTapix.sys. Monitor these keys with ZwNotifyChangeKey().",
+      "code_language": "C (Windows kernel API)",
+      "code_behavior": "At driver load, the code creates and monitors registry keys to ensure the driver loads at boot and in Safe Boot, and can restore itself if removed.",
+      "malice_analysis": {
+        "why_suspicious": "Persistence in Safe Boot is highly unusual and indicates intent to survive remediation.",
+        "violated_expectations": "Legitimate drivers rarely, if ever, register themselves for Safe Boot and do not monitor registry keys for self-restoration.",
+        "similar_legitimate_use": "Some legitimate security software may monitor registry keys, but not for self-reinstatement after removal.",
+        "key_indicators": [
+          "Safe Boot persistence",
+          "Registry key monitoring for self-healing",
+          "Multiple persistence locations"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "driver load (file monitoring)",
+        "file_location": "WinTapix.sys / filesystem",
+        "required_permissions": [
+          "filesystem",
+          "kernel"
+        ]
+      },
+      "code_snippet": "Start a thread with PsCreateSystemThread() to monitor the file location of Wintapix.sys using NtNotifyChangeDirectoryFile(). If the driver file is deleted, write it back to the same location.",
+      "code_language": "C (Windows kernel API)",
+      "code_behavior": "At driver load, the code spawns a system thread to monitor its own file on disk and restores it if deleted, ensuring persistent presence.",
+      "malice_analysis": {
+        "why_suspicious": "Self-restoration after deletion is a hallmark of malware persistence and anti-forensics.",
+        "violated_expectations": "Legitimate drivers do not monitor or restore their own files if deleted.",
+        "similar_legitimate_use": "Some advanced security agents may attempt self-repair, but not at the kernel level.",
+        "key_indicators": [
+          "File monitoring for self-reinstatement",
+          "Kernel thread for persistence",
+          "Immediate file restoration"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "post-injection (user-mode, after shellcode execution)",
+        "file_location": "Injected shellcode (Donut-generated) in target process",
+        "required_permissions": [
+          "process",
+          "memory",
+          "network"
+        ]
+      },
+      "code_snippet": "Decrypted Donut shellcode loads and executes an encrypted .NET payload from memory.",
+      "code_language": "x86 shellcode (Donut framework)",
+      "code_behavior": "After injection, the shellcode decrypts and loads a .NET assembly in memory, enabling execution of the next-stage payload without touching disk.",
+      "malice_analysis": {
+        "why_suspicious": "In-memory decryption and execution of .NET payloads is a common malware evasion technique.",
+        "violated_expectations": "Legitimate code does not inject and execute arbitrary .NET assemblies in this manner.",
+        "similar_legitimate_use": "Red-team tools and some advanced security products may use in-memory execution for testing, but not in production environments.",
+        "key_indicators": [
+          "Donut shellcode usage",
+          "In-memory .NET payload execution",
+          "No disk artifacts for payload"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "runtime (user-mode, .NET payload execution)",
+        "file_location": "Decrypted .NET assembly in memory",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "HTTP listener on IIS server URLs (constructed from decoded arrays). If request contains 'wOxhuoSBgpGcnLQZxipa', respond with 'UsEPTIkCRUwarKZfRnyjcG13DFA'. If request has 'Jet' or ' Ver' parameter, base64-decode and execute as 'cmd /c <command>' and return output. If request body present, decrypt and: (a) execute command, (b) upload file, (c) download file.",
+      "code_language": "C# (.NET)",
+      "code_behavior": "At runtime, the .NET payload acts as a backdoor, listening on specific IIS URLs for commands, executing arbitrary code, and handling file uploads/downloads, all with simple XOR encryption for C2 traffic.",
+      "malice_analysis": {
+        "why_suspicious": "Arbitrary command execution and file transfer over HTTP endpoints is classic backdoor behavior.",
+        "violated_expectations": "Legitimate IIS modules do not provide covert command execution or file transfer endpoints.",
+        "similar_legitimate_use": "Remote administration tools may have similar features, but are not covertly injected or hidden.",
+        "key_indicators": [
+          "Hidden HTTP endpoints for C2",
+          "Command execution via HTTP",
+          "Custom XOR encryption for C2",
+          "File upload/download via HTTP"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_6",
+      "execution_context": {
+        "trigger": "runtime (user-mode, .NET payload execution)",
+        "file_location": "Decrypted .NET assembly in memory",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "Proxy listener on IIS URLs (from 'input' array). Accepts data streams, including RDP configuration, and proxies connections to remote RDP servers.",
+      "code_language": "C# (.NET)",
+      "code_behavior": "At runtime, the .NET payload establishes proxy listeners on IIS endpoints, enabling the attacker to tunnel arbitrary data (including RDP sessions) through the compromised host.",
+      "malice_analysis": {
+        "why_suspicious": "Covert proxying of RDP and other data streams is a common lateral movement and C2 technique.",
+        "violated_expectations": "IIS servers should not proxy RDP or arbitrary data for external parties.",
+        "similar_legitimate_use": "Legitimate reverse proxies exist, but are not covertly injected or hidden in this manner.",
+        "key_indicators": [
+          "Proxying RDP via HTTP endpoints",
+          "Hidden listeners on IIS",
+          "No user-facing configuration"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious driver (WinTapix.sys/SRVNET2.SYS) is loaded into the Windows kernel, possibly via a vulnerable legitimate driver.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Kernel-level persistence and setup for code injection."
+    },
+    {
+      "step": 2,
+      "action": "Driver injects embedded shellcode into a privileged 32-bit process running as SYSTEM.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Execution of shellcode in user-mode with high privileges."
+    },
+    {
+      "step": 3,
+      "action": "Injected shellcode decrypts and loads a .NET payload in memory.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Execution of .NET backdoor and proxy functionality."
+    },
+    {
+      "step": 4,
+      "action": "The .NET payload establishes HTTP listeners on IIS endpoints for C2, command execution, file transfer, and proxying (including RDP).",
+      "implemented_by": [
+        "snippet_5",
+        "snippet_6"
+      ],
+      "leads_to": "Attacker gains persistent, covert remote access and lateral movement capabilities."
+    },
+    {
+      "step": 5,
+      "action": "Driver and registry/file monitoring ensure persistence, self-healing, and resistance to removal.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Continued presence and re-infection if removal is attempted."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Kernel driver injecting shellcode into user-mode processes",
+      "Creation of registry keys for Safe Boot persistence",
+      "Monitoring and restoration of driver file and registry keys",
+      "In-memory decryption and execution of .NET payloads",
+      "IIS HTTP endpoints handling command execution and file transfer",
+      "Covert proxying of RDP/data streams via IIS"
+    ],
+    "file_indicators": [
+      "WinTapix.sys",
+      "SRVNET2.SYS",
+      "Injected shellcode (Donut-generated)",
+      "Unusual registry keys: SYSTEM\\CurrentControlSet\\Services\\WinTapix, ...\\SafeBoot\\Minimal\\WinTapix.sys, ...\\SafeBoot\\Network\\WinTapix.sys"
+    ],
+    "network_indicators": [
+      "HTTP requests to non-standard IIS endpoints (constructed from suspicious arrays)",
+      "C2 traffic with XOR-encrypted payloads",
+      "RDP traffic tunneled over HTTP"
+    ],
+    "how_to_detect": "Monitor for unsigned or suspicious kernel drivers (WinTapix.sys, SRVNET2.SYS) being loaded, especially those creating Safe Boot registry keys. Detect process injection from kernel mode into 32-bit SYSTEM processes. Watch for IIS servers exposing hidden HTTP endpoints that accept commands or proxy RDP. Look for in-memory .NET assemblies loaded by Donut shellcode. Alert on registry/file monitoring and self-restoration behaviors. Correlate with network traffic to unusual IIS paths, especially if carrying XOR-encrypted data or RDP streams."
+  }
+}

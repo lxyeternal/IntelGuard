@@ -1,0 +1,104 @@
+{
+  "package_info": {
+    "package_name": "pac-resolver",
+    "package_manager": "npm",
+    "package_versions": "<5.0.0",
+    "why_malicious": "The package is vulnerable to remote code execution (RCE) when parsing attacker-controlled PAC files. Malicious JavaScript within a PAC file can escape the intended sandbox and execute arbitrary code in the Node.js process, leading to full compromise of the host environment. The vulnerability is due to unsafe use of the Node.js 'vm' module in the dependency chain (degenerator), which fails to provide a secure sandbox and allows untrusted code to access sensitive process resources."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when parsing PAC file)",
+        "file_location": "User-supplied PAC file (parsed by pac-resolver via degenerator)",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars",
+          "process control"
+        ]
+      },
+      "code_snippet": "var f = this.constructor.constructor(`\n    // Running outside the sandbox:\n    console.log('Read env vars:', process.env);\n    console.log('!!! PAC file is running arbitrary code !!!');\n    console.log('Can read & could exfiltrate env vars ^');\n    console.log('Can kill parsing process, like so:');\n    process.exit(100); // Kill the vulnerable process\n    // etc etc\n`);\n\nf();",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code is executed when a PAC file is parsed, uses the Function constructor to escape the intended JavaScript sandbox, accesses process.env to read environment variables, and calls process.exit to terminate the process, resulting in arbitrary code execution and potential data exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "The code leverages the Function constructor (this.constructor.constructor) within a user-supplied PAC file to break out of the JavaScript sandbox, directly accessing Node.js process resources such as environment variables and process control functions.",
+        "violated_expectations": "PAC files are expected to contain only proxy selection logic and should not be able to access process-level resources or execute arbitrary code outside the intended PAC evaluation context.",
+        "similar_legitimate_use": "The Function constructor may be used for dynamic code generation in trusted, internal scripts, but it is never appropriate to use it with untrusted, user-supplied code in a security-sensitive context such as PAC file evaluation.",
+        "key_indicators": [
+          "Use of this.constructor.constructor (Function constructor) in user-supplied PAC file",
+          "Access to process.env from PAC file context",
+          "Invocation of process.exit() from PAC file",
+          "Execution of arbitrary code outside intended PAC logic"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when parsing PAC file)",
+        "file_location": "degenerator module (degenerator.compile), invoked by pac-resolver",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars",
+          "process control"
+        ]
+      },
+      "code_snippet": "const vm = require(\"vm\");\nconst env = vm.runInNewContext(`this.constructor.constructor('return this.process.env')()`);\nconsole.log(env);",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, when a PAC file is parsed, the code uses vm.runInNewContext to execute attacker-supplied JavaScript, which escapes the sandbox using the Function constructor to access process.env, enabling reading and potential exfiltration of environment variables.",
+      "malice_analysis": {
+        "why_suspicious": "The code demonstrates a known sandbox escape technique by combining vm.runInNewContext with the Function constructor, allowing attacker-supplied code to break out of the intended isolation and access sensitive process data.",
+        "violated_expectations": "The vm module is intended to provide isolation for untrusted code, but here it is misused, allowing untrusted PAC file code to escape the sandbox and access the host environment.",
+        "similar_legitimate_use": "vm.runInNewContext is used for sandboxing in some applications, but it should never be used with untrusted input unless strict context controls are enforced to prevent access to sensitive objects.",
+        "key_indicators": [
+          "Use of vm.runInNewContext with attacker-controlled input",
+          "Sandbox escape via this.constructor.constructor",
+          "Access to process.env from within a supposed sandbox"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious PAC file containing JavaScript that uses the Function constructor to escape the sandbox.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Execution of arbitrary code in the Node.js process"
+    },
+    {
+      "step": 2,
+      "action": "pac-resolver parses the PAC file and, via degenerator, executes the malicious code using the vm module.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Malicious code runs with full access to process.env and process control"
+    },
+    {
+      "step": 3,
+      "action": "Malicious code reads environment variables, prints or exfiltrates them, and can terminate the process or perform other malicious actions.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Full compromise of the Node.js process and potential data exfiltration"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Execution of user-supplied PAC files containing Function constructor or this.constructor.constructor",
+      "Access to process.env or process.exit from within PAC file context",
+      "Use of vm.runInNewContext with untrusted input"
+    ],
+    "file_indicators": [
+      "PAC files with embedded Function constructor usage",
+      "PAC files containing references to process.env or process.exit"
+    ],
+    "network_indicators": [
+      "Unexpected outbound connections initiated during PAC file parsing (if exfiltration is attempted)",
+      "Unusual traffic patterns following PAC file updates"
+    ],
+    "how_to_detect": "Monitor for PAC files or scripts that use the Function constructor, this.constructor.constructor, or access process.env/process.exit. Audit usage of the vm module in application dependencies, especially where untrusted input is parsed. Flag any PAC file parsing that results in process termination or access to sensitive environment variables. Use static analysis to detect dangerous patterns in PAC files and dynamic monitoring to catch unexpected process behaviors during PAC file evaluation."
+  }
+}

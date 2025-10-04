@@ -1,0 +1,103 @@
+{
+  "package_info": {
+    "package_name": "Samba (vfs_fruit module)",
+    "package_manager": "native Linux package managers (apt, yum, etc.)",
+    "package_versions": "< 4.13.17, < 4.14.12, < 4.15.5",
+    "why_malicious": "The vulnerable versions of Samba, when configured with the vfs_fruit module, contain out-of-bounds read and heap-based buffer overflow vulnerabilities in the handling of AppleDouble metadata streams. These flaws allow unauthenticated or authenticated attackers to trigger memory disclosure and remote code execution by uploading and manipulating files with crafted metadata."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, when a client accesses the :AFP_AfpInfo stream via SMB/AFP request",
+        "file_location": "source3/modules/vfs_fruit/adouble.c (fruit_pread_meta_adouble function)",
+        "required_permissions": [
+          "filesystem (write access to Samba share)",
+          "network (SMB or AFP access to share)"
+        ]
+      },
+      "code_snippet": "ad = ad_fget(talloc_tos(), handle, fsp, ADOUBLE_META);\nif (ad == NULL) {\n nread = -1;\n goto fail;\n}\np = ad_get_entry(ad, ADEID_FINDERI);\nif (p == NULL) {\n DBG_ERR(\"No ADEID_FINDERI for [%s]\\n\", fsp_str_dbg(fsp));\n nread = -1;\n goto fail;\n}\nmemcpy(&ai->afpi_FinderInfo[0], p, ADEDLEN_FINDERI);",
+      "code_language": "c",
+      "code_behavior": "At runtime, when a client accesses the :AFP_AfpInfo stream via SMB/AFP, the code reads AppleDouble metadata from a file uploaded by the client, retrieves a pointer to the ADEID_FINDERI entry, and copies its contents into a fixed-size buffer using memcpy without validating the entry's length, resulting in a heap out-of-bounds read and potential heap memory disclosure.",
+      "malice_analysis": {
+        "why_suspicious": "The code copies data from a pointer derived from attacker-controlled AppleDouble metadata without verifying the size or bounds of the entry, allowing an attacker to craft metadata that causes memcpy to read beyond the allocated buffer and leak heap memory.",
+        "violated_expectations": "Normal behavior would require strict validation of the metadata entry's size and bounds before copying to a fixed-size buffer. Here, the unchecked memcpy allows reading arbitrary heap memory, violating memory safety expectations.",
+        "similar_legitimate_use": "Legitimate use would involve copying validated AppleDouble metadata for FinderInfo support, but always with strict bounds checking to prevent memory disclosure.",
+        "key_indicators": [
+          "memcpy from attacker-controlled pointer without bounds check",
+          "use of ad_get_entry on untrusted AppleDouble metadata",
+          "heap out-of-bounds read vulnerability in fruit_pread_meta_adouble",
+          "lack of length validation for ADEID_FINDERI entry"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "At runtime, when a client updates file date metadata via SMB/AFP request",
+        "file_location": "source3/modules/vfs_fruit/adouble.c (ad_setdate function)",
+        "required_permissions": [
+          "filesystem (write access to Samba share)",
+          "network (SMB or AFP access to share)"
+        ]
+      },
+      "code_snippet": "p = ad_get_entry(ad, ADEID_FILEDATESI);\nif (p == NULL) {\n return -1;\n}\n...\nmemcpy(p + dateoff, &date, sizeof(date));",
+      "code_language": "c",
+      "code_behavior": "At runtime, when a client updates file date metadata via SMB/AFP, the code retrieves a pointer to the ADEID_FILEDATESI entry from attacker-controlled AppleDouble metadata and writes a 4-byte date value to it using memcpy without validating the buffer size or offset, resulting in a heap-based buffer overflow and potential memory corruption.",
+      "malice_analysis": {
+        "why_suspicious": "The code writes to a buffer derived from untrusted AppleDouble metadata without checking the pointer or available space, enabling an attacker to craft metadata that causes memcpy to overflow the heap and corrupt memory.",
+        "violated_expectations": "Normal behavior would ensure the destination buffer is within the bounds of the allocated entry before writing. Here, unchecked memcpy allows buffer overflow, violating memory safety and integrity.",
+        "similar_legitimate_use": "Legitimate use would update file date metadata only after validating the entry and offset to prevent overflows.",
+        "key_indicators": [
+          "memcpy to attacker-controlled pointer without bounds check",
+          "heap-based buffer overflow vulnerability in ad_setdate",
+          "lack of validation on ADEID_FILEDATESI entry and offset",
+          "write operation to untrusted AppleDouble metadata"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker uploads a specially crafted file to a Samba share with the vfs_fruit module enabled, embedding malicious AppleDouble metadata in the :AFP_AfpInfo stream.",
+      "implemented_by": [],
+      "leads_to": "Preparation for triggering memory corruption or disclosure via SMB/AFP operations."
+    },
+    {
+      "step": 2,
+      "action": "Attacker triggers a metadata read operation (fruit_pread_meta_adouble), causing a heap out-of-bounds read and leaking heap memory contents.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Heap memory disclosure, providing information for exploit development and bypassing memory protections."
+    },
+    {
+      "step": 3,
+      "action": "Attacker triggers a metadata write operation (ad_setdate), causing a heap-based buffer overflow and corrupting memory.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Remote code execution on the Samba server due to heap corruption."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "SMB/AFP requests that access or modify :AFP_AfpInfo or AFP_Resource streams with malformed or oversized AppleDouble metadata entries",
+      "Unusual or failed attempts to read/write extended attributes or alternate data streams on Samba shares",
+      "Heap memory access violations, segmentation faults, or crashes in Samba processes (smbd) when handling AppleDouble metadata",
+      "Unexpected memory disclosure or abnormal responses to SMB/AFP metadata queries"
+    ],
+    "file_indicators": [
+      "Files uploaded to Samba shares containing malformed or abnormally large :AFP_AfpInfo streams",
+      "AppleDouble files with ADEID_FINDERI or ADEID_FILEDATESI entries exceeding expected sizes",
+      "Presence of :AFP_AfpInfo or AFP_Resource streams with non-standard or corrupted metadata"
+    ],
+    "network_indicators": [
+      "SMB/AFP traffic containing alternate data streams targeting :AFP_AfpInfo or AFP_Resource",
+      "Unusual write operations to Samba shares from guest or untrusted users, especially involving AppleDouble metadata",
+      "Repeated or automated SMB/AFP requests attempting to read or write extended attributes"
+    ],
+    "how_to_detect": "Monitor Samba logs and network traffic for access to :AFP_AfpInfo and AFP_Resource streams, especially from guest or untrusted users. Look for failed or abnormal extended attribute operations, segmentation faults, or memory access violations in Samba processes. Scan for files with malformed or oversized AppleDouble metadata entries, and regularly audit shares for the presence of the vfs_fruit module in smb.conf. Restrict write access to trusted users and use memory protection tools to detect heap overflows or out-of-bounds reads in Samba processes."
+  }
+}

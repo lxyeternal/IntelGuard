@@ -1,0 +1,103 @@
+{
+  "package_info": {
+    "package_name": "Realtek RTL8710C Wi-Fi Module Firmware",
+    "package_manager": "embedded firmware (Realtek Ameba SDK / ambz2)",
+    "package_versions": "All versions prior to January 11, 2021 (patched in ambz2 SDK 7.1d and later)",
+    "why_malicious": "The firmware contains two critical stack-based buffer overflow vulnerabilities (CVE-2020-27301, CVE-2020-27302) in the WPA2 key parsing logic. These flaws allow a remote attacker on the same Wi-Fi network, with knowledge of the pre-shared key (PSK), to send specially crafted EAPOL-Key messages during the WPA2 handshake. This can trigger stack overflows and enable remote code execution on the Wi-Fi module, potentially compromising the host system."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "During WPA2 4-way handshake (Message 3/EAPOL-Key processing)",
+        "file_location": "DecGTK() function in WPA2 client firmware (binary, not source-level)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "AES_UnWRAP(EapolKeyMsgRecvd.Octet[113], tmp2, v__size_1); // v__size_1 is user-controlled, tmp2 is fixed size (0x101 bytes)",
+      "code_language": "C (embedded/firmware)",
+      "code_behavior": "During WPA2 4-way handshake (Message 3/EAPOL-Key processing), the code decrypts attacker-supplied data (encrypted GTK) of user-controlled length (v__size_1) into a fixed-size stack buffer (tmp2), resulting in a stack-based buffer overflow and enabling potential remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The AES_UnWRAP function uses a length parameter (v__size_1) that is directly controlled by the attacker via network input, allowing arbitrary-length data to be decrypted into a fixed-size stack buffer (tmp2) without any bounds checking. This creates a classic stack-based buffer overflow vulnerability.",
+        "violated_expectations": "In secure WPA2 key parsing, the length of decrypted data must always be validated to ensure it does not exceed the size of the destination buffer. User-controlled lengths should never be used directly in memory operations without strict bounds checks.",
+        "similar_legitimate_use": "Legitimate WPA2 handshake processing decrypts the GTK using AES_UnWRAP, but always with strict validation of the input length to match protocol specifications and buffer sizes.",
+        "key_indicators": [
+          "User-controlled length parameter (v__size_1) derived from EAPOL-Key message",
+          "No bounds check before writing to fixed-size stack buffer (tmp2, 0x101 bytes)",
+          "AES_UnWRAP operation performed on attacker-supplied data",
+          "Potential for stack-based buffer overflow due to unchecked length"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "During WPA2 4-way handshake (Message 3/EAPOL-Key processing, after AES_UnWRAP)",
+        "file_location": "DecGTK() function in WPA2 client firmware (binary, not source-level)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "_wrap_memcpy(kout, &tmp2[8], v__size_1); // kout is fixed-size (0x80 bytes), v__size_1 is user-controlled",
+      "code_language": "C (embedded/firmware)",
+      "code_behavior": "During WPA2 4-way handshake (Message 3/EAPOL-Key processing, after AES_UnWRAP), the code copies an attacker-controlled length (v__size_1) from a stack buffer (tmp2) to another fixed-size stack buffer (kout), resulting in a second stack-based buffer overflow and enabling potential remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The _wrap_memcpy function copies data from tmp2 to kout using a length (v__size_1) that is attacker-controlled and not validated against the size of kout (0x80 bytes). This allows an attacker to overwrite the stack beyond kout's boundaries, leading to code execution.",
+        "violated_expectations": "Legitimate memcpy operations in cryptographic key handling must always ensure the copy length does not exceed the destination buffer size. Using a user-controlled length without validation is a critical security flaw.",
+        "similar_legitimate_use": "Copying decrypted GTK to an output buffer is normal in WPA2 handshake processing, but only after confirming the length is within the buffer's capacity as per protocol requirements.",
+        "key_indicators": [
+          "User-controlled length (v__size_1) from EAPOL-Key message",
+          "No bounds check before copying to fixed-size stack buffer (kout, 0x80 bytes)",
+          "memcpy operation (_wrap_memcpy) with attacker-supplied length",
+          "Stack-based buffer overflow risk due to unchecked copy length"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sniffs Wi-Fi traffic to identify the victim's SSID and prepares a malicious access point (AP) with the same SSID.",
+      "implemented_by": [],
+      "leads_to": "Victim device attempts to connect to the attacker's AP."
+    },
+    {
+      "step": 2,
+      "action": "Attacker deauthenticates the victim from the legitimate AP and lures it to connect to the malicious AP.",
+      "implemented_by": [],
+      "leads_to": "Victim device initiates WPA2 handshake with the attacker's AP."
+    },
+    {
+      "step": 3,
+      "action": "During the WPA2 handshake, attacker sends a crafted EAPOL-Key message (Message 3) with an abnormally large encrypted GTK value and manipulated length field.",
+      "implemented_by": [],
+      "leads_to": "Victim device processes the malicious EAPOL-Key message."
+    },
+    {
+      "step": 4,
+      "action": "Victim device's firmware calls DecGTK(), which performs unsafe AES_UnWRAP and _wrap_memcpy operations with attacker-controlled lengths, causing stack overflows.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Stack overflow, return address overwrite, and potential remote code execution on the Wi-Fi module (and possibly root access on the host OS)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "WPA2 handshake processing where buffer sizes are derived from user-controlled network input",
+      "AES decryption (AES_UnWRAP) or memcpy operations using lengths from EAPOL-Key messages without validation",
+      "Stack buffer overflows triggered by parsing EAPOL-Key (Message 3) frames with oversized GTK fields"
+    ],
+    "file_indicators": [
+      "Firmware binaries for Realtek RTL8710C/RTL8195A modules built before January 11, 2021",
+      "Presence of DecGTK(), AES_UnWRAP(), or _wrap_memcpy() routines in firmware without input length validation"
+    ],
+    "network_indicators": [
+      "EAPOL-Key (Message 3) frames containing GTK payloads significantly larger than protocol specification (e.g., >32 bytes)",
+      "Repeated deauthentication and reconnection attempts to access points with duplicate SSIDs in a short timeframe"
+    ],
+    "how_to_detect": "Monitor WPA2 handshake traffic for EAPOL-Key (Message 3) frames with GTK fields exceeding expected lengths (e.g., >32 bytes). Analyze firmware binaries for unsafe memory operations (such as AES_UnWRAP or memcpy) where the length parameter is derived from network input without bounds checking. Flag devices running Realtek RTL8710C/RTL8195A firmware versions built before January 11, 2021. Use network intrusion detection systems to alert on repeated deauthentication and reconnection patterns to APs with matching SSIDs, and on malformed handshake messages with abnormal GTK sizes."
+  }
+}

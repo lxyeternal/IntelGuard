@@ -1,0 +1,154 @@
+{
+  "package_info": {
+    "package_name": "Zenly",
+    "package_manager": "proprietary/mobile app backend (rpc.znly.co API)",
+    "package_versions": "prior to 13-Jul-2021 (Account Takeover) and 20-Sep-2021 (User Data Exposure) fixes",
+    "why_malicious": "The Zenly backend API exposed critical vulnerabilities that allowed unauthorized access to user phone numbers and enabled account takeover attacks, violating user privacy and security expectations."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (friend request initiation)",
+        "file_location": "rpc.znly.co/zenly.protobuf.services.ZenlyService/FriendRequestCreate endpoint",
+        "required_permissions": [
+          "network",
+          "access to user identifiers"
+        ]
+      },
+      "code_snippet": "POST /zenly.protobuf.services.ZenlyService/FriendRequestCreate { ... } // Response contains both requestor and target phone numbers, even if not friends",
+      "code_language": "protobuf/gRPC API",
+      "code_behavior": "At runtime, when a friend request is initiated (even if not accepted), the API returns the phone number of the target user in the response, enabling unauthorized PII exposure.",
+      "malice_analysis": {
+        "why_suspicious": "Returning sensitive PII (phone number) of a user to any requester, regardless of friendship status, is a direct privacy violation.",
+        "violated_expectations": "Normally, user PII should only be accessible to trusted contacts or after explicit consent; here, it is exposed to any user who initiates a friend request.",
+        "similar_legitimate_use": "Legitimate use would be returning only non-sensitive identifiers or requiring mutual consent before sharing PII.",
+        "key_indicators": [
+          "PII (phone number) in API response to unauthenticated/unauthorized request",
+          "No verification of friend status before exposing data"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (public friend list enumeration)",
+        "file_location": "rpc.znly.co/zenly.protobuf.services.ZenlyService/UserPublicFriends endpoint",
+        "required_permissions": [
+          "network",
+          "access to user identifiers"
+        ]
+      },
+      "code_snippet": "POST /zenly.protobuf.services.ZenlyService/UserPublicFriends { username: 'target' } // Response: exhaustive list of friends' usernames",
+      "code_language": "protobuf/gRPC API",
+      "code_behavior": "At runtime, the API returns an exhaustive list of a user's friends (including their usernames), enabling attackers to chain requests and enumerate social graphs for further exploitation.",
+      "malice_analysis": {
+        "why_suspicious": "Exposing the full list of friends and their usernames to any requester allows for social graph mapping and targeted attacks.",
+        "violated_expectations": "Normally, friend lists should be private or only partially visible, not fully exposed via API.",
+        "similar_legitimate_use": "Showing mutual friends or limited friend previews in social apps.",
+        "key_indicators": [
+          "Full friend list exposure via API",
+          "No access control on friend enumeration"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (authentication flow)",
+        "file_location": "rpc.znly.co/zenly.protobuf.services.ZenlyService/SessionCreate endpoint",
+        "required_permissions": [
+          "network",
+          "access to phone number"
+        ]
+      },
+      "code_snippet": "POST /zenly.protobuf.services.ZenlyService/SessionCreate { phone_number: '+3519XXXXXX9' } // Response: { session_token: 's-RR01XNFD1b3OSfuyh2g6BPuPrmpfPRnS' }",
+      "code_language": "protobuf/gRPC API",
+      "code_behavior": "At runtime, the API returns the same session token for repeated requests with the same phone number, allowing an attacker to obtain a valid session token for a victim.",
+      "malice_analysis": {
+        "why_suspicious": "Session tokens should be unique per authentication attempt and not shared between users; reusing tokens enables session hijacking.",
+        "violated_expectations": "Normally, each authentication attempt should generate a new, unique session token.",
+        "similar_legitimate_use": "None; session token reuse is always a security risk.",
+        "key_indicators": [
+          "Session token reuse for same phone number",
+          "No per-attempt token uniqueness"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (authentication verification)",
+        "file_location": "rpc.znly.co/zenly.protobuf.services.ZenlyService/SessionVerify endpoint",
+        "required_permissions": [
+          "network",
+          "session token"
+        ]
+      },
+      "code_snippet": "POST /zenly.protobuf.services.ZenlyService/SessionVerify { session_token: 's-RR01XNFD1b3OSfuyh2g6BPuPrmpfPRnS', code: '1234' } // Both attacker and victim session tokens become valid",
+      "code_language": "protobuf/gRPC API",
+      "code_behavior": "At runtime, when the legitimate user verifies their session, the session token (shared with attacker) becomes valid for both, enabling account takeover.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing multiple parties to share a session token and gain access after one verifies the code is a critical authentication flaw.",
+        "violated_expectations": "Session tokens should be single-use and bound to a single authentication context.",
+        "similar_legitimate_use": "None; this is a direct violation of authentication best practices.",
+        "key_indicators": [
+          "Session token becomes valid for multiple parties",
+          "No binding of session token to unique device/user"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker enumerates friends of a target using the UserPublicFriends endpoint to discover usernames.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Obtaining the username of the victim."
+    },
+    {
+      "step": 2,
+      "action": "Attacker initiates a friend request to the victim using the FriendRequestCreate endpoint, receiving the victim's phone number in the response.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Obtaining the victim's phone number for further attacks."
+    },
+    {
+      "step": 3,
+      "action": "Attacker uses the victim's phone number to call SessionCreate and obtain the session token.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Obtaining a valid session token for the victim."
+    },
+    {
+      "step": 4,
+      "action": "When the victim completes SMS verification, the session token becomes valid for both attacker and victim, enabling account takeover.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Attacker gains full access to victim's account and data."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "API responses containing PII (phone numbers) to unauthorized users",
+      "Unusual enumeration of friend lists via API",
+      "Multiple SessionCreate requests for the same phone number in a short time",
+      "Session tokens reused across multiple authentication attempts"
+    ],
+    "file_indicators": [
+      "API endpoints: /UserPublicFriends, /FriendRequestCreate, /SessionCreate, /SessionVerify",
+      "Responses containing both requestor and target PII"
+    ],
+    "network_indicators": [
+      "High volume of POST requests to /UserPublicFriends and /FriendRequestCreate",
+      "Multiple /SessionCreate requests for the same phone number from different IPs",
+      "Session tokens observed in multiple sessions/devices"
+    ],
+    "how_to_detect": "Monitor API traffic for excessive friend list enumerations, friend requests that do not result in accepted friendships, and repeated SessionCreate calls for the same phone number. Flag API responses that include PII for users who are not mutual friends. Detect session tokens being used from multiple IPs or devices, and alert on session token reuse across authentication attempts."
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "package_info": {
+    "package_name": "CivetWeb",
+    "package_manager": "source (C/C++ library)",
+    "package_versions": "1.8 to 1.14 (inclusive)",
+    "why_malicious": "The affected CivetWeb versions contain a directory traversal vulnerability in the file upload handler. This allows attackers to upload files to arbitrary locations on the server filesystem by supplying crafted filenames, potentially leading to remote code execution if executable files are placed in sensitive directories. The vulnerability is due to insufficient sanitization of user-supplied filenames and ineffective path validation on non-Windows platforms."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP file upload handling)",
+        "file_location": "mg_handle_form_request API (CivetWeb core library)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "mg_handle_form_request(conn, field_found, user_data); // field_found returns MG_FORM_FIELD_STORAGE_STORE and sets path = filename (from user input)",
+      "code_language": "c",
+      "code_behavior": "At runtime, when handling an HTTP file upload, the code takes the filename from user-supplied form data and assigns it directly to the path output argument, which is then used to create a file on the server filesystem without sanitization, resulting in the possibility of directory traversal and arbitrary file placement.",
+      "malice_analysis": {
+        "why_suspicious": "The code directly uses user-supplied filenames as file paths for uploaded files, enabling attackers to specify paths that traverse directories and write files outside the intended upload directory.",
+        "violated_expectations": "Standard file upload handlers sanitize and restrict filenames to prevent directory traversal, but this implementation trusts user input without validation.",
+        "similar_legitimate_use": "Legitimate file upload handlers may use user-supplied filenames, but only after sanitizing input and enforcing storage within a designated directory.",
+        "key_indicators": [
+          "Direct assignment of user-supplied filename to file path variable",
+          "Absence of filename/path sanitization before file creation",
+          "Callback function (field_found) sets path based on user input",
+          "No enforcement of upload directory boundaries"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (file creation during upload)",
+        "file_location": "mg_fopen (CivetWeb core library)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "if (!mg_path_suspicious(path)) { file = fopen(path, \"wb\"); }",
+      "code_language": "c",
+      "code_behavior": "At runtime, the code checks if the path is suspicious using mg_path_suspicious, but on Linux/OSX this function does not check for directory traversal, so arbitrary paths are allowed and files are created wherever the attacker specifies, including sensitive directories.",
+      "malice_analysis": {
+        "why_suspicious": "The path validation function mg_path_suspicious is ineffective on non-Windows platforms, failing to detect directory traversal patterns and allowing attackers to create files in arbitrary locations.",
+        "violated_expectations": "Path validation should prevent directory traversal on all supported platforms, but here it only works on Windows, leaving Linux/OSX systems vulnerable.",
+        "similar_legitimate_use": "Path validation is a standard security measure, but it must be implemented to cover all platforms and detect traversal attempts.",
+        "key_indicators": [
+          "Platform-specific path validation (ineffective on Linux/OSX)",
+          "File creation based on unchecked user input",
+          "No check for '../' or absolute paths in filename",
+          "Use of fopen with user-controlled path"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits a file upload form with a crafted filename containing directory traversal sequences (e.g., '../../tmp/malicious.sh').",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Server processes the upload and sets the file path to the attacker-controlled value."
+    },
+    {
+      "step": 2,
+      "action": "Server calls mg_fopen to create the file at the attacker-specified path without proper sanitization.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary file is written to the filesystem, potentially overwriting sensitive files or placing executables in privileged locations."
+    },
+    {
+      "step": 3,
+      "action": "Attacker triggers execution of the uploaded file (e.g., via web server functionality or by exploiting overwritten files), leading to remote code execution.",
+      "implemented_by": [],
+      "leads_to": "Remote code execution or privilege escalation."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "File uploads resulting in files being written outside the intended upload directory",
+      "User-supplied filenames containing '../' or other directory traversal patterns in upload requests",
+      "File creation operations where the file path is derived directly from unsanitized user input in CivetWeb-based applications"
+    ],
+    "file_indicators": [
+      "Unexpected files appearing in sensitive directories such as /etc, /var/www, or /tmp after file uploads",
+      "Uploaded files with names containing directory traversal sequences (e.g., '../../', '..\\')"
+    ],
+    "network_indicators": [
+      "HTTP POST requests to file upload endpoints with suspicious filename parameters containing directory traversal patterns (e.g., '../../', '..\\')"
+    ],
+    "how_to_detect": "Monitor file upload endpoints for user-supplied filenames containing directory traversal patterns such as '../' or '..\\'. Audit file creation logs for files written outside the designated upload directory, especially in CivetWeb-based applications. Use static analysis to detect code paths where user input is used directly as a file path without sanitization, focusing on uses of mg_handle_form_request and mg_fopen."
+  }
+}

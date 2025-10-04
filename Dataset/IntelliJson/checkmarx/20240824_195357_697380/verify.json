@@ -1,0 +1,134 @@
+{
+  "package_info": {
+    "package_name": "org.apache.dubbo:dubbo-remoting-http",
+    "package_manager": "Maven",
+    "package_versions": "<=2.7.3",
+    "why_malicious": "Dubbo HTTP Remoting in versions <=2.7.3 is vulnerable to unauthenticated remote code execution due to unsafe deserialization of untrusted data via the Spring HttpInvokerServiceExporter. This allows attackers to execute arbitrary OS commands on the server by sending a crafted HTTP POST request containing a malicious serialized object, requiring only knowledge of the exposed bean URL."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (upon receiving an HTTP POST request to a Dubbo HTTP endpoint)",
+        "file_location": "org.springframework.remoting.httpinvoker.HttpInvokerServiceExporter (Spring bean exposed by Dubbo HTTP service)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "ObjectInputStream ois = new ObjectInputStream(request.getInputStream());\nObject obj = ois.readObject();",
+      "code_language": "java",
+      "code_behavior": "At runtime, upon receiving an HTTP POST request to a Dubbo HTTP endpoint, the code deserializes arbitrary objects from the HTTP request body using ObjectInputStream, allowing attacker-supplied data to be loaded into memory, which can trigger malicious gadget chains and result in arbitrary code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing untrusted data with ObjectInputStream is a critical security flaw, as it enables attackers to supply objects that can execute arbitrary code during deserialization if suitable gadget classes are present.",
+        "violated_expectations": "Secure implementations restrict deserialization to a safe, whitelisted set of classes or use safer serialization formats (such as JSON or XML). Here, any class on the classpath can be deserialized from untrusted network input, violating secure coding practices.",
+        "similar_legitimate_use": "Deserialization of trusted, authenticated internal messages between services, with strict class whitelisting and input validation.",
+        "key_indicators": [
+          "Use of ObjectInputStream on HTTP request input stream",
+          "No class whitelist or input validation before deserialization",
+          "Direct mapping of HTTP POST body to Java object deserialization"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (triggered during deserialization of attacker-supplied object)",
+        "file_location": "Gadget chain: HashMap<HotSwappableTargetSource, HotSwappableTargetSource> containing JSONObject and XString",
+        "required_permissions": [
+          "reflection",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "TemplatesImpl tmpl = new TemplatesImpl();\n// ... setup malicious bytecode ...\ntmpl.getOutputProperties(); // triggers tmpl.newTransformer() -> Runtime.getRuntime().exec(command)",
+      "code_language": "java",
+      "code_behavior": "During deserialization, when the attacker-supplied object is processed, the gadget chain triggers a call to TemplatesImpl.getOutputProperties(), which invokes newTransformer(), resulting in execution of arbitrary OS commands via Runtime.getRuntime().exec(command).",
+      "malice_analysis": {
+        "why_suspicious": "TemplatesImpl is a well-known deserialization gadget that enables arbitrary code execution when its methods are invoked during deserialization, especially when attacker-controlled bytecode is injected.",
+        "violated_expectations": "TemplatesImpl is intended for safe XSLT transformations, not for executing arbitrary code during object deserialization from untrusted sources.",
+        "similar_legitimate_use": "Legitimate use of TemplatesImpl for XSLT processing in trusted, internal applications, never in deserialization chains from untrusted network input.",
+        "key_indicators": [
+          "Presence of TemplatesImpl in deserialization scope",
+          "Invocation of getOutputProperties() or newTransformer() during deserialization",
+          "Use of HotSwappableTargetSource and XString to trigger toString() and equals() methods in the gadget chain"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (attacker sends HTTP POST request to Dubbo HTTP endpoint)",
+        "file_location": "HTTP handler in Dubbo HTTP remoting (DispatcherServlet -> HttpProtocol -> InternalHandler)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "post.addHeader(\"Content-Type\",\"application/x-java-serialized-object\");\npost.setEntity(new ByteArrayEntity(gadgetBytes));\nHttpResponse response = client.execute(post);",
+      "code_language": "java",
+      "code_behavior": "At runtime, the attacker sends an HTTP POST request with Content-Type set to application/x-java-serialized-object and a serialized malicious object as the body to the Dubbo HTTP endpoint, initiating the vulnerable deserialization process on the server.",
+      "malice_analysis": {
+        "why_suspicious": "Sending serialized Java objects over HTTP with the content type 'application/x-java-serialized-object' is uncommon and risky, as it exposes the server to deserialization attacks if not properly secured.",
+        "violated_expectations": "Normal HTTP APIs expect data in formats like JSON, XML, or form-encoded data, not raw Java serialized objects from unauthenticated sources.",
+        "similar_legitimate_use": "Internal RPC between trusted Java services with strict access controls and input validation.",
+        "key_indicators": [
+          "HTTP POST with Content-Type: application/x-java-serialized-object",
+          "Serialized Java object in HTTP request body",
+          "Direct mapping of HTTP endpoint to deserialization logic"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious serialized object (gadget chain) that will execute arbitrary code when deserialized.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Sending the payload to the vulnerable Dubbo HTTP endpoint"
+    },
+    {
+      "step": 2,
+      "action": "Attacker sends a POST request with the malicious serialized object to the Dubbo HTTP endpoint (bean URL).",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Deserialization of the malicious object by the Dubbo HTTP service"
+    },
+    {
+      "step": 3,
+      "action": "Dubbo HTTP service receives the request and deserializes the object using ObjectInputStream, triggering the gadget chain.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Execution of arbitrary code on the server"
+    },
+    {
+      "step": 4,
+      "action": "Gadget chain executes, resulting in arbitrary OS command execution (e.g., launching calc.exe).",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Full remote code execution on the Dubbo provider"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Deserialization of untrusted data using ObjectInputStream in network-exposed endpoints",
+      "HTTP POST requests with Content-Type: application/x-java-serialized-object",
+      "Invocation of TemplatesImpl.getOutputProperties() or newTransformer() during deserialization",
+      "Unexpected process execution (e.g., Runtime.getRuntime().exec) in the context of Dubbo HTTP services"
+    ],
+    "file_indicators": [
+      "Dubbo HTTP endpoints exposing Spring beans (e.g., /org.apache.dubbo.demo.DemoService)",
+      "Presence of org.apache.dubbo.common.json.JSONObject in classpath",
+      "Use of deprecated or vulnerable classes in the dependency tree (e.g., old FastJSON, TemplatesImpl)"
+    ],
+    "network_indicators": [
+      "Inbound HTTP POST requests to Dubbo HTTP endpoints with serialized Java objects",
+      "Unusual traffic to endpoints with bean class names in the URL path"
+    ],
+    "how_to_detect": "Monitor for HTTP POST requests to Dubbo HTTP endpoints with Content-Type: application/x-java-serialized-object. Inspect server logs for deserialization exceptions or stack traces involving ObjectInputStream, TemplatesImpl, or HotSwappableTargetSource. Use runtime instrumentation to detect invocation of Runtime.getRuntime().exec in the context of Dubbo HTTP services. Audit dependencies for presence of known vulnerable classes and gadget chains."
+  }
+}

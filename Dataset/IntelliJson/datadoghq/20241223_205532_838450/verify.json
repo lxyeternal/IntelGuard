@@ -1,0 +1,166 @@
+{
+  "package_info": {
+    "package_name": "vulnerable-java-application",
+    "package_manager": "container (Docker image: ghcr.io/datadog/vulnerable-java-application)",
+    "package_versions": "latest (as referenced in the report)",
+    "why_malicious": "The containerized application is intentionally designed to be vulnerable, exposing SSRF and command injection flaws that allow attackers to access sensitive AWS metadata endpoints and steal cloud credentials. These vulnerabilities enable privilege escalation and lateral movement from the Kubernetes cluster to the AWS account, representing a critical security risk by allowing attackers to escalate privileges, move laterally, and potentially compromise the entire cloud environment."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (user-supplied input processed by web application)",
+        "file_location": "Application code (web handler for /website.html endpoint)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "User input is used to fetch arbitrary URLs, e.g., http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+      "code_language": "java (web application logic)",
+      "code_behavior": "At runtime, the application processes user-supplied URLs in the /website.html handler, performs server-side HTTP requests to the specified URLs without validation, enabling access to internal endpoints such as the AWS Instance Metadata Service (IMDS), resulting in the exposure and potential exfiltration of temporary AWS credentials.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing user input to dictate server-side HTTP requests without validation is a textbook SSRF vulnerability, which is especially dangerous in cloud environments where internal metadata endpoints can be accessed.",
+        "violated_expectations": "Web applications should strictly validate or restrict outbound requests, especially to internal or reserved IP ranges like 169.254.169.254. This application fails to enforce such controls, exposing sensitive cloud credentials.",
+        "similar_legitimate_use": "Legitimate use may involve proxying requests to a controlled set of external URLs for preview or integration purposes, but never allowing arbitrary user-supplied URLs or access to internal metadata endpoints.",
+        "key_indicators": [
+          "No input validation or sanitization on user-supplied URLs",
+          "Ability to reach 169.254.169.254 from within the pod",
+          "Access to /latest/meta-data/iam/security-credentials/ endpoint",
+          "Server-side HTTP requests initiated based on user input"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (exploitation of command injection vulnerability)",
+        "file_location": "Application code (web handler for /index.html endpoint)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "Attacker injects OS commands to read /var/run/secrets/eks.amazonaws.com/serviceaccount/token or environment variables, e.g.,\ncat /var/run/secrets/eks.amazonaws.com/serviceaccount/token",
+      "code_language": "shell (executed via command injection in application)",
+      "code_behavior": "At runtime, the attacker exploits a command injection vulnerability in the /index.html handler, injecting arbitrary shell commands that are executed by the application, allowing reading of sensitive files such as the Kubernetes service account token or environment variables containing AWS role ARNs, resulting in the exfiltration of credentials that can be used for privilege escalation.",
+      "malice_analysis": {
+        "why_suspicious": "Command injection is a critical vulnerability, and using it to access service account tokens or sensitive environment variables is a direct path to privilege escalation and cloud credential theft.",
+        "violated_expectations": "Applications should never execute user input as shell commands, nor should they expose or allow access to sensitive files or environment variables to untrusted users.",
+        "similar_legitimate_use": "Legitimate applications may read service account tokens for internal authentication to the Kubernetes API, but this should be done securely and never exposed via user input or command injection.",
+        "key_indicators": [
+          "Command injection via unsanitized user input",
+          "Access to /var/run/secrets/eks.amazonaws.com/serviceaccount/token file",
+          "Reading environment variables related to AWS roles (e.g., AWS_ROLE_ARN)",
+          "Execution of arbitrary shell commands from web handler context"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (using compromised node credentials via SSRF or command injection)",
+        "file_location": "kubectl CLI or attacker-controlled environment after credential theft",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "export AWS_ACCESS_KEY_ID=ASIAZ3MSJV4WRNGHCCVO\nexport AWS_SECRET_ACCESS_KEY=AWPLj4xPshPmveLW4LoO1xl4Yc5MspV377pvejJf\nexport AWS_SESSION_TOKEN=IQo<SNIP>VaQ\naws sts get-caller-identity",
+      "code_language": "shell",
+      "code_behavior": "At runtime, after obtaining temporary AWS credentials from the IMDS endpoint or service account token, the attacker exports these credentials as environment variables in their own environment and uses the AWS CLI to authenticate as the compromised worker node, enabling access to AWS APIs with the node's permissions.",
+      "malice_analysis": {
+        "why_suspicious": "Using credentials obtained from the metadata endpoint or service account token outside the intended EC2 instance or pod context is a strong indicator of credential theft and lateral movement.",
+        "violated_expectations": "AWS credentials from IMDS or service account tokens should only be used by the intended EC2 instance or pod. Exporting and using them elsewhere is a clear sign of compromise.",
+        "similar_legitimate_use": "Legitimate use of these credentials is restricted to the EC2 instance or pod for AWS SDK/CLI calls; exporting them to an external environment is never expected.",
+        "key_indicators": [
+          "Exporting AWS credentials obtained from IMDS or service account token",
+          "AWS CLI usage with credentials not native to the current environment",
+          "Unusual AWS API calls from non-EC2 or non-pod environments"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (using node credentials to impersonate pods)",
+        "file_location": "kubectl CLI or attacker-controlled environment",
+        "required_permissions": [
+          "network",
+          "kubernetes API"
+        ]
+      },
+      "code_snippet": "kubectl create token inventory-service-sa -n microservices \\\n  --bound-object-kind=Pod \\\n  --bound-object-name=inventory-service \\\n  --bound-object-uid=67498d10-add3-4d7c-9b9e-65dab5640872 > token\naws sts assume-role-with-web-identity \\\n  --web-identity-token file://token \\\n  --role-arn arn:aws:iam::012345678901:role/inventory-service-role \\\n  --role-session-name hacked",
+      "code_language": "shell (kubectl and AWS CLI)",
+      "code_behavior": "At runtime, the attacker uses compromised node credentials to invoke 'kubectl create token' for a target pod's service account, generating a service account token bound to that pod, and then exchanges this token for AWS credentials via sts:AssumeRoleWithWebIdentity, thereby gaining the permissions of the pod's IAM role and enabling further cloud compromise.",
+      "malice_analysis": {
+        "why_suspicious": "Generating service account tokens for pods from outside the pod context using compromised node credentials is a clear privilege escalation and lateral movement technique, allowing attackers to assume more privileged roles.",
+        "violated_expectations": "Service account tokens should only be generated and used by the pod they are bound to; external generation and use, especially by untrusted actors, is abnormal and dangerous.",
+        "similar_legitimate_use": "Cluster automation or controllers may generate tokens for legitimate workload initialization, but not for arbitrary pods or by actors outside the intended automation context.",
+        "key_indicators": [
+          "kubectl create token for pods not associated with the current user or automation",
+          "AssumeRoleWithWebIdentity calls using tokens generated outside the pod",
+          "AWS credentials assumed for roles not matching the current workload"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker exploits SSRF or command injection in a pod to access the AWS Instance Metadata Service (IMDS) and steal temporary AWS credentials for the worker node.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Attacker obtains AWS credentials for the node's IAM role."
+    },
+    {
+      "step": 2,
+      "action": "Attacker uses stolen node credentials to authenticate to AWS and the EKS API server as a node.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Attacker gains system:nodes group permissions in Kubernetes and AWS API access."
+    },
+    {
+      "step": 3,
+      "action": "Attacker enumerates pods running on the compromised node and identifies pods with privileged service accounts (e.g., those using IRSA or Pod Identity).",
+      "implemented_by": [],
+      "leads_to": "Attacker targets pods with valuable cloud permissions."
+    },
+    {
+      "step": 4,
+      "action": "Attacker generates a service account token for a target pod and exchanges it for AWS credentials using sts:AssumeRoleWithWebIdentity.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Attacker obtains AWS credentials for the pod's IAM role, enabling further cloud compromise."
+    },
+    {
+      "step": 5,
+      "action": "Attacker uses cloud credentials to perform lateral movement or privilege escalation in the AWS environment, potentially achieving full account compromise if the pod's IAM role is highly privileged.",
+      "implemented_by": [],
+      "leads_to": "Final goal: full cloud environment compromise."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Pod or application making HTTP requests to 169.254.169.254 (IMDS endpoint) from within the cluster",
+      "Unusual access to /var/run/secrets/eks.amazonaws.com/serviceaccount/token or related AWS environment variables by non-system processes",
+      "kubectl create token for pods not associated with the current user, automation, or expected controllers",
+      "AssumeRoleWithWebIdentity API calls from unexpected sources or with tokens not generated by the pod itself",
+      "Execution of shell commands containing references to sensitive files or AWS environment variables from web application context"
+    ],
+    "file_indicators": [
+      "/var/run/secrets/eks.amazonaws.com/serviceaccount/token",
+      "Environment variables: AWS_ROLE_ARN, AWS_WEB_IDENTITY_TOKEN_FILE, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN",
+      "Pod spec annotations: eks.amazonaws.com/role-arn"
+    ],
+    "network_indicators": [
+      "Outbound HTTP requests from pods to 169.254.169.254 (IMDS endpoint)",
+      "AWS STS API calls (AssumeRoleWithWebIdentity) from IPs not associated with EC2 instances or expected pod workloads",
+      "Unusual AWS API activity (e.g., sts:AssumeRoleWithWebIdentity, get-caller-identity) from node or pod roles outside normal automation patterns"
+    ],
+    "how_to_detect": "Monitor pod and application network traffic for requests to the IMDS endpoint (169.254.169.254). Audit pod filesystem and process activity for access to service account tokens and sensitive AWS environment variables, especially from web application processes. Detect use of 'kubectl create token' and AWS STS AssumeRoleWithWebIdentity from outside expected automation or pod contexts. Correlate AWS CloudTrail logs for unusual use of temporary credentials, privilege escalation, and lateral movement patterns. Alert on pods with excessive IAM permissions, those running with hostNetwork: true, or those making unexpected AWS API calls."
+  }
+}

@@ -1,0 +1,182 @@
+{
+  "package_info": {
+    "package_name": "Exim",
+    "package_manager": "source distribution (Unix-like OS package managers, e.g., apt/yum/source tarballs)",
+    "package_versions": "< 4.94 (all versions prior to 4.94)",
+    "why_malicious": "Multiple critical vulnerabilities (21Nails) allow attackers to achieve local privilege escalation and remote code execution, enabling full server compromise and unauthorized access to email traffic. The vulnerabilities can be exploited both locally and remotely, often without authentication, and in some cases grant root privileges."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (mail processing, remote SMTP connection)",
+        "file_location": "string.c (string_vformat function)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "void string_vformat(char *fmt, ...) { ... // vulnerable to heap-based buffer overflow when processing long EHLO strings ... }",
+      "code_language": "c",
+      "code_behavior": "During SMTP session handling, the code processes user-supplied EHLO strings without proper bounds checking, leading to a heap-based buffer overflow and potential remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Processing untrusted network input without bounds checking is a classic vulnerability leading to code execution.",
+        "violated_expectations": "Mail servers should safely handle all SMTP commands and inputs, especially those from unauthenticated sources. Here, a long EHLO string can crash or compromise the server.",
+        "similar_legitimate_use": "Legitimate code would include strict length checks and input validation.",
+        "key_indicators": [
+          "lack of input validation on network data",
+          "heap-based buffer overflow triggered by user input"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (mail processing, remote SMTP connection)",
+        "file_location": "receive_add_recipient()",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "// Integer overflow in receive_add_recipient()\nif (recipients_count * sizeof(recipient) > buffer_size) { ... } // insufficient check",
+      "code_language": "c",
+      "code_behavior": "During SMTP session, the code processes recipient addresses and can be tricked into an integer overflow, leading to buffer overflows and remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Integer overflows in memory allocation routines are a common vector for buffer overflows and code execution.",
+        "violated_expectations": "Mail servers should validate all arithmetic operations on user-controlled data.",
+        "similar_legitimate_use": "Legitimate code would use safe integer arithmetic and bounds checks.",
+        "key_indicators": [
+          "arithmetic on user-controlled values without overflow checks",
+          "potential for buffer overflow due to miscalculated allocation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (mail processing, remote SMTP connection with TLS enabled)",
+        "file_location": "tls-openssl.c",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "// Use-after-free in tls-openssl.c\nfree(tls_session);\n... // code continues to use tls_session pointer",
+      "code_language": "c",
+      "code_behavior": "During SMTP session with TLS, the code frees a TLS session object but continues to use the dangling pointer, allowing remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Use-after-free bugs can be exploited to execute arbitrary code, especially in network-facing daemons.",
+        "violated_expectations": "Memory management should ensure pointers are not used after being freed.",
+        "similar_legitimate_use": "Legitimate code would nullify pointers after free and ensure no further access.",
+        "key_indicators": [
+          "use-after-free on network input path",
+          "potential for remote code execution"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (mail processing, local or remote input)",
+        "file_location": "spool header file handling (spool_read_header, parse_fix_phrase, etc.)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "// New-line injection into spool header file\nfprintf(spool_file, \"%s\\n\", user_input); // user_input not sanitized",
+      "code_language": "c",
+      "code_behavior": "When writing to spool header files, the code fails to sanitize user input, allowing injection of new lines and potentially arbitrary headers or commands.",
+      "malice_analysis": {
+        "why_suspicious": "Failure to sanitize input before writing to critical files can lead to privilege escalation or code execution.",
+        "violated_expectations": "Mail servers should strictly validate and sanitize all user input before writing to disk.",
+        "similar_legitimate_use": "Legitimate code would escape or reject newlines in user-supplied data.",
+        "key_indicators": [
+          "direct write of unsanitized user input to spool files",
+          "potential for header or command injection"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "runtime (mail processing, local access)",
+        "file_location": "log directory handling (CVE-2020-28007)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "// Link attack in Exim’s log directory\nsymlink(\"/etc/shadow\", \"/var/log/exim/exim.log\"); // attacker-controlled symlink",
+      "code_language": "c",
+      "code_behavior": "When writing to log files, the code does not check for symlinks, allowing a local attacker to create a symlink to a sensitive file and have Exim overwrite it.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing log files to be symlinked to sensitive files enables privilege escalation and data destruction.",
+        "violated_expectations": "Log file handling should prevent symlink attacks by using O_NOFOLLOW or similar mechanisms.",
+        "similar_legitimate_use": "Legitimate code would check for and avoid following symlinks.",
+        "key_indicators": [
+          "log file writes without symlink checks",
+          "potential for arbitrary file overwrite"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends specially crafted SMTP commands (e.g., long EHLO string, malicious recipient list, or TLS handshake) to the Exim server.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Triggering memory corruption vulnerabilities (buffer overflow, integer overflow, use-after-free)."
+    },
+    {
+      "step": 2,
+      "action": "Memory corruption is exploited to achieve remote code execution as the 'exim' user or root.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Attacker gains code execution on the mail server."
+    },
+    {
+      "step": 3,
+      "action": "Attacker leverages local privilege escalation vulnerabilities (e.g., log directory symlink attack, spool file injection) to escalate privileges to root.",
+      "implemented_by": [
+        "snippet_4",
+        "snippet_5"
+      ],
+      "leads_to": "Full root compromise of the server."
+    },
+    {
+      "step": 4,
+      "action": "Attacker accesses or modifies sensitive email data, creates new accounts, or persists on the system.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3",
+        "snippet_4",
+        "snippet_5"
+      ],
+      "leads_to": "Complete compromise of email server and data."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Exim process crash or restart after receiving unusually long SMTP commands (EHLO, RCPT TO, etc.)",
+      "Unexpected writes to sensitive system files (e.g., /etc/shadow) by the Exim process",
+      "Creation of symlinks in Exim log or spool directories by non-root users",
+      "Unusual privilege escalation from 'exim' user to root",
+      "Injection of newlines or headers into spool files"
+    ],
+    "file_indicators": [
+      "/var/log/exim/exim.log symlinked to system files",
+      "spool header files containing unexpected or malformed headers",
+      "unexpected file creation or modification in /etc, /root, or other sensitive directories by Exim"
+    ],
+    "network_indicators": [
+      "SMTP sessions with abnormally long EHLO or RCPT TO commands",
+      "Unusual or malformed SMTP traffic leading to Exim process instability"
+    ],
+    "how_to_detect": "Monitor Exim logs for crashes or restarts following large or malformed SMTP commands. Audit file system changes for symlinks or unexpected writes in Exim's log and spool directories. Use intrusion detection systems to flag privilege escalations from the 'exim' user. Inspect spool and log files for signs of injection or tampering. Network monitoring should alert on SMTP sessions with unusually large commands or patterns known to trigger Exim vulnerabilities."
+  }
+}

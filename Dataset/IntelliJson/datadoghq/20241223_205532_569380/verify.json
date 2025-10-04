@@ -1,0 +1,115 @@
+{
+  "package_info": {
+    "package_name": "xz-utils",
+    "package_manager": "system (Linux distributions, source tarballs)",
+    "package_versions": "5.6.0, 5.6.1",
+    "why_malicious": "The xz-utils package versions 5.6.0 and 5.6.1 contain a highly sophisticated supply chain backdoor. When installed, these versions deploy a trojanized liblzma.so shared object that is loaded by system binaries such as sshd. The malicious SO file hooks cryptographic functions (notably RSA_public_decrypt) to intercept SSH authentication attempts, recognize a secret trigger (crafted SSH key), and enable remote code execution for attackers. The backdoor is designed to preserve normal compression functionality, making detection difficult and representing a severe compromise of system integrity."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time (when sshd or other dynamically linked binaries load liblzma.so at process start)",
+        "file_location": "/usr/lib/liblzma.so (malicious shared object installed by xz-utils 5.6.0/5.6.1)",
+        "required_permissions": [
+          "filesystem (to install/replace liblzma.so)",
+          "process memory (to hook functions in sshd)",
+          "network (to enable remote code execution post-trigger)"
+        ]
+      },
+      "code_snippet": "The malicious liblzma.so shared object overrides the RSA_public_decrypt function from OpenSSL. When loaded by sshd, it intercepts calls to this function, inspects the decrypted data for a specific signature associated with a crafted SSH authentication key, and, upon detection, prepares the process for arbitrary code execution by the attacker. The SO file preserves normal compression and cryptographic functionality to avoid detection.",
+      "code_language": "C (compiled to ELF shared object)",
+      "code_behavior": "At import-time, the code hooks the RSA_public_decrypt function in the sshd process, inspects decrypted authentication data for a secret signature, and, if matched, sets up a code execution pathway for the attacker, while otherwise preserving normal library behavior.",
+      "malice_analysis": {
+        "why_suspicious": "Hijacking a core cryptographic function in a widely used system library to enable authentication bypass and remote code execution is highly abnormal and indicative of a targeted backdoor.",
+        "violated_expectations": "A legitimate liblzma.so should only provide compression/decompression routines and must not interfere with cryptographic operations or authentication logic in dependent binaries.",
+        "similar_legitimate_use": "Function hooking in shared libraries may be used for debugging or profiling in controlled environments, but never for authentication bypass or code execution in production cryptographic contexts.",
+        "key_indicators": [
+          "liblzma.so exporting or overriding cryptographic functions (e.g., RSA_public_decrypt)",
+          "Presence of obfuscated or non-standard code in liblzma.so",
+          "Code paths in sshd originating from liblzma.so during authentication",
+          "Preservation of normal compression functionality alongside malicious hooks"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when sshd processes an SSH authentication request)",
+        "file_location": "In-memory code path within the loaded /usr/lib/liblzma.so as used by sshd",
+        "required_permissions": [
+          "process memory (to inspect and manipulate authentication data)",
+          "network (to facilitate remote code execution or C2 communication)",
+          "filesystem (to maintain persistence or drop additional payloads)"
+        ]
+      },
+      "code_snippet": "The backdoor logic within liblzma.so inspects incoming SSH authentication attempts for a specific crafted key. If the key matches the attacker's secret signature, the code bypasses normal authentication checks and executes attacker-supplied code within the sshd process context, granting remote shell access or arbitrary command execution.",
+      "code_language": "C (compiled to ELF shared object)",
+      "code_behavior": "At runtime, the code inspects SSH authentication attempts in the sshd process, and if a crafted key with a secret signature is detected, bypasses standard authentication and executes attacker-controlled code, resulting in remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Bypassing authentication and enabling arbitrary code execution in a privileged process like sshd is a hallmark of a sophisticated backdoor and represents a critical security breach.",
+        "violated_expectations": "Normal authentication code must never allow bypass based on secret triggers or execute arbitrary code in response to authentication attempts.",
+        "similar_legitimate_use": "There is no legitimate use case for authentication bypass or arbitrary code execution in SSH server authentication logic.",
+        "key_indicators": [
+          "Authentication bypass in sshd triggered by a specific SSH key signature",
+          "Execution of attacker-supplied code within the sshd process",
+          "No user interaction or valid credentials required for access",
+          "Unusual process behavior or child processes spawned by sshd"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious xz-utils package (version 5.6.0 or 5.6.1) is installed, replacing the legitimate liblzma.so with a trojanized version on disk.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "System binaries such as sshd will load the malicious liblzma.so at process start"
+    },
+    {
+      "step": 2,
+      "action": "When sshd (or another affected binary) starts, it dynamically loads the malicious liblzma.so, which hooks the RSA_public_decrypt function in process memory.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Backdoor logic is now resident and active within the sshd process"
+    },
+    {
+      "step": 3,
+      "action": "An attacker initiates an SSH authentication attempt using a specially crafted private key that produces a secret signature recognized by the backdoor.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Backdoor detects the trigger and initiates authentication bypass"
+    },
+    {
+      "step": 4,
+      "action": "The backdoor executes arbitrary attacker-supplied code within the sshd process, granting the attacker remote code execution and full control of the system.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker achieves persistent, privileged access to the compromised system"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "liblzma.so or other xz-utils shared objects exporting or hooking cryptographic functions (e.g., RSA_public_decrypt) not present in legitimate versions",
+      "Unusual code execution paths in sshd process memory originating from liblzma.so during authentication",
+      "Authentication to sshd succeeding with no valid credentials or with a non-existent user",
+      "Unexpected child processes or shell sessions spawned by sshd"
+    ],
+    "file_indicators": [
+      "/usr/lib/liblzma.so (or equivalent) with unexpected or obfuscated code sections",
+      "xz-utils package versions 5.6.0 or 5.6.1 installed on the system",
+      "liblzma.so containing non-standard exported symbols or additional function hooks",
+      "Presence of known malicious byte patterns or signatures in liblzma.so (as identified by security advisories or detection scripts)"
+    ],
+    "network_indicators": [
+      "Unusual outbound connections or traffic from the sshd process following authentication events",
+      "Remote code execution or command-and-control traffic initiated by sshd after a successful authentication with a crafted key"
+    ],
+    "how_to_detect": "Enumerate installed xz-utils versions and flag 5.6.0 or 5.6.1. Analyze liblzma.so for unexpected exported symbols, cryptographic function hooks, or obfuscated code. Use YARA or byte-pattern signatures to scan for known malicious modifications. Monitor sshd logs for authentication events that succeed without valid credentials or for new child processes spawned by sshd. Correlate network activity from sshd with authentication events, especially outbound connections or command execution following logins. Employ detection scripts (e.g., detect_sh) to automate scanning for known IOCs in liblzma.so."
+  }
+}

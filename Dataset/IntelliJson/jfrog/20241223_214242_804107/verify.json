@@ -1,0 +1,94 @@
+{
+  "package_info": {
+    "package_name": "plexus-archiver",
+    "package_manager": "Maven (Java ecosystem)",
+    "package_versions": "<4.8.0",
+    "why_malicious": "The package contains a vulnerability (CVE-2023-37460) that allows attackers to exploit archive extraction by creating symlinks that point outside the intended extraction directory. When a malicious archive is processed, this flaw enables arbitrary file creation or modification outside the extraction root, potentially leading to remote code execution, privilege escalation, or unauthorized access. The vulnerability is present in all versions prior to 4.8.0."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "archive extraction (runtime, during unarchiving)",
+        "file_location": "AbstractUnArchiver.java (extractFile method)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "if ( !StringUtils.isEmpty( symlinkDestination ) ) {\n    SymlinkUtils.createSymbolicLink( targetFileName, new File( symlinkDestination ) );\n} else {\n    try ( OutputStream out = Files.newOutputStream( targetFileName.toPath() ) ) {\n        IOUtil.copy( compressedInputStream, out );\n    }\n}",
+      "code_language": "java",
+      "code_behavior": "During archive extraction, the code checks if the archive entry specifies a symlink destination, creates a symbolic link at the target location if so, or writes the entry's content to the resolved file path; this data flow allows crafted symlinks to redirect file writes outside the intended extraction directory, resulting in arbitrary file creation or modification.",
+      "malice_analysis": {
+        "why_suspicious": "This code enables the creation of symlinks based on archive entries without verifying that the symlink target remains within the extraction directory, allowing attackers to craft archives that create or overwrite files outside the intended directory.",
+        "violated_expectations": "Normal archive extraction should strictly confine all file and symlink creation to the extraction directory, regardless of archive content. Here, the lack of symlink target validation violates this expectation and enables directory traversal.",
+        "similar_legitimate_use": "Legitimate extraction tools may support symlink restoration, but must enforce that symlinks do not point outside the extraction root to prevent security risks.",
+        "key_indicators": [
+          "Symlink creation directly from archive entry metadata",
+          "No validation of symlink target path against extraction root",
+          "File writes may follow symlinks to locations outside extraction directory"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "archive extraction (runtime, during unarchiving)",
+        "file_location": "AbstractUnArchiver.java (extractFile method, path resolution logic)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "final File targetFileName = FileUtils.resolveFile( dir, entryName );\nPath canonicalDirPath = dir.getCanonicalFile().toPath();\nPath canonicalDestPath = targetFileName.getCanonicalFile().toPath();\n\nif ( !canonicalDestPath.startsWith( canonicalDirPath ) ) {\n    throw new ArchiverException( \"Entry is outside of the target directory (\" + entryName + \")\" );\n}",
+      "code_language": "java",
+      "code_behavior": "During archive extraction, the code attempts to resolve the canonical path of the target file and checks if it is within the extraction directory; however, if the symlink's target does not exist, the canonical path check is bypassed, allowing file creation outside the extraction directory, resulting in a security bypass.",
+      "malice_analysis": {
+        "why_suspicious": "The path validation logic relies on File.getCanonicalFile(), which does not resolve non-existent symlink targets, allowing attackers to bypass directory restrictions and write files outside the extraction directory.",
+        "violated_expectations": "Path validation should prevent any file writes outside the extraction directory, including cases involving symlinks to non-existent files. This logic fails to enforce that guarantee.",
+        "similar_legitimate_use": "Canonical path checks are a common defense, but must be implemented to account for symlink edge cases and non-existent targets.",
+        "key_indicators": [
+          "Use of getCanonicalFile() for path validation",
+          "Directory restriction bypass via symlink to non-existent file",
+          "Lack of robust path traversal protection in extraction logic"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious archive containing a symlink entry that points outside the extraction directory and a file entry with the same name as the symlink.",
+      "implemented_by": [],
+      "leads_to": "Archive is extracted by a vulnerable application."
+    },
+    {
+      "step": 2,
+      "action": "During extraction, the symlink is created in the extraction directory, pointing to an attacker-controlled path outside the directory.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Subsequent file entry with the same name is processed."
+    },
+    {
+      "step": 3,
+      "action": "The extraction logic writes the file entry's content to the symlink's target, creating or overwriting a file outside the extraction directory.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary file creation or modification, potentially leading to remote code execution or privilege escalation."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Archive extraction that creates symlinks pointing outside the extraction directory",
+      "File writes that follow symlinks to targets outside the intended extraction root",
+      "Extraction of archives with duplicate entry names where one is a symlink and the other is a regular file"
+    ],
+    "file_indicators": [
+      "Archives containing symlink entries with absolute paths or parent directory traversal (e.g., '../', '/etc/passwd')",
+      "Archives with duplicate entry names (one as a symlink, one as a regular file)"
+    ],
+    "network_indicators": [],
+    "how_to_detect": "Monitor archive extraction processes for the creation of symlinks and subsequent file writes outside the intended extraction directory. Flag archives containing symlink entries with absolute or parent directory traversal paths. Detect duplicate entry names within archives where one is a symlink and the other is a regular file. Use static analysis to identify vulnerable versions of plexus-archiver (<4.8.0) in build environments and alert on their usage."
+  }
+}

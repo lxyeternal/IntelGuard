@@ -1,0 +1,143 @@
+{
+  "package_info": {
+    "package_name": "mod_sed",
+    "package_manager": "Apache HTTPD module",
+    "package_versions": "2.4.x up to and including 2.4.52",
+    "why_malicious": "The mod_sed module contains a buffer mishandling vulnerability (CVE-2022-23943) that allows attackers to trigger an out-of-bounds write by sending large request or response bodies, leading to Denial of Service (DoS) and potentially Remote Code Execution (RCE) in non-default configurations where mod_sed is used as an input or output filter."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "configuration-time",
+        "file_location": "httpd.conf or any Apache configuration file (e.g., <Directory> directive)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "<Directory />\n  AllowOverride none\n  Require all denied\n  AddInputFilter Sed html\n  InputSed \"s/\\(.*\\)/Z/g\"\n</Directory>",
+      "code_language": "apache_config",
+      "code_behavior": "At configuration-time, the server is set to process all HTML requests' bodies with mod_sed, which manipulates the request body using a sed expression.",
+      "malice_analysis": {
+        "why_suspicious": "Enabling mod_sed as an input filter on untrusted client data exposes the server to buffer mishandling vulnerabilities.",
+        "violated_expectations": "Normal configurations do not use mod_sed to process large, untrusted client data; this increases attack surface.",
+        "similar_legitimate_use": "mod_sed can be legitimately used for stream editing in controlled environments.",
+        "key_indicators": [
+          "AddInputFilter Sed on client-controlled routes",
+          "InputSed directive processing arbitrary request bodies"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (request processing)",
+        "file_location": "mod_sed source code (sed1.c, appendmem_to_linebuf function)",
+        "required_permissions": [
+          "memory",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "static void appendmem_to_linebuf(sed_eval_t *eval, const char* sz, int len) {\n  unsigned int reqsize = (eval->lspend - eval->linebuf) + len;\n  if (eval->lsize < reqsize) {\n    grow_line_buffer(eval, reqsize);\n  }\n  memcpy(eval->lspend, sz, len);\n  eval->lspend += len;\n}",
+      "code_language": "c",
+      "code_behavior": "At runtime, when processing large request or response bodies, the function miscalculates buffer size and performs an out-of-bounds write with memcpy, leading to process crash or potential code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The use of signed int for buffer size calculations allows integer overflows, enabling attackers to trigger out-of-bounds writes.",
+        "violated_expectations": "Buffer management should use safe, unsigned types and validate input sizes; this code fails to do so.",
+        "similar_legitimate_use": "Buffer appending is common, but must be done with proper bounds checking.",
+        "key_indicators": [
+          "memcpy with unchecked length",
+          "buffer size calculation using signed int",
+          "lack of input size validation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (request processing)",
+        "file_location": "mod_sed source code (sed1.c, sed_eval_buffer function)",
+        "required_permissions": [
+          "memory"
+        ]
+      },
+      "code_snippet": "if (bufsz) {\n  appendmem_to_linebuf(eval, buf, bufsz);\n}",
+      "code_language": "c",
+      "code_behavior": "At runtime, if a buffer remains after processing, it is appended to the line buffer without sufficient size checks, potentially triggering the vulnerability with large input.",
+      "malice_analysis": {
+        "why_suspicious": "Directly appending large, untrusted buffers without robust size checks is unsafe.",
+        "violated_expectations": "Normal code should validate buffer sizes before appending.",
+        "key_indicators": [
+          "appendmem_to_linebuf called with large, unchecked buffer",
+          "lack of upper bound enforcement"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (request processing, stream finalization)",
+        "file_location": "mod_sed source code (sed1.c, sed_finalize_eval function)",
+        "required_permissions": [
+          "memory"
+        ]
+      },
+      "code_snippet": "append_to_linebuf(eval, \"\");",
+      "code_language": "c",
+      "code_behavior": "At runtime, during stream finalization, the code appends a null terminator to the buffer, which can trigger the vulnerability if the buffer is already at or near its maximum size.",
+      "malice_analysis": {
+        "why_suspicious": "Appending to a potentially full buffer without size validation can cause overflows.",
+        "violated_expectations": "Finalization routines should always check buffer capacity before writing.",
+        "key_indicators": [
+          "append_to_linebuf called without buffer size check",
+          "potential for off-by-one or overflow errors"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a large (2GB or 4GB) HTTP request body to an endpoint with mod_sed input filter enabled.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "mod_sed processes the large, untrusted input."
+    },
+    {
+      "step": 2,
+      "action": "mod_sed attempts to append the large buffer to its internal line buffer using appendmem_to_linebuf.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Buffer size miscalculation and potential out-of-bounds write."
+    },
+    {
+      "step": 3,
+      "action": "During stream finalization, mod_sed appends a null terminator, which can also trigger the vulnerability if the buffer is full.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Process crash (DoS) or, in rare cases, potential code execution."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "mod_sed input or output filter enabled on routes processing large request/response bodies",
+      "Apache process crashes after receiving large POST requests",
+      "Unusually large memory allocations or memcpy operations in mod_sed"
+    ],
+    "file_indicators": [
+      "AddInputFilter Sed",
+      "AddOutputFilter Sed",
+      "InputSed directives in Apache configuration",
+      "Presence of mod_sed in loaded modules"
+    ],
+    "network_indicators": [
+      "HTTP POST requests with body sizes near 2GB or 4GB",
+      "Repeated large requests to endpoints with mod_sed filters"
+    ],
+    "how_to_detect": "Monitor Apache configuration files for AddInputFilter or AddOutputFilter directives using mod_sed. Watch for large HTTP request bodies (near 2GB or 4GB) and correlate with Apache process crashes or restarts. Use memory safety tools to detect out-of-bounds writes in mod_sed. Automated scanners should flag any use of mod_sed input filters on routes accepting untrusted data."
+  }
+}

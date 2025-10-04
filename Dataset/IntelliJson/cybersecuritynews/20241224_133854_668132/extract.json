@@ -1,0 +1,104 @@
+{
+  "package_info": {
+    "package_name": "Jenkins (core, Remoting/Hudson library)",
+    "package_manager": "custom/enterprise (not a public package manager)",
+    "package_versions": "2.441 and prior (before patch for CVE-2024-43044)",
+    "why_malicious": "A critical flaw in the Remoting/Hudson library allows Jenkins agents to read arbitrary files from the controller via the ClassLoaderProxy#fetchJar method, bypassing access controls. This can be escalated to remote code execution if an attacker hijacks an agent, leading to full compromise of the Jenkins controller."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (agent-initiated request to controller)",
+        "file_location": "hudson/remoting/RemoteClassLoader$ClassLoaderProxy.java",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "public byte[] fetchJar(URL url) throws IOException {\n    return Util.readFully(url.openStream());\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code receives a URL from an agent and reads the file at that URL on the controller, returning its contents to the agent, enabling arbitrary file read.",
+      "malice_analysis": {
+        "why_suspicious": "This method allows agents to specify arbitrary URLs, which are then read by the controller and sent back to the agent, bypassing access controls.",
+        "violated_expectations": "Normally, agents should not be able to request arbitrary files from the controller; file access should be strictly controlled and limited to necessary JARs.",
+        "similar_legitimate_use": "Legitimate use would be fetching only whitelisted JAR files for class loading, not arbitrary file paths.",
+        "key_indicators": [
+          "No validation or restriction on the URL parameter",
+          "Directly reads and returns file contents from controller to agent",
+          "Bypasses Agent -> Controller Access Control"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (agent-side exploit code execution)",
+        "file_location": "custom exploit code (agent payload, e.g., Exploit class in test or attack code)",
+        "required_permissions": [
+          "network",
+          "reflection"
+        ]
+      },
+      "code_snippet": "private static class Exploit extends MasterToSlaveCallable<Void, Exception> {\n    private final URL controllerFilePath;\n    private final String expectedContent;\n \n    public Exploit(URL controllerFilePath, String expectedContent) {\n        this.controllerFilePath = controllerFilePath;\n        this.expectedContent = expectedContent;\n    }\n    @Override\n    public Void call() throws Exception {\n        final ClassLoader ccl = Thread.currentThread().getContextClassLoader();\n        final Field classLoaderProxyField = ccl.getClass().getDeclaredField(\"proxy\");\n        classLoaderProxyField.setAccessible(true);\n        final Object theProxy = classLoaderProxyField.get(ccl);\n        final Method fetchJarMethod = theProxy.getClass().getDeclaredMethod(\"fetchJar\", URL.class);\n        fetchJarMethod.setAccessible(true);\n        final byte[] fetchJarResponse = (byte[]) fetchJarMethod.invoke(theProxy, controllerFilePath);\n        assertThat(new String(fetchJarResponse, StandardCharsets.UTF_8), is(expectedContent));\n        return null;\n    }\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, the agent uses reflection to access the controller's ClassLoaderProxy, invokes fetchJar with a path to a sensitive file, and receives the file's contents, enabling arbitrary file read and potential credential theft.",
+      "malice_analysis": {
+        "why_suspicious": "This code leverages reflection to bypass normal access controls and directly invoke a sensitive method on the controller, targeting arbitrary files.",
+        "violated_expectations": "Agents should not be able to use reflection to access internal controller methods or read arbitrary files.",
+        "similar_legitimate_use": "Reflection is sometimes used for testing or debugging, but not for accessing sensitive controller internals in production.",
+        "key_indicators": [
+          "Use of reflection to access private fields and methods",
+          "Invocation of fetchJar with attacker-controlled file paths",
+          "Assertion on file content to confirm successful exfiltration"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker gains access to or hijacks a Jenkins agent (via agent secret or SSH/Remoting process).",
+      "implemented_by": [],
+      "leads_to": "Ability to execute code as the agent."
+    },
+    {
+      "step": 2,
+      "action": "Agent executes exploit code to invoke fetchJar on the controller, requesting sensitive files (e.g., credentials, remember-me cookies).",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary file read from controller."
+    },
+    {
+      "step": 3,
+      "action": "Agent receives sensitive file contents from the controller (e.g., admin cookies, secrets).",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Use of stolen data for further attacks."
+    },
+    {
+      "step": 4,
+      "action": "Attacker uses exfiltrated credentials (e.g., forged remember-me cookie) to gain admin access to Jenkins web interface.",
+      "implemented_by": [],
+      "leads_to": "Remote code execution via Script Console or further privilege escalation."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Agent-initiated requests for non-JAR, non-whitelisted files via Remoting protocol",
+      "Unusual or excessive fetchJar invocations with arbitrary file paths",
+      "Reflection-based access to internal controller fields/methods from agent code"
+    ],
+    "file_indicators": [
+      "Access to sensitive files (e.g., secrets, credentials, remember-me cookies) by agent processes",
+      "Unexpected file read operations initiated by Remoting/agent connections"
+    ],
+    "network_indicators": [
+      "Remoting protocol traffic with large or unexpected file payloads from controller to agent",
+      "Agent connections requesting files outside of standard JAR/classpath locations"
+    ],
+    "how_to_detect": "Monitor Remoting protocol traffic for agent requests to fetch files outside of expected JAR/classpath locations. Alert on fetchJar invocations with arbitrary or sensitive file paths. Detect use of reflection in agent code targeting controller internals. Audit agent activity for unauthorized file access and exfiltration attempts. Correlate agent connections with subsequent suspicious admin logins or Script Console usage."
+  }
+}

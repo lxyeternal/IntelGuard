@@ -2,33 +2,32 @@
   "package_info": {
     "package_name": "com.fasterxml.jackson.core:jackson-databind",
     "package_manager": "Maven",
-    "package_versions": "(, 2.10.0)",
-    "why_malicious": "All versions prior to 2.10.0 are vulnerable to deserialization attacks due to unsafe default typing and incomplete blacklist-based mitigations. Attackers can exploit this to achieve remote code execution by supplying malicious serialized objects, as the component would deserialize dangerous classes unless specifically blacklisted. The fix in 2.10.0 switches to a whitelist approach, closing the attack vector."
+    "package_versions": "( , 2.10.0)",
+    "why_malicious": "The package is vulnerable to deserialization attacks due to unsafe default typing and incomplete blacklist-based mitigations, allowing attackers to trigger remote code execution by supplying malicious serialized objects. The vulnerability persisted across multiple versions due to a reliance on blacklists, which failed to comprehensively block all dangerous classes. Only versions 2.10.0 and above implement a secure whitelist-based approach to type validation."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
         "trigger": "runtime (during deserialization of untrusted data)",
-        "file_location": "core library logic (e.g., SubTypeValidator.java)",
+        "file_location": "core library code (ObjectMapper with enableDefaultTyping())",
         "required_permissions": [
           "filesystem",
           "network",
-          "environment_vars"
+          "arbitrary code execution"
         ]
       },
-      "code_snippet": "Set<String> s = new HashSet<String>();\ns.add(\"org.apache.commons.collections.functors.InvokerTransformer\");\ns.add(\"org.apache.commons.collections.functors.InstantiateTransformer\");\ns.add(\"org.apache.commons.collections4.functors.InvokerTransformer\");\ns.add(\"org.apache.commons.collections4.functors.InstantiateTransformer\");\ns.add(\"org.codehaus.groovy.runtime.ConvertedClosure\");\ns.add(\"org.codehaus.groovy.runtime.MethodClosure\");\ns.add(\"org.springframework.beans.factory.ObjectFactory\");\ns.add(\"com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl\");\ns.add(\"org.apache.xalan.xsltc.trax.TemplatesImpl\");\ns.add(\"com.sun.rowset.JdbcRowSetImpl\");\ns.add(\"java.util.logging.FileHandler\");\ns.add(\"java.rmi.server.UnicastRemoteObject\");\ns.add(\"org.springframework.beans.factory.config.PropertyPathFactoryBean\");\ns.add(\"org.jdom.transform.XSLTransformer\");\ns.add(\"org.jdom2.transform.XSLTransformer\");\ns.add(\"net.sf.ehcache.transaction.manager.DefaultTransactionManagerLookup\");\ns.add(\"ch.qos.logback.core.db.JNDIConnectionSource\");",
+      "code_snippet": "ObjectMapper mapper = new ObjectMapper();\nmapper.enableDefaultTyping();\n// ...\nObject obj = mapper.readValue(untrustedInput, Object.class);",
       "code_language": "java",
-      "code_behavior": "Maintains a blacklist of known dangerous classes that should not be deserialized. The code blocks deserialization of these classes to prevent exploitation, but any class not on the blacklist can still be deserialized, leaving the system vulnerable to new or unknown attack classes.",
+      "code_behavior": "At runtime, the code deserializes untrusted input using ObjectMapper with enableDefaultTyping(), allowing attacker-supplied class names to be instantiated, which can result in arbitrary code execution or system command execution.",
       "malice_analysis": {
-        "why_suspicious": "The presence of a hardcoded blacklist for deserialization indicates that the underlying logic is overly permissive, allowing arbitrary class instantiation from untrusted data. This is a classic deserialization vulnerability, as attackers can bypass the blacklist by using unlisted but still dangerous classes.",
-        "violated_expectations": "Normal deserialization should only allow a strict set of safe, expected types. Here, the system must reactively block known dangerous types, but any not on the list remain exploitable, violating the principle of least privilege.",
-        "similar_legitimate_use": "Blacklists are sometimes used for input validation or to block deprecated features, but for deserialization security, they are considered weak and insufficient compared to whitelisting.",
+        "why_suspicious": "Deserializing untrusted data with enableDefaultTyping() allows attackers to specify arbitrary classes for instantiation, enabling exploitation of dangerous classes with side effects, such as remote code execution.",
+        "violated_expectations": "Normal deserialization should only instantiate safe, explicitly allowed types, not arbitrary attacker-controlled classes.",
+        "similar_legitimate_use": "Deserializing trusted, internal data with known, safe types in a controlled environment.",
         "key_indicators": [
-          "Explicit hardcoded list of dangerous classes in deserialization logic",
-          "Reactive patching pattern (adding new classes as exploits are discovered)",
-          "No enforcement of a default-deny policy for unknown types",
-          "Permissive deserialization of any class not on the blacklist"
+          "Use of ObjectMapper.enableDefaultTyping() with untrusted input",
+          "No explicit type whitelisting or validation",
+          "Instantiation of classes based on attacker-controlled serialized data"
         ]
       }
     },
@@ -36,24 +35,44 @@
       "snippet_id": "snippet_2",
       "execution_context": {
         "trigger": "runtime (during deserialization of untrusted data)",
-        "file_location": "core library logic (e.g., PolymorphicTypeValidator.java, ObjectMapper configuration)",
+        "file_location": "core library code (SubTypeValidator.java, blacklist enforcement)",
         "required_permissions": [
-          "filesystem",
-          "network",
-          "environment_vars"
+          "arbitrary code execution"
         ]
       },
-      "code_snippet": "objectMapper.activateDefaultTyping(PolymorphicTypeValidator, ...);",
+      "code_snippet": "protected final static Set<String> DEFAULT_NO_DESER_CLASS_NAMES;\nstatic {\n  Set<String> s = new HashSet<String>();\n  s.add(\"org.apache.commons.collections.functors.InvokerTransformer\");\n  s.add(\"org.apache.commons.collections.functors.InstantiateTransformer\");\n  // ... more dangerous classes\n  DEFAULT_NO_DESER_CLASS_NAMES = Collections.unmodifiableSet(s);\n}",
       "code_language": "java",
-      "code_behavior": "Switches from a blacklist to a whitelist approach, requiring explicit specification of allowed subtypes for deserialization. Only classes validated by the PolymorphicTypeValidator can be deserialized, preventing arbitrary code execution via untrusted data.",
+      "code_behavior": "At runtime, the code attempts to block deserialization of known dangerous classes by maintaining a static blacklist, but any class not on the list can still be deserialized, leaving exploitable gaps for attackers.",
       "malice_analysis": {
-        "why_suspicious": "This is the secure fix, not malicious, but is included for contrast. The previous lack of such a whitelist allowed attackers to exploit deserialization by instantiating arbitrary classes. The introduction of PolymorphicTypeValidator enforces strict type control.",
-        "violated_expectations": "Prior to this, the default was to allow any class unless blacklisted, which is unsafe. The new expectation is explicit allow-listing, which aligns with secure deserialization practices.",
-        "similar_legitimate_use": "Whitelisting is a best practice for deserialization security and is commonly used in secure frameworks to restrict allowed types.",
+        "why_suspicious": "Blacklisting is inherently incomplete; attackers can exploit new or overlooked classes not present in the blacklist to achieve code execution.",
+        "violated_expectations": "A secure deserialization mechanism should default to denying unknown or untrusted types, not allow all except those on a blacklist.",
+        "similar_legitimate_use": "Blocking known-bad types in legacy systems as a temporary mitigation, but not as a comprehensive security measure.",
         "key_indicators": [
-          "Explicit allow-listing of deserializable types via PolymorphicTypeValidator",
-          "No longer possible to deserialize arbitrary classes by default",
-          "Presence of activateDefaultTyping() with a validator in ObjectMapper configuration"
+          "Reliance on a static blacklist of class names",
+          "Frequent updates to the blacklist to address new exploits",
+          "No default deny policy for unlisted types"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (during deserialization of untrusted data)",
+        "file_location": "core library code (PolymorphicTypeValidator.java, whitelist enforcement, fixed in 2.10.0+)",
+        "required_permissions": [
+          "arbitrary code execution"
+        ]
+      },
+      "code_snippet": "public abstract class PolymorphicTypeValidator {\n  public enum Validity {\n    ALLOWED,\n    DENIED,\n    INDETERMINATE\n  }\n  // ...\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code enforces a whitelist of allowed types for deserialization using PolymorphicTypeValidator, denying all others, which prevents attackers from instantiating arbitrary or dangerous classes.",
+      "malice_analysis": {
+        "why_suspicious": "This is the secure fix; prior absence of such a whitelist allowed exploitation by permitting deserialization of attacker-specified classes.",
+        "violated_expectations": "Previously, the lack of a whitelist meant any class not blacklisted could be deserialized, violating the principle of least privilege and secure design.",
+        "similar_legitimate_use": "Explicitly allowing only safe, known types for deserialization to prevent code execution vulnerabilities.",
+        "key_indicators": [
+          "Introduction of explicit allow/deny logic for type validation",
+          "Default deny for unlisted types during deserialization"
         ]
       }
     }
@@ -61,53 +80,45 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker submits serialized data containing a reference to a dangerous class (e.g., InvokerTransformer, TemplatesImpl, etc.)",
+      "action": "Attacker crafts a serialized payload specifying a dangerous class (e.g., InvokerTransformer) and malicious data.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Deserialization logic checks the class against the blacklist"
+      "leads_to": "Payload is submitted to a vulnerable application endpoint."
     },
     {
       "step": 2,
-      "action": "If the class is not on the blacklist, it is deserialized and attacker-controlled code is executed (RCE)",
+      "action": "Application deserializes the untrusted payload using ObjectMapper with enableDefaultTyping(), instantiating the attacker-specified class.",
       "implemented_by": [
-        "snippet_1"
+        "snippet_1",
+        "snippet_2"
       ],
-      "leads_to": "Remote code execution or system compromise"
+      "leads_to": "Malicious class is loaded and its code is executed."
     },
     {
       "step": 3,
-      "action": "If the class is on the blacklist, deserialization is blocked (but only for known classes)",
-      "implemented_by": [
-        "snippet_1"
-      ],
-      "leads_to": "Partial mitigation, but new or unknown classes can still be exploited"
-    },
-    {
-      "step": 4,
-      "action": "With the whitelist fix, only explicitly allowed classes are deserialized, blocking the attack vector",
+      "action": "If the class is not on the blacklist, the malicious code executes, potentially leading to remote code execution or system compromise.",
       "implemented_by": [
         "snippet_2"
       ],
-      "leads_to": "Attack is prevented"
+      "leads_to": "Attacker gains code execution or control over the system."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Deserialization of untrusted data with default typing enabled in ObjectMapper",
-      "Presence of enableDefaultTyping() or similar methods in codebase without a PolymorphicTypeValidator",
-      "Absence of explicit PolymorphicTypeValidator or activateDefaultTyping() in ObjectMapper configuration",
-      "Instantiation of classes known to be dangerous (e.g., InvokerTransformer, TemplatesImpl) during deserialization"
+      "Deserialization of untrusted data with ObjectMapper.enableDefaultTyping() enabled",
+      "Instantiation of classes not explicitly whitelisted during deserialization",
+      "Frequent updates to blacklists in deserialization libraries indicating reactive patching"
     ],
     "file_indicators": [
-      "References to enableDefaultTyping() in Java source or configuration files",
-      "Absence of PolymorphicTypeValidator or activateDefaultTyping() in ObjectMapper configuration",
-      "Presence of hardcoded blacklists in files like SubTypeValidator.java"
+      "Use of ObjectMapper.enableDefaultTyping() in Java code",
+      "Presence of SubTypeValidator.java with large static blacklists",
+      "Absence of PolymorphicTypeValidator or activateDefaultTyping() in versions prior to 2.10.0"
     ],
     "network_indicators": [
-      "Unexpected outbound connections or code execution following deserialization of user-supplied data",
-      "Network activity originating from deserialized objects, especially if correlated with untrusted input"
+      "Outbound connections or command execution following deserialization of user-supplied data",
+      "Unexpected network activity from Java applications immediately after deserialization events"
     ],
-    "how_to_detect": "Perform static analysis to identify usage of enableDefaultTyping() or similar methods in Java code, especially in versions of jackson-databind prior to 2.10.0. Flag any deserialization of untrusted data without an explicit PolymorphicTypeValidator. Monitor for instantiation of known dangerous classes during deserialization by instrumenting or auditing deserialization code paths. Use code scanning to detect hardcoded blacklists and absence of whitelisting. Correlate suspicious network or filesystem activity with deserialization events to identify potential exploitation."
+    "how_to_detect": "Scan Java codebases for use of ObjectMapper.enableDefaultTyping() and absence of explicit type whitelisting (PolymorphicTypeValidator). Monitor for deserialization of untrusted data and instantiation of classes not present in a safe allowlist. Flag applications using jackson-databind versions prior to 2.10.0 that do not implement a whitelist approach. Correlate deserialization events with subsequent network or system command activity to identify exploitation attempts."
   }
 }

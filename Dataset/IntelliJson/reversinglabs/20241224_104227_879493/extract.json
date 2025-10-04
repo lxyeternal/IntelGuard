@@ -1,0 +1,133 @@
+{
+  "package_info": {
+    "package_name": "3CXDesktopApp",
+    "package_manager": "custom/Electron (distributed as MSI, DMG, NuGet, EXE)",
+    "package_versions": "18.12.407, 18.12.416",
+    "why_malicious": "The 3CXDesktopApp package was compromised via a supply chain attack, resulting in the insertion of malicious code into standard DLL dependencies (ffmpeg.dll and d3dcompiler_47.dll). The attack leveraged post-signing modification of a Microsoft-signed DLL to append encrypted shellcode, and altered the ffmpeg library to extract and execute this payload, enabling further malicious activity such as C2 communication and potential data exfiltration."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (shortly after process start)",
+        "file_location": "ffmpeg.dll (within %ProgramFiles%/3CXDesktopApp/app-18.12.407/ffmpeg.dll)",
+        "required_permissions": [
+          "filesystem",
+          "memory"
+        ]
+      },
+      "code_snippet": "Custom loader code in ffmpeg.dll that locates d3dcompiler_47.dll, searches for the magic signature 0xFEEDFACEFEEDFACE, extracts appended RC4-encrypted shellcode, and decrypts it using the key '3jB(2bsG#@c7'.",
+      "code_language": "C/C++ (native PE DLL)",
+      "code_behavior": "At runtime, the code in ffmpeg.dll locates d3dcompiler_47.dll, scans for a specific magic byte signature, extracts appended encrypted shellcode, decrypts it with a hardcoded RC4 key, and loads it into memory for execution.",
+      "malice_analysis": {
+        "why_suspicious": "DLLs like ffmpeg should not contain code to search, extract, and execute shellcode from other DLLs, especially using cryptographic keys and magic signatures.",
+        "violated_expectations": "Normal ffmpeg.dll is a media library and should not perform inter-DLL memory operations or execute arbitrary code from another DLL.",
+        "similar_legitimate_use": "Some software may use encrypted payloads for DRM or anti-tampering, but not in this context or with these libraries.",
+        "key_indicators": [
+          "Custom code for searching magic signature in another DLL",
+          "RC4 decryption of extracted payload",
+          "Memory execution of decrypted shellcode",
+          "Reference to d3dcompiler_47.dll in a media library"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when loaded by ffmpeg.dll)",
+        "file_location": "d3dcompiler_47.dll (signature appendix, %ProgramFiles%/3CXDesktopApp/app-18.12.407/d3dcompiler_47.dll)",
+        "required_permissions": [
+          "filesystem",
+          "memory"
+        ]
+      },
+      "code_snippet": "RC4-encrypted shellcode appended after the authenticode signature, marked by the magic bytes 0xFEEDFACEFEEDFACE. The shellcode, once decrypted, contains an embedded DLL that downloads C2 URLs from GitHub icon files, decrypts them (AES, Base64), and initiates C2 communication.",
+      "code_language": "Shellcode (x86/x64), embedded DLL (native PE)",
+      "code_behavior": "At runtime, the shellcode is extracted and decrypted by ffmpeg.dll, then executed in memory. It downloads icon files from GitHub, extracts and decrypts C2 URLs, and establishes outbound connections to attacker infrastructure.",
+      "malice_analysis": {
+        "why_suspicious": "Appending encrypted shellcode to a signed Microsoft DLL is a known malware technique to evade detection and abuse trust in signed binaries.",
+        "violated_expectations": "d3dcompiler_47.dll should not contain appended data or any executable payload outside its normal code/data sections.",
+        "similar_legitimate_use": "Appending non-executable metadata for tracking is sometimes done, but never encrypted shellcode.",
+        "key_indicators": [
+          "Appended data after authenticode signature",
+          "Magic signature for loader recognition",
+          "RC4-encrypted shellcode",
+          "Embedded downloader for C2 URLs"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (as part of shellcode execution)",
+        "file_location": "Decrypted shellcode (in-memory, loaded from d3dcompiler_47.dll)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "memory"
+        ]
+      },
+      "code_snippet": "Downloader logic in shellcode: fetches icon files from GitHub, extracts AES-encrypted, Base64-encoded C2 URLs from file ends, decrypts them, and connects to C2 infrastructure.",
+      "code_language": "Shellcode (native PE, C/C++)",
+      "code_behavior": "At runtime, the shellcode downloads icon files from GitHub, extracts and decrypts hidden C2 URLs, and establishes outbound network connections to attacker-controlled infrastructure.",
+      "malice_analysis": {
+        "why_suspicious": "Legitimate software does not hide C2 URLs in icon files on GitHub or use shellcode to establish covert C2 channels.",
+        "violated_expectations": "Normal update or telemetry mechanisms are transparent and do not use encrypted, hidden channels.",
+        "similar_legitimate_use": "None; this is a classic C2 evasion technique.",
+        "key_indicators": [
+          "Network access to GitHub for non-standard resources",
+          "Extraction of hidden data from image/icon files",
+          "AES/Base64 decryption of C2 URLs",
+          "Outbound connections to non-3CX infrastructure"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious ffmpeg.dll is included in the 3CXDesktopApp build, replacing the legitimate version.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Malicious ffmpeg.dll is loaded at application startup."
+    },
+    {
+      "step": 2,
+      "action": "ffmpeg.dll, upon loading, locates d3dcompiler_47.dll and extracts RC4-encrypted shellcode from its signature appendix.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Shellcode is decrypted and executed in memory."
+    },
+    {
+      "step": 3,
+      "action": "Decrypted shellcode (embedded DLL) downloads icon files from GitHub, extracts and decrypts C2 URLs, and connects to attacker infrastructure.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Establishes C2 channel for further attacker actions (e.g., data exfiltration, remote access)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "DLLs (ffmpeg.dll) performing inter-DLL memory operations and shellcode execution",
+      "Extraction and decryption of appended data from signed DLLs (d3dcompiler_47.dll)",
+      "Network requests to GitHub for icon/image files followed by AES/Base64 decryption",
+      "Outbound connections to non-standard, attacker-controlled infrastructure"
+    ],
+    "file_indicators": [
+      "ffmpeg.dll with increased file size and stripped PDB data",
+      "d3dcompiler_47.dll with appended data after authenticode signature",
+      "Presence of magic signature 0xFEEDFACEFEEDFACE in DLL appendices",
+      "Unusual compilation timestamps inconsistent with other Electron app files"
+    ],
+    "network_indicators": [
+      "HTTP/HTTPS requests to GitHub repositories for icon/image files",
+      "Extraction of hidden data from downloaded files",
+      "Outbound connections to C2 domains/IPs not associated with 3CX"
+    ],
+    "how_to_detect": "Monitor for DLLs (especially ffmpeg.dll and d3dcompiler_47.dll) with appended data after authenticode signatures, increased file size, or stripped PDB data. Flag binaries that perform inter-DLL memory operations or extract/decrypt shellcode at runtime. Detect network activity involving downloads of non-standard resources (e.g., icon files) from GitHub followed by AES/Base64 decryption and connections to unknown external infrastructure. Use differential analysis to compare new releases with previous versions for unexplained changes in standard libraries."
+  }
+}

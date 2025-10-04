@@ -1,0 +1,99 @@
+{
+  "package_info": {
+    "package_name": "PathCchCanonicalize",
+    "package_manager": "Windows API (WinAPI)",
+    "package_versions": "All versions prior to CVE-2020-0655 patch (and potentially later, if not manually mitigated)",
+    "why_malicious": "PathCchCanonicalize is widely recommended by Microsoft for path sanitation, but it fails to canonicalize or normalize paths containing forward slashes ('/'). This flaw allows attackers to bypass path traversal checks by using forward slashes in traversal sequences (e.g., '../'), enabling them to write or read files outside intended directories. As a result, applications relying on this function for security are vulnerable to path traversal attacks, even when following official best practices."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, during file path validation prior to file write/read operations",
+        "file_location": "Any application code using PathCchCanonicalize for path validation (e.g., CFormatDataPacker::ValidateFilePaths in mstscax.dll, or custom code following MSDN guidance)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "PathCchCanonicalize(canonicalizedPath, ARRAYSIZE(canonicalizedPath), inputPath);\nif (wcscmp(canonicalizedPath, inputPath) != 0) {\n    // Path is invalid\n    return ERROR_INVALID_PARAMETER;\n}",
+      "code_language": "C/C++",
+      "code_behavior": "At runtime, the code receives a user-supplied file path and attempts to canonicalize it using PathCchCanonicalize, then compares the canonicalized output to the original input; if they differ, the path is rejected, but if the input uses forward slashes in traversal sequences (e.g., '../../Evil.bat'), PathCchCanonicalize ignores them, allowing the path to pass validation and enabling file operations outside the intended directory.",
+      "malice_analysis": {
+        "why_suspicious": "The code is intended to prevent path traversal by rejecting paths that change after canonicalization. However, due to PathCchCanonicalize's failure to process forward slashes, traversal sequences using '/' are not normalized or blocked, allowing attackers to bypass validation and escape directory restrictions.",
+        "violated_expectations": "Expected behavior is to block any path containing traversal sequences (../ or ..\\), regardless of slash direction. Actual behavior only blocks traversal using backslashes, allowing forward slash traversal to succeed and bypass security controls.",
+        "similar_legitimate_use": "Legitimate use would be to sanitize and validate file paths before file operations, but only if the canonicalization function correctly handles all path separators and traversal patterns.",
+        "key_indicators": [
+          "Use of PathCchCanonicalize for file path validation",
+          "Comparison of canonicalized path to original input without normalizing both slash types",
+          "Absence of explicit rejection or normalization of forward slash traversal sequences",
+          "File operations permitted on paths containing '../' after validation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "At runtime, when malicious input is supplied to an RDP server or any file-handling API using PathCchCanonicalize",
+        "file_location": "Malicious RDP server or client input (e.g., FileGroupDescriptorW clipboard format, or any file path input field)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "../../Evil.bat",
+      "code_language": "N/A (malicious input string)",
+      "code_behavior": "At runtime, an attacker supplies a file path containing forward slash traversal sequences (e.g., '../../Evil.bat') to an application relying on PathCchCanonicalize for validation, the function fails to canonicalize the path, the input passes validation, and the file operation proceeds, resulting in files being accessed or written outside the intended directory.",
+      "malice_analysis": {
+        "why_suspicious": "Supplying traversal sequences in file paths is a classic attack vector. The use of forward slashes to bypass Windows path validation is highly suspicious, especially when the application is expected to block such attempts but fails due to improper canonicalization.",
+        "violated_expectations": "Normal behavior would be to reject any path containing traversal sequences, regardless of slash type. The actual behavior allows forward slash traversal to succeed, enabling directory escape.",
+        "similar_legitimate_use": "Legitimate file paths should not contain traversal sequences when restricted to a specific directory, and should be normalized to prevent bypass.",
+        "key_indicators": [
+          "Presence of '../' or '..\\' in file path input",
+          "Acceptance of forward slash traversal in Windows file operations",
+          "User-supplied file paths containing traversal sequences passing validation"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a file path containing forward slash traversal sequences (e.g., '../../Evil.bat') and supplies it to a vulnerable application (e.g., via RDP clipboard, file upload, or API input).",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Path validation is triggered in the application."
+    },
+    {
+      "step": 2,
+      "action": "Application attempts to validate the supplied path using PathCchCanonicalize, comparing the canonicalized output to the original input.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Validation passes because PathCchCanonicalize ignores forward slashes, allowing the traversal path."
+    },
+    {
+      "step": 3,
+      "action": "File operation (write/read) is performed using the attacker-supplied path, resulting in files being accessed or written outside the intended directory.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Potential code execution, data exfiltration, or system compromise."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "File operations using user-supplied paths containing '../' or '..\\' sequences",
+      "Use of PathCchCanonicalize for path validation without normalizing both forward and backward slashes",
+      "Successful file writes/reads outside intended directories following path validation with PathCchCanonicalize"
+    ],
+    "file_indicators": [
+      "Unexpected files created outside designated directories (e.g., user-writable folders)",
+      "Presence of file paths with forward slash traversal (../) in logs or telemetry after validation"
+    ],
+    "network_indicators": [
+      "N/A (unless combined with remote attack vectors such as RDP clipboard/file transfer or web APIs)"
+    ],
+    "how_to_detect": "Monitor for file operations where the input path contains traversal sequences (../ or ..\\), especially when the application uses PathCchCanonicalize for validation. Audit code for reliance on PathCchCanonicalize without explicit normalization of both forward and backward slashes. Flag any file writes or reads that escape intended directories, particularly when the path was user-supplied and passed through canonicalization checks. Review logs for file paths containing traversal patterns that were not rejected by validation routines."
+  }
+}

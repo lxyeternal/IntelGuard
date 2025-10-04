@@ -1,0 +1,127 @@
+{
+  "package_info": {
+    "package_name": "kubelet",
+    "package_manager": "kubernetes (core component, not a package manager)",
+    "package_versions": "v1.28.0 and below (v1.28.0, v1.27.4, v1.26.7, v1.25.12, v1.24.16)",
+    "why_malicious": "The affected kubelet versions contain a command injection vulnerability in the handling of the volumeMounts.subPath property on Windows nodes. Unsanitized user input is passed directly to a Powershell command executed with SYSTEM privileges, allowing attackers to execute arbitrary commands on the host node. This enables privilege escalation and remote code execution on Windows Kubernetes nodes."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "pod creation (volume mount setup)",
+        "file_location": "Go source code in kubelet (volume mounting logic)",
+        "required_permissions": [
+          "filesystem access",
+          "environment variable access",
+          "host OS command execution (SYSTEM privileges)"
+        ]
+      },
+      "code_snippet": "cmd := fmt.Sprintf(\"(Get-Item -LiteralPath %q).LinkType\", path)\noutput, err := exec.Command(\"powershell\", \"/c\", cmd).CombinedOutput()",
+      "code_language": "go",
+      "code_behavior": "During pod creation (volume mount setup), the kubelet constructs a Powershell command using the subPath value from the pod spec, interpolates it directly into the command string, and executes it as SYSTEM on the Windows node, resulting in execution of any code present in subPath.",
+      "malice_analysis": {
+        "why_suspicious": "Directly interpolating user-controlled input (subPath) into a shell command without sanitization creates a command injection vector, allowing arbitrary code execution with elevated privileges.",
+        "violated_expectations": "Normally, subPath should be a static, validated filesystem path. The kubelet should strictly validate and sanitize all user input before passing it to a shell command, preventing code execution.",
+        "similar_legitimate_use": "Legitimate use would be to check for symlinks or resolve paths using sanitized, validated input only, never allowing code execution or shell metacharacters.",
+        "key_indicators": [
+          "User input (subPath) directly inserted into shell command",
+          "No sanitization or validation of subPath before execution",
+          "Execution of shell commands with SYSTEM privileges by kubelet",
+          "Use of exec.Command with user-supplied arguments"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "pod creation (user-supplied pod spec)",
+        "file_location": "Pod YAML (volumeMounts.subPath field)",
+        "required_permissions": [
+          "none (user with pod creation rights)"
+        ]
+      },
+      "code_snippet": "subPath: $([System.Security.Principal.WindowsIdentity]::GetCurrent()>c:/POC)",
+      "code_language": "yaml (Powershell injected as string)",
+      "code_behavior": "At pod creation (user-supplied pod spec), the attacker provides a subPath value containing embedded Powershell code, which is later interpreted by the kubelet and injected into the Powershell command, resulting in execution of the injected code on the host.",
+      "malice_analysis": {
+        "why_suspicious": "Embedding Powershell code in a path field is highly abnormal and only possible due to lack of input validation, enabling code injection.",
+        "violated_expectations": "subPath should be a static, valid filesystem path, not a vector for code execution. The field must be validated to prevent shell metacharacters or code.",
+        "similar_legitimate_use": "There is no legitimate use for code execution in subPath; only valid, static paths should be accepted.",
+        "key_indicators": [
+          "subPath field contains shell metacharacters or code (e.g., $(), >)",
+          "subPath used for code injection rather than path specification",
+          "Presence of Powershell expressions in YAML pod spec"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (Powershell execution by kubelet)",
+        "file_location": "Powershell process on Windows node",
+        "required_permissions": [
+          "filesystem access (write to c:/POC)",
+          "host OS command execution (SYSTEM privileges)"
+        ]
+      },
+      "code_snippet": "(Get-Item -LiteralPath $([System.Security.Principal.WindowsIdentity]::GetCurrent()>c:/POC)).LinkType",
+      "code_language": "powershell",
+      "code_behavior": "At runtime (Powershell execution by kubelet), the injected Powershell code executes as SYSTEM, writing the current Windows identity to c:/POC on the host, demonstrating arbitrary code execution and file write on the host system.",
+      "malice_analysis": {
+        "why_suspicious": "The command includes a subshell that performs an action unrelated to the intended symlink check, indicating code injection and privilege abuse.",
+        "violated_expectations": "Get-Item should only operate on static, validated paths, not execute arbitrary code or perform file writes.",
+        "similar_legitimate_use": "No legitimate use for command substitution or file writes in this context; only static path resolution should occur.",
+        "key_indicators": [
+          "Subshell execution in path argument (e.g., $())",
+          "File write to unexpected location (c:/POC) during pod creation",
+          "Execution as SYSTEM via kubelet-initiated Powershell process"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a pod spec with a malicious subPath value containing embedded Powershell code.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Malicious pod spec is submitted to the Kubernetes cluster."
+    },
+    {
+      "step": 2,
+      "action": "Kubelet processes the pod spec and constructs a Powershell command using the subPath value without sanitization.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Kubelet executes the constructed Powershell command as SYSTEM."
+    },
+    {
+      "step": 3,
+      "action": "Injected Powershell code is executed on the Windows node with SYSTEM privileges, performing arbitrary actions such as writing files or executing further commands.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Arbitrary code execution on the host; attacker can escalate privileges, establish persistence, or exfiltrate data."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Powershell execution by kubelet with arguments containing subPath values from pod specs",
+      "subPath fields in pod specs containing shell metacharacters or embedded code (e.g., $(), >, ;)",
+      "Unexpected file writes (e.g., c:/POC) on Windows nodes during pod creation",
+      "Kubelet-initiated Powershell processes with non-standard command arguments"
+    ],
+    "file_indicators": [
+      "Pod specs with subPath fields containing shell metacharacters ($(), >, ;, |)",
+      "Unexpected files created on Windows nodes (e.g., c:/POC, c:/temp/POC, c:/temp/...)",
+      "Presence of files written by SYSTEM user during pod creation"
+    ],
+    "network_indicators": [
+      "Not directly applicable unless injected code performs network actions (e.g., reverse shell, data exfiltration)",
+      "Unusual outbound connections from Windows nodes immediately after pod creation"
+    ],
+    "how_to_detect": "Monitor pod specs for suspicious subPath values containing shell metacharacters or embedded code. Enable and review Powershell script block logging and process creation logs on Windows nodes for unexpected commands or file writes initiated by kubelet. Alert on deviations from normal kubelet Powershell command patterns, especially those containing subshells, redirections, or file writes. Use Kubernetes admission controllers to block pod specs with non-standard or non-validated subPath values. Correlate file creation events (e.g., c:/POC) with pod creation times to identify exploitation attempts."
+  }
+}

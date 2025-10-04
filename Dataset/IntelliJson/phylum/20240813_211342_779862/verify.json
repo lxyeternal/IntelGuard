@@ -1,0 +1,134 @@
+{
+  "package_info": {
+    "package_name": "certify, phylum-ci",
+    "package_manager": "PyPI",
+    "package_versions": "certify-2024.2.2, phylum-ci-0.44.0",
+    "why_malicious": "These packages exploit modern Python build backends (Hatch, PDM, Poetry) by embedding malicious code in build hook plugins, enabling arbitrary code execution during the wheel build process. This technique bypasses traditional static analysis and detection methods by executing code at build-time, even in the absence of setup.py, allowing attackers to perform unauthorized actions on the build host."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "wheel build-time (pre-build hook via Hatch)",
+        "file_location": "hatch_build.py",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "from hatchling.builders.hooks.plugin.interface import BuildHookInterface\n\nclass CustomBuildHook(BuildHookInterface):\n    def initialize(self, version, build_data):\n        # Code in this function will run before building\n        with open(\"/private/tmp/flag.txt\", mode=\"w\", encoding=\"utf-8\") as f:\n            f.write(\"Malware could have run here\")",
+      "code_language": "python",
+      "code_behavior": "At wheel build-time (pre-build hook via Hatch), the code opens /private/tmp/flag.txt for writing, writes a marker string, and closes the file, resulting in unauthorized file creation outside the package directory.",
+      "malice_analysis": {
+        "why_suspicious": "The build hook executes arbitrary code that writes to a system directory outside the package scope during the build process, which is not required for legitimate package builds and can be leveraged for signaling, data exfiltration, or further compromise.",
+        "violated_expectations": "Standard build hooks should only manipulate files within the package directory or update package metadata. Writing to unrelated system locations like /private/tmp/flag.txt is a clear deviation from expected behavior.",
+        "similar_legitimate_use": "Legitimate build hooks rarely, if ever, write to system directories outside the package. In rare cases, a build might cache artifacts, but this would be documented and not target arbitrary system paths.",
+        "key_indicators": [
+          "Arbitrary file write to /private/tmp/flag.txt during build",
+          "Execution of code via Hatch build hook (initialize method)",
+          "No user notification or consent for system file modification",
+          "Presence of hatch_build.py with custom BuildHookInterface implementation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "wheel build-time (pre-build hook via PDM)",
+        "file_location": "pdm_build.py",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "def pdm_build_hook_enabled(context):\n    # Only enable for wheel builds\n    return context.target == \"wheel\"\n\ndef pdm_build_initialize(context):\n    # Code in this function will run before building\n    with open(\"/private/tmp/flag.txt\", mode=\"w\", encoding=\"utf-8\") as f:\n        f.write(\"Malware could have run here\")",
+      "code_language": "python",
+      "code_behavior": "At wheel build-time (pre-build hook via PDM), the code checks if the build target is 'wheel', then writes a marker string to /private/tmp/flag.txt, resulting in unauthorized file creation on the build host.",
+      "malice_analysis": {
+        "why_suspicious": "The build hook is configured to execute only for wheel builds and writes to a sensitive system location, which is unnecessary for normal package builds and can be used for signaling or malicious payload delivery.",
+        "violated_expectations": "Build hooks should only affect files within the package or its build artifacts. Writing to /private/tmp/flag.txt is not a standard or required operation for any legitimate build process.",
+        "similar_legitimate_use": "It is extremely rare for legitimate builds to write to /private/tmp. Such behavior would typically be documented and justified, not hidden in a build hook.",
+        "key_indicators": [
+          "Conditional execution for wheel builds via pdm_build_hook_enabled",
+          "File write to /private/tmp/flag.txt during build",
+          "Custom pdm_build.py file implementing build hook logic",
+          "No user notification or documentation for system file modification"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "wheel build-time (build hook via Poetry)",
+        "file_location": "BUILD.md (referenced as build hook in pyproject.toml)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "def build():\n    with open(\"/private/tmp/flag.txt\", mode=\"w\", encoding=\"utf-8\") as f:\n        f.write(\"Malware could have run here\")\n\nif __name__ == \"__main__\":\n    build()",
+      "code_language": "python",
+      "code_behavior": "At wheel build-time (Poetry build hook), the code in BUILD.md (a file with a misleading extension) writes a marker string to /private/tmp/flag.txt, demonstrating arbitrary code execution via a disguised build hook.",
+      "malice_analysis": {
+        "why_suspicious": "The use of a Markdown file (BUILD.md) to store and execute Python code as a build hook is intentionally deceptive. The code writes to a system directory, which is not required for any legitimate build process and is a clear indicator of malicious intent.",
+        "violated_expectations": "Build hooks should be clearly named Python files and only modify package files or metadata. Executing Python code from a .md file is a deliberate attempt to evade detection and mislead reviewers.",
+        "similar_legitimate_use": "There is no legitimate reason to place executable Python code in a .md file and reference it as a build hook. This is a clear abuse of the build system.",
+        "key_indicators": [
+          "Executable Python code embedded in BUILD.md",
+          "BUILD.md referenced as a build hook in pyproject.toml",
+          "File write to /private/tmp/flag.txt during build",
+          "No user notification or documentation for this behavior"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker creates a malicious package with a legitimate-looking pyproject.toml and configures a build hook to reference a custom Python file (hatch_build.py, pdm_build.py, or BUILD.md).",
+      "implemented_by": [],
+      "leads_to": "Malicious code is included in the source distribution, disguised as a legitimate build hook."
+    },
+    {
+      "step": 2,
+      "action": "A user or CI system installs the package from source (sdist), triggering the build process to create a wheel.",
+      "implemented_by": [],
+      "leads_to": "The build backend executes the configured build hook as part of the wheel build process."
+    },
+    {
+      "step": 3,
+      "action": "Malicious code in the build hook (hatch_build.py, pdm_build.py, or BUILD.md) executes with the permissions of the build process.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Arbitrary code execution occurs on the build host, such as file creation, data exfiltration, or further system compromise."
+    },
+    {
+      "step": 4,
+      "action": "Malicious actions are performed (e.g., writing a flag file, but could include data theft, persistence, or other attacks), with no indication to the user.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "The attacker achieves code execution on the target system, completing the attack."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Execution of arbitrary Python code during wheel build via custom build hooks",
+      "Filesystem writes to locations outside the package directory during build (e.g., /private/tmp/flag.txt)",
+      "Use of non-standard or misleading filenames for build hook modules (e.g., BUILD.md containing Python code)",
+      "Presence of build hook logic that is not documented or expected for the package"
+    ],
+    "file_indicators": [
+      "Presence of hatch_build.py, pdm_build.py, or other custom-named Python files in the root of a source distribution",
+      "pyproject.toml with [tool.hatch.build.targets.wheel.hooks.custom], [tool.pdm.version], or [tool.poetry] build fields referencing non-standard or misleading files",
+      "Executable Python code found in files with non-Python extensions (e.g., .md)",
+      "Unexpected build hook entries in pyproject.toml referencing files outside standard build locations"
+    ],
+    "network_indicators": [
+      "Not present in these examples, but arbitrary code in build hooks could initiate network connections or exfiltrate data during build-time"
+    ],
+    "how_to_detect": "Scan source distributions for the presence of custom build hook files (e.g., hatch_build.py, pdm_build.py, or files with misleading extensions like .md) and inspect pyproject.toml for suspicious build hook entries referencing these files. Monitor build processes for any filesystem writes outside the package directory, especially to system locations such as /private/tmp. Disallow or sandbox sdist installations where possible to restrict build-time code execution. Flag any build-time execution of code that modifies system files or performs undocumented actions. Review build hook logic for undocumented or unnecessary system interactions."
+  }
+}

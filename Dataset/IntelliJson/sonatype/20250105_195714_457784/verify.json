@@ -2,56 +2,31 @@
   "package_info": {
     "package_name": "marked",
     "package_manager": "npm",
-    "package_versions": "0.3.19 and prior (before fix in PRs 1224/1226)",
-    "why_malicious": "The package contains a critical Regular Expression Denial of Service (ReDoS) vulnerability in its heading parsing logic. This flaw allows remote attackers to submit specially crafted markdown input that causes the NodeJS event loop to be blocked for extended periods, resulting in denial of service for legitimate users. The vulnerability is easily exploitable with relatively small payloads and is particularly severe in NodeJS environments due to their single-threaded architecture."
+    "package_versions": "0.3.19 and prior (as of report time)",
+    "why_malicious": "The package contains a critical Regular Expression Denial of Service (ReDoS) vulnerability in its heading parsing logic. This flaw allows remote attackers to submit specially crafted markdown input that triggers catastrophic backtracking in the parser's regular expression, causing the NodeJS event loop to become unresponsive for extended periods. The vulnerability is easily exploitable with relatively small payloads and poses a severe risk to availability, especially in single-threaded NodeJS environments."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
-        "trigger": "runtime (when user-supplied markdown input is parsed by marked)",
-        "file_location": "core parser logic in marked source code (heading regular expression, typically in lexer or tokenizer module)",
+        "trigger": "runtime",
+        "file_location": "lib/marked.js (heading parsing regular expression in main parser logic)",
         "required_permissions": [
-          "filesystem (to load marked module)",
-          "environment_vars (if used in a web application context)"
+          "filesystem (for package code execution)",
+          "environment_vars (if used in server context)"
         ]
       },
-      "code_snippet": "/^(#{1,6})(?: +)([^\\n]+?) *#* *(?:\\n+|$)/",
-      "code_language": "javascript (regular expression)",
-      "code_behavior": "This regular expression is used by marked to parse markdown headings. When processing input with a large number of consecutive spaces after the heading marker, the regex exhibits catastrophic backtracking, causing the NodeJS event loop to be blocked for a prolonged period. This enables attackers to trigger a denial of service with relatively small, crafted payloads.",
-      "malice_analysis": {
-        "why_suspicious": "The regex is structured in a way that allows for excessive backtracking when handling long sequences of spaces, making it highly susceptible to ReDoS attacks. This can be exploited remotely by submitting crafted markdown input.",
-        "violated_expectations": "A markdown parser should efficiently process user input and must not allow untrusted input to block the event loop. In this case, a single HTTP request with a crafted heading can cause the entire service to become unresponsive.",
-        "similar_legitimate_use": "Complex regular expressions are sometimes used for parsing markdown, but they should be rigorously tested for ReDoS resistance and optimized to prevent catastrophic backtracking.",
-        "key_indicators": [
-          "Presence of a regular expression with nested quantifiers and ambiguous spacing patterns",
-          "Catastrophic backtracking triggered by long runs of spaces in input",
-          "Direct use of user-controlled input in regex evaluation",
-          "Unbounded processing time for specific crafted inputs"
-        ]
-      }
-    },
-    {
-      "snippet_id": "snippet_2",
-      "execution_context": {
-        "trigger": "runtime (when marked is invoked with user-controlled input)",
-        "file_location": "application code utilizing marked (demonstration proof-of-concept)",
-        "required_permissions": [
-          "filesystem (to load marked module)",
-          "environment_vars (if used in a web application context)"
-        ]
-      },
-      "code_snippet": "var marked = require('marked');\nvar stringLengths = [1, 2, 3, 4, 5 ,6, 7, 8, 9, 10];\nstringLengths.forEach(function(stringLength){\n  var payload = '# #' + ' '.repeat(stringLength * 1000) + 'A';\n  var start = process.hrtime();\n  marked(payload);\n  var end = process.hrtime(start);\n  console.log(\"String Length = \" + payload.length + \" | Execution time (hr): %ds %dms\", end[0], end[1]/1000000);\n});",
+      "code_snippet": "var payload = '# #' + ' '.repeat(stringLength * 1000) + 'A';\nmarked(payload);",
       "code_language": "javascript",
-      "code_behavior": "This proof-of-concept code demonstrates the ReDoS vulnerability by generating markdown headings with increasing numbers of spaces and measuring the time taken by marked to process each payload. As the number of spaces increases, the processing time grows exponentially, confirming the vulnerability.",
+      "code_behavior": "At runtime, the code constructs a malicious markdown string with a heading followed by a large number of spaces and a character, then passes it to the marked parser, causing catastrophic backtracking in the heading regular expression and resulting in prolonged event loop blocking (ReDoS).",
       "malice_analysis": {
-        "why_suspicious": "The code empirically demonstrates that small increases in the number of spaces in the input cause exponential increases in processing time, which is a hallmark of a ReDoS vulnerability.",
-        "violated_expectations": "Normal markdown input should be parsed quickly and should not cause the parser to hang for seconds or minutes. The observed exponential slowdown is abnormal and dangerous.",
-        "similar_legitimate_use": "Benchmarking and fuzz testing code is legitimate in development, but here it is used to demonstrate and validate a security vulnerability.",
+        "why_suspicious": "This code is suspicious because it demonstrates that a relatively small, crafted input can cause the parser to hang for an extended period, which is not expected during normal markdown processing. The use of a complex regular expression in heading parsing enables this denial of service condition.",
+        "violated_expectations": "Normal markdown parsers are expected to process user input efficiently and robustly, regardless of input size or content. In this case, a single crafted input can block the entire server, violating the expectation of high availability and responsiveness.",
+        "similar_legitimate_use": "Legitimate use involves parsing user-supplied markdown, but not with inputs intentionally crafted to exploit regex backtracking. Normal markdown headings would not contain excessive whitespace designed to trigger performance issues.",
         "key_indicators": [
-          "Exponential increase in processing time as input size grows",
-          "Use of crafted input to trigger parser inefficiency",
-          "Demonstration of event loop blocking with specific payloads"
+          "Exponential or superlinear processing time when parsing headings with excessive whitespace",
+          "Presence of complex regular expressions in heading parsing logic (e.g., /^ *(#{1,6}) *([^\n]+?) *#* *(?:\\n+|$)/)",
+          "Ability for a single crafted markdown input to block the NodeJS event loop"
         ]
       }
     }
@@ -59,46 +34,34 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker submits a specially crafted markdown string containing a heading with a large number of spaces to a web application that uses marked for parsing.",
+      "action": "Attacker submits a specially crafted markdown string containing a heading with a large number of spaces to any web application endpoint that uses marked for parsing.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "The vulnerable heading regular expression in marked is triggered with the malicious input."
+      "leads_to": "The marked parser processes the input, triggering catastrophic backtracking in the heading regular expression."
     },
     {
       "step": 2,
-      "action": "The vulnerable regular expression processes the input, resulting in catastrophic backtracking and blocking the NodeJS event loop.",
+      "action": "The NodeJS event loop becomes blocked for an extended period (seconds to minutes), preventing the server from handling other requests.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Legitimate users experience denial of service as the application becomes unresponsive."
-    },
-    {
-      "step": 3,
-      "action": "The web application remains unresponsive for the duration of the regex processing, effectively resulting in a denial of service.",
-      "implemented_by": [
-        "snippet_1"
-      ],
-      "leads_to": "Attack is complete; the service is unavailable to users until processing finishes or the process is restarted."
+      "leads_to": "Denial of service for legitimate users (final goal)."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Sustained high CPU usage in NodeJS processes when processing markdown input",
-      "Prolonged event loop blocking times correlated with markdown headings containing long runs of spaces",
-      "Exponential increase in processing time for markdown inputs with repeated spaces in headings",
-      "Application logs or monitoring tools showing timeouts or unresponsiveness during markdown parsing"
+      "Excessive CPU usage or event loop blocking when parsing user-supplied markdown input",
+      "Superlinear or exponential processing time for markdown inputs with repeated whitespace in headings",
+      "Single HTTP request containing crafted markdown causing server unresponsiveness"
     ],
     "file_indicators": [
-      "Use of marked@0.3.19 or earlier in package.json or lockfiles",
-      "Presence of the vulnerable heading regex: /^(#{1,6})(?: +)([^\\n]+?) *#* *(?:\\n+|$)/ in marked source code",
-      "Absence of patches from PRs 1224/1226 in the marked codebase"
+      "Use of complex regular expressions in heading parsing logic, such as /^ *(#{1,6}) *([^\n]+?) *#* *(?:\\n+|$)/ in marked source code",
+      "References to 'marked' package in dependency lists or package.json"
     ],
     "network_indicators": [
-      "Large HTTP POST or PUT requests containing markdown with headings and unusually long sequences of spaces",
-      "Single HTTP requests resulting in prolonged application unresponsiveness or timeouts",
-      "Patterns of repeated requests with increasing payload sizes targeting markdown parsing endpoints"
+      "No direct network indicators (attack is local to the application), but may observe repeated or unusually large markdown payloads in HTTP requests targeting endpoints that process markdown"
     ],
-    "how_to_detect": "Monitor NodeJS applications using marked for unusually long processing times or high CPU usage when handling markdown input, especially with large or space-padded headings. Scan codebases for the vulnerable heading regex pattern and verify marked version is patched (post PRs 1224/1226). Analyze incoming HTTP requests for markdown content with excessive spaces in headings. Set up application-level alerts for event loop blocking or request timeouts during markdown parsing. Upgrade marked to a version after the fix to mitigate the vulnerability."
+    "how_to_detect": "Monitor application performance for excessive CPU usage or long event loop delays when processing markdown input, especially for requests containing headings with large amounts of whitespace. Review application dependencies for use of vulnerable versions of 'marked'. Perform fuzz testing with crafted markdown strings to identify superlinear processing time. Use static analysis to flag complex regular expressions in markdown parsers that may be susceptible to ReDoS."
   }
 }

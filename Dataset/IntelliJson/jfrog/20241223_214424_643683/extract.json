@@ -1,0 +1,101 @@
+{
+  "package_info": {
+    "package_name": "Go WebAssembly (wasm_exec.js, Go <1.16.9, <1.17.2)",
+    "package_manager": "Go (Golang) distribution",
+    "package_versions": "<1.16.9, <1.17.2",
+    "why_malicious": "Vulnerable Go versions allow attacker-controlled command-line arguments or environment variables to cause a buffer overflow in the WebAssembly (Wasm) memory space, enabling arbitrary Wasm code execution. This can lead to remote code execution in Node.js environments and XSS-like impact in browsers."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when go.run() is called in wasm_exec.js)",
+        "file_location": "wasm_exec.js (provided by Go distribution)",
+        "required_permissions": [
+          "memory access",
+          "environment_vars",
+          "command_line_args"
+        ]
+      },
+      "code_snippet": "let offset = 4096;\nconst strPtr = (str) => {\n    const ptr = offset;\n    const bytes = encoder.encode(str + \"\\0\");\n    new Uint8Array(this.mem.buffer, offset, bytes.length).set(bytes);\n    offset += bytes.length;\n    if (offset % 8 !== 0) {\n        offset += 8 - (offset % 8);\n    }\n    return ptr;\n};\n// ...\nthis.argv.forEach((arg) => {\n    argvPtrs.push(strPtr(arg));\n});\n// ...\nthis._inst.exports.run(argc, argv);",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code copies attacker-controlled command-line arguments and environment variables into the Wasm memory buffer starting at offset 4096, potentially overflowing into the Wasm module's code section, resulting in arbitrary Wasm code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The code does not check the total length of copied arguments/environment variables, allowing overflow into critical memory regions.",
+        "violated_expectations": "Normal behavior would restrict argument copying to prevent overwriting Wasm code/data. Here, unchecked copying allows memory corruption.",
+        "similar_legitimate_use": "Copying arguments into memory is standard, but always with bounds checking.",
+        "key_indicators": [
+          "No bounds check on argument/environment variable length",
+          "Direct memory manipulation based on untrusted input",
+          "Offset starts at 4096, but can exceed Wasm data section"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when go.run() is called in patched wasm_exec.js)",
+        "file_location": "wasm_exec.js (patched version)",
+        "required_permissions": [
+          "memory access",
+          "environment_vars",
+          "command_line_args"
+        ]
+      },
+      "code_snippet": "// The linker guarantees global data starts from at least wasmMinDataAddr.\nconst wasmMinDataAddr = 4096 + 4096;\nif (offset >= wasmMinDataAddr) {\n    throw new Error(\"command line too long\");\n}\nthis._inst.exports.run(argc, argv);",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code checks if the offset after copying arguments exceeds the minimum data address (8192). If so, it throws an error, preventing buffer overflow and arbitrary code execution.",
+      "malice_analysis": {
+        "why_suspicious": "This is a mitigation, not malicious, but its absence in vulnerable versions is a key indicator of risk.",
+        "violated_expectations": "Normal secure code would include such a check; its absence is what enables the exploit.",
+        "similar_legitimate_use": "Bounds checking is standard in secure memory operations.",
+        "key_indicators": [
+          "Presence/absence of offset bounds check",
+          "Error thrown on excessive argument length"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker supplies an excessively long command-line argument or environment variable (over 4096 bytes) to the Go-compiled Wasm module.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Buffer overflow in Wasm memory space"
+    },
+    {
+      "step": 2,
+      "action": "The unchecked copying of arguments in wasm_exec.js overwrites the Wasm module's code/data section with attacker-controlled data.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker-controlled Wasm code execution"
+    },
+    {
+      "step": 3,
+      "action": "In Node.js, attacker-controlled Wasm code can access filesystem and execute arbitrary OS commands; in browsers, attacker code runs in the JS/Wasm sandbox.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Remote code execution (Node.js) or XSS-like impact (browser)"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Wasm module receives command-line arguments or environment variables exceeding 4096 bytes",
+      "Unchecked memory writes in wasm_exec.js based on user input",
+      "Absence of offset bounds check in wasm_exec.js"
+    ],
+    "file_indicators": [
+      "wasm_exec.js (unpatched, lacking offset bounds check)",
+      "Go-compiled Wasm modules executed with user-controlled arguments"
+    ],
+    "network_indicators": [
+      "Unusual or excessive query parameters in URLs loading Wasm modules (e.g., ?external_argument=AAAA...4096+ chars)",
+      "Node.js processes receiving large arguments/environment variables when running Go-compiled Wasm"
+    ],
+    "how_to_detect": "Monitor for Go-compiled Wasm modules being executed with command-line arguments or environment variables exceeding 4096 bytes. Inspect wasm_exec.js for the presence or absence of the offset bounds check (wasmMinDataAddr). Flag any process or web request that attempts to pass excessively long arguments to Wasm modules, especially in environments running Go <1.16.9 or <1.17.2."
+  }
+}

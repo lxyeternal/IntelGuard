@@ -1,0 +1,134 @@
+{
+  "package_info": {
+    "package_name": "c{api}tal",
+    "package_manager": "custom/docker (FastAPI, Python, React)",
+    "package_versions": "all (intentionally vulnerable, CTF version)",
+    "why_malicious": "The application is intentionally designed to be vulnerable to the OWASP API Top 10 risks, exposing users to critical API security flaws such as Broken Object Level Authorization (BOLA) and Mass Assignment. These vulnerabilities allow unauthorized access, privilege escalation, and data manipulation, which would be considered highly malicious in a production environment."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (API call to DELETE /api/comments/{comment_id})",
+        "file_location": "comments API route (delete_comment_from_article function)",
+        "required_permissions": [
+          "authenticated user",
+          "network"
+        ]
+      },
+      "code_snippet": "@router.delete(\n    \"/{comment_id}\",\n    status_code=status.HTTP_204_NO_CONTENT,\n    name=\"comments:delete-comment-from-article\",\n)\nasync def delete_comment_from_article(\n    comment: Comment = Depends(get_comment_by_id_from_path),\n    comments_repo: CommentsRepository = Depends(get_repository(CommentsRepository)),\n    user: User = Depends(get_current_user_authorizer()),\n) -> JSONResponse:\n    await comments_repo.delete_comment(comment=comment)\n    json_compatible_item_data = jsonable_encoder({\"message\": \"Your comment has been deleted\"})\n    if comment.author.username != user.username:\n        json_compatible_item_data = jsonable_encoder({\"message\": strings.BOLA})\n    return JSONResponse(content=json_compatible_item_data)",
+      "code_language": "python",
+      "code_behavior": "At runtime, when an authenticated user calls the DELETE /api/comments/{comment_id} endpoint, the function immediately deletes the specified comment from the database without verifying that the requesting user is the comment's author, resulting in unauthorized deletion of any comment.",
+      "malice_analysis": {
+        "why_suspicious": "The code allows any authenticated user to delete any comment, regardless of ownership, which is a classic Broken Object Level Authorization (BOLA) vulnerability. The ownership check is performed after the deletion, rendering it ineffective.",
+        "violated_expectations": "Normal behavior would require a check to ensure only the comment's author (or an admin) can delete the comment before performing the deletion. Here, the authorization logic is either missing or misplaced after the destructive action.",
+        "similar_legitimate_use": "Legitimate admin moderation tools may allow comment deletion, but only with explicit privilege checks and typically only for users with elevated permissions.",
+        "key_indicators": [
+          "No ownership or privilege check before deletion operation",
+          "Destructive action (delete) performed prior to authorization logic",
+          "Any authenticated user can delete arbitrary comments via API",
+          "Authorization logic present but ineffective due to order of operations"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (API call to PUT /api/user)",
+        "file_location": "user profile update endpoint",
+        "required_permissions": [
+          "authenticated user",
+          "network"
+        ]
+      },
+      "code_snippet": "{\n  \"user\": {\n    \"email\": \"MassAssignment@checkmarx.com\",\n    \"admin\": \"true\"\n  }\n}",
+      "code_language": "json",
+      "code_behavior": "At runtime, when an authenticated user sends a PUT request to /api/user with the 'admin' property set to true, the backend updates the user's profile by directly applying all provided fields, including the sensitive 'admin' field, resulting in privilege escalation to admin.",
+      "malice_analysis": {
+        "why_suspicious": "The API accepts and applies arbitrary fields from user input, including sensitive properties like 'admin', without filtering or validation. This enables attackers to escalate their privileges by simply including 'admin': true in the request.",
+        "violated_expectations": "Normal behavior would restrict updates to non-sensitive fields (e.g., email, bio) and never allow users to escalate their own privileges through user-controlled input. Sensitive fields should be filtered or validated server-side.",
+        "similar_legitimate_use": "Admin-only endpoints may legitimately update user roles, but such actions should be restricted to privileged users and never exposed via general user profile update APIs.",
+        "key_indicators": [
+          "Sensitive fields (e.g., 'admin') modifiable via user-supplied input",
+          "No server-side filtering or whitelisting of updatable properties",
+          "Privilege escalation possible through mass assignment vulnerability",
+          "Direct mapping of user input to database fields without validation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (API call to GET /api/user or /api/profiles/{username})",
+        "file_location": "get_profile_by_username function",
+        "required_permissions": [
+          "authenticated user",
+          "network"
+        ]
+      },
+      "code_snippet": "profile = Profile(username=user.username, bio=user.bio, image=user.image, admin=user.admin)",
+      "code_language": "python",
+      "code_behavior": "At runtime, when a user profile is requested via GET /api/user or /api/profiles/{username}, the API includes the 'admin' property in the response, exposing sensitive privilege information to any authenticated user.",
+      "malice_analysis": {
+        "why_suspicious": "The API exposes internal privilege status (admin) in user profile responses, which can aid attackers in identifying privileged accounts and facilitate further exploitation, such as targeted privilege escalation or social engineering.",
+        "violated_expectations": "Normal behavior would not expose sensitive internal properties like 'admin' in public or user-facing API responses. Such information should be restricted to internal use or admin-only dashboards.",
+        "similar_legitimate_use": "Admin dashboards or internal tools may display such fields, but general user APIs should not expose privilege information to regular users.",
+        "key_indicators": [
+          "Sensitive fields (e.g., 'admin') included in API responses",
+          "No access control or filtering on privilege information in user profile endpoints",
+          "Exposure of internal authorization state to external clients"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker authenticates as a normal user.",
+      "implemented_by": [],
+      "leads_to": "Access to user-level API endpoints"
+    },
+    {
+      "step": 2,
+      "action": "Attacker exploits BOLA by sending a DELETE request for another user's comment.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Unauthorized deletion of arbitrary comments"
+    },
+    {
+      "step": 3,
+      "action": "Attacker exploits mass assignment by sending a PUT request to /api/user with 'admin': true.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Privilege escalation to admin"
+    },
+    {
+      "step": 4,
+      "action": "Attacker confirms privilege escalation by retrieving their profile, which now shows 'admin': true.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Full admin access and potential further exploitation"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "API endpoints allowing modification of sensitive fields (e.g., 'admin') via user input without server-side filtering",
+      "Lack of ownership or privilege checks before performing destructive actions (e.g., comment deletion) in API routes",
+      "Sensitive privilege information (e.g., 'admin') exposed in API responses to non-privileged users"
+    ],
+    "file_indicators": [
+      "API route handlers that update user objects without explicit field whitelisting or validation",
+      "Endpoints that accept arbitrary JSON properties for user profile updates (e.g., PUT /api/user)",
+      "Profile or user endpoints returning 'admin' or other sensitive fields in response objects"
+    ],
+    "network_indicators": [
+      "PUT /api/user requests containing 'admin' or other privilege fields in the JSON payload",
+      "DELETE requests to /api/comments/{comment_id} from users who are not the comment owner",
+      "GET requests to /api/user or /api/profiles/{username} returning 'admin' field in the response"
+    ],
+    "how_to_detect": "Monitor API traffic for requests that attempt to modify sensitive fields (such as 'admin') via mass assignment in user-controlled input, and for destructive actions (such as DELETE) performed by users lacking ownership or appropriate privileges. Flag API responses that expose internal privilege fields (e.g., 'admin') to non-privileged users. Implement logging and alerting for privilege escalation attempts, unauthorized resource modifications, and exposure of sensitive authorization data in API responses. Use static analysis to identify endpoints lacking field whitelisting or proper authorization checks."
+  }
+}

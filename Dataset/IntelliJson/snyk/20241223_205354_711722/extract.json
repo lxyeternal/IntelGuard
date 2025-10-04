@@ -1,0 +1,99 @@
+{
+  "package_info": {
+    "package_name": "object-path",
+    "package_manager": "npm",
+    "package_versions": "<0.11.6",
+    "why_malicious": "The package is vulnerable to prototype pollution due to improper type checking in its property path validation logic. Attackers can bypass security checks by supplying array-wrapped dangerous property names, leading to arbitrary property injection on object prototypes."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime",
+        "file_location": "object-path internal set() method",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "if (options.includeInheritedProps && (currentPath === '__proto__' || (currentPath === 'constructor' && typeof currentValue === 'function'))) {\n  throw new Error('For security reasons, object\\'s magic properties cannot be set')\n}",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code attempts to prevent prototype pollution by checking if the current property path is '__proto__' or 'constructor' using strict equality, and throws an error if so. However, if the attacker supplies ['__proto__'] (an array), the check fails due to type mismatch, allowing prototype pollution.",
+      "malice_analysis": {
+        "why_suspicious": "The check relies on strict equality (===) without normalizing input types, allowing attackers to bypass the check by supplying an array containing the dangerous property name.",
+        "violated_expectations": "Normal behavior would be to block any attempt to set dangerous properties like '__proto__', regardless of input type. The actual behavior only blocks string matches, not array-wrapped values.",
+        "similar_legitimate_use": "Strict equality is commonly used for type-safe comparisons, but in security checks, normalization is expected.",
+        "key_indicators": [
+          "Strict equality check on user-controlled input",
+          "No type normalization before security check",
+          "Allows array-wrapped dangerous property names"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime",
+        "file_location": "edge.js Template/index.ts escape() function",
+        "required_permissions": [
+          "none"
+        ]
+      },
+      "code_snippet": "public escape<T>(input: T): T extends SafeValue ? T['value'] : T {\n  return typeof input === 'string'\n    ? string.escapeHTML(input)\n    : input instanceof SafeValue\n    ? input.value\n    : input\n}",
+      "code_language": "typescript",
+      "code_behavior": "At runtime, the code escapes HTML only if the input is a string. If the input is an array (e.g., from req.query), it is returned unescaped, allowing attacker-supplied HTML/JS to be rendered directly in templates, leading to XSS.",
+      "malice_analysis": {
+        "why_suspicious": "The function fails to sanitize non-string input, such as arrays, which can be supplied via query parameters. This allows attacker-controlled HTML to bypass escaping and be rendered in the output.",
+        "violated_expectations": "Template engines are expected to escape all user-controlled input unless explicitly marked as safe. Here, only strings are escaped, violating this expectation.",
+        "similar_legitimate_use": "Returning non-string values unescaped may be legitimate in strictly typed or internal APIs, but not in user-facing template rendering.",
+        "key_indicators": [
+          "Type check only for string",
+          "No fallback escaping for non-string input",
+          "Direct output of user-controlled arrays"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker supplies an array-wrapped dangerous property name (e.g., ['__proto__']) as a path to the set() function.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Bypass of prototype pollution protection logic."
+    },
+    {
+      "step": 2,
+      "action": "The set() function fails to detect the dangerous property due to strict equality type mismatch, allowing the property to be set on the object prototype.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Prototype pollution, enabling arbitrary property injection."
+    },
+    {
+      "step": 3,
+      "action": "In edge.js, attacker supplies an array as a query parameter (e.g., name[]=<img src=x onerror='alert(1)'/>) to a template rendering endpoint.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Input is not escaped and is rendered directly in the template, resulting in XSS."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Strict equality checks on user input for dangerous property names without type normalization",
+      "Template rendering functions that only escape string input, not arrays or objects",
+      "User-controlled array input passed to property access or template rendering"
+    ],
+    "file_indicators": [
+      "object-path set() or similar deep property setter functions",
+      "Template engines with escape() or similar sanitization functions that type-check only for string"
+    ],
+    "network_indicators": [
+      "HTTP requests with query parameters using array notation (e.g., name[]=...)",
+      "Unusual property names in JSON or query payloads (e.g., ['__proto__'])"
+    ],
+    "how_to_detect": "Monitor for use of array-wrapped property names in API requests or query parameters, especially when passed to deep property setters. Audit template rendering code for escape/sanitization functions that only handle strings. Flag any user input that is not normalized to string before security checks or output rendering. Look for prototype pollution attempts by tracking assignments to '__proto__', 'constructor', or similar properties, regardless of input type."
+  }
+}

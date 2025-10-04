@@ -1,0 +1,134 @@
+{
+  "package_info": {
+    "package_name": "Linux Kernel (DirtyPipe CVE-2022-0847)",
+    "package_manager": "kernel",
+    "package_versions": "5.8 to before 5.16.11, 5.15.25, 5.10.102",
+    "why_malicious": "The affected Linux kernel versions contain a vulnerability (CVE-2022-0847, DirtyPipe) that allows local attackers to bypass file permissions and write arbitrary data to any file, even if opened as read-only, due to a flaw in the splice() syscall implementation. This enables privilege escalation and arbitrary file modification, undermining core system security boundaries."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (local exploit execution)",
+        "file_location": "kernel syscall handler (splice())",
+        "required_permissions": [
+          "filesystem",
+          "local user access"
+        ]
+      },
+      "code_snippet": "splice(pipefd[1], NULL, fd, &offset, len, 0); // attacker-controlled usage",
+      "code_language": "c",
+      "code_behavior": "At runtime, the attacker invokes the splice() syscall with a pipe and a file descriptor opened as O_RDONLY, causing attacker-controlled data to be written to a read-only file via the page cache, resulting in unauthorized file modification and enabling privilege escalation.",
+      "malice_analysis": {
+        "why_suspicious": "This code enables writing to files that are opened as read-only, which should be impossible for unprivileged users. It directly violates the expected security model of the Linux filesystem.",
+        "violated_expectations": "Normally, files opened with O_RDONLY cannot be written to by any process, regardless of user privileges. The exploit allows bypassing this restriction, enabling unauthorized file modification.",
+        "similar_legitimate_use": "Legitimate use of splice() is for efficient data transfer between file descriptors, such as moving data between pipes and files, but never to write to files opened as read-only.",
+        "key_indicators": [
+          "splice() syscall invoked with a pipe and a file descriptor opened as O_RDONLY",
+          "Unprivileged process writing to files that should be immutable",
+          "Modification of sensitive files (e.g., /etc/passwd) by non-root users",
+          "Arbitrary data injection into files via pipe manipulation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (container or host exploit)",
+        "file_location": "filesystem (e.g., /etc/passwd, setuid binaries)",
+        "required_permissions": [
+          "filesystem",
+          "local user access"
+        ]
+      },
+      "code_snippet": "Attacker overwrites /etc/passwd or setuid-root binary ELF using the DirtyPipe exploit technique.",
+      "code_language": "exploit technique (C or PoC script)",
+      "code_behavior": "At runtime, the attacker leverages the DirtyPipe vulnerability to overwrite critical system files (such as /etc/passwd or setuid-root binaries) with arbitrary data, resulting in privilege escalation to root or arbitrary code execution as root.",
+      "malice_analysis": {
+        "why_suspicious": "Overwriting system files as an unprivileged user is a clear indicator of exploitation and privilege escalation, as these files are critical to system integrity and should only be modifiable by root.",
+        "violated_expectations": "System files like /etc/passwd and setuid binaries should only be modifiable by root or privileged processes. The exploit allows unprivileged users to modify them, breaking fundamental security boundaries.",
+        "similar_legitimate_use": "No legitimate scenario exists for unprivileged users to modify these files. Only system administrators or package management processes should have such access.",
+        "key_indicators": [
+          "Unexpected modification of /etc/passwd or setuid binaries by non-root users",
+          "File changes to critical system files not associated with privileged processes",
+          "File writes to read-only files by unprivileged users",
+          "Audit logs showing unprivileged process activity on protected files"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "container runtime (mitigation)",
+        "file_location": "Docker seccomp profile (profile.json)",
+        "required_permissions": [
+          "container runtime policy"
+        ]
+      },
+      "code_snippet": "\"names\": [\n  \"accept\",\n  \"accept4\",\n  // \"splice\", (removed)\n  \"access\"\n]",
+      "code_language": "json",
+      "code_behavior": "At container runtime, the seccomp profile is modified to remove the 'splice' syscall from the list of allowed syscalls, blocking the ability to exploit the DirtyPipe vulnerability within containers and preventing unprivileged code from invoking splice().",
+      "malice_analysis": {
+        "why_suspicious": "Blocking the splice syscall is a mitigation, not a malicious action, but its presence or absence is a key indicator for exploitability. The removal of splice from allowed syscalls suggests an attempt to harden the container against DirtyPipe exploitation.",
+        "violated_expectations": "Default Docker seccomp profiles allow splice; removing it is a defensive measure. Applications expecting splice may fail if it is removed.",
+        "similar_legitimate_use": "Some high-performance applications may use splice legitimately for zero-copy data transfer, but this is uncommon in most containerized workloads.",
+        "key_indicators": [
+          "Custom seccomp profiles with splice syscall removed",
+          "Containers failing due to missing splice syscall",
+          "Audit logs showing denied splice syscall attempts"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker gains local access to a vulnerable Linux system (host or container).",
+      "implemented_by": [],
+      "leads_to": "Attempt to exploit the kernel vulnerability."
+    },
+    {
+      "step": 2,
+      "action": "Attacker crafts a pipe and opens a target file (e.g., /etc/passwd) as read-only.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Preparation for arbitrary file overwrite."
+    },
+    {
+      "step": 3,
+      "action": "Attacker uses the splice() syscall to inject arbitrary data into the page cache, overwriting the target file.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Privilege escalation or code execution as root."
+    },
+    {
+      "step": 4,
+      "action": "Attacker achieves root privileges or arbitrary code execution by modifying critical system files.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Final goal: full system compromise."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unprivileged user processes invoking splice() targeting read-only files",
+      "Unexpected modification of critical system files (e.g., /etc/passwd, setuid binaries) by non-root users",
+      "File writes to read-only files without corresponding privileged process activity",
+      "Audit logs showing denied or attempted splice syscalls in hardened container environments"
+    ],
+    "file_indicators": [
+      "/etc/passwd modified outside of package management or root activity",
+      "Setuid binaries overwritten or changed by unprivileged users",
+      "Custom seccomp profiles with splice syscall removed",
+      "Audit records of file writes to read-only files by non-root users"
+    ],
+    "network_indicators": [
+      "None (DirtyPipe is a local privilege escalation; no direct network indicators)"
+    ],
+    "how_to_detect": "Monitor for unprivileged processes invoking the splice() syscall, especially when targeting files opened as read-only. Audit file modifications to critical system files (e.g., /etc/passwd, /etc/shadow, setuid binaries) and flag changes not associated with root or package management processes. In container environments, check for custom seccomp profiles that remove the splice syscall as a mitigation indicator. Correlate suspicious file modifications with process privilege levels and syscall usage. Review audit logs for denied or attempted splice syscalls in containers, and investigate any file writes to protected files by unprivileged users."
+  }
+}

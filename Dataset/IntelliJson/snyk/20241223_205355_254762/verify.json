@@ -1,0 +1,104 @@
+{
+  "package_info": {
+    "package_name": "Instant Markdown",
+    "package_manager": "VS Code Extension Marketplace",
+    "package_versions": "All versions prior to the fix (exact version not specified)",
+    "why_malicious": "The Instant Markdown extension exposes a local web server with a path traversal vulnerability, allowing any process or website able to access localhost to read arbitrary files from the developer's machine. This enables attackers to exfiltrate sensitive files (such as SSH keys and configuration files) by tricking the developer into opening a malicious website, making the extension a severe supply chain risk."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, whenever a markdown file is opened in VS Code",
+        "file_location": "Main extension JavaScript code (entry point of Instant Markdown extension)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "const express = require('express');\nconst app = express();\napp.use(express.static(process.cwd()));\napp.listen(8090, 'localhost');",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, when a markdown file is opened in VS Code, the extension starts a web server on localhost:8090, serving files from the current working directory and its parent directories, allowing HTTP requests to access files on the user's filesystem.",
+      "malice_analysis": {
+        "why_suspicious": "Starting a web server that serves arbitrary files from the developer's filesystem without any access control or path sanitization is highly dangerous, as it exposes sensitive files to any process or website able to access localhost.",
+        "violated_expectations": "A normal markdown preview extension should only render the current markdown file for preview, not expose a web server that allows access to arbitrary files on the system.",
+        "similar_legitimate_use": "Serving only the current markdown file for preview in a browser is legitimate, but exposing the entire working directory or parent directories is not.",
+        "key_indicators": [
+          "Web server listens on localhost:8090",
+          "Uses express.static with process.cwd(), potentially exposing the user's home directory or project root",
+          "No authentication, access control, or path sanitization implemented"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "At runtime, when HTTP GET requests are made to the local server",
+        "file_location": "HTTP request handler in the extension's server code",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "app.get('/*', function(req, res) {\n  const filePath = path.join(process.cwd(), req.path);\n  res.sendFile(filePath);\n});",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, when the local server receives an HTTP GET request, the code joins the user-supplied path to the current working directory and serves the resulting file, enabling path traversal via crafted URLs and allowing access to files outside the intended directory.",
+      "malice_analysis": {
+        "why_suspicious": "The code directly uses user-supplied paths in filesystem access without validation or sanitization, enabling attackers to use '../' sequences to access files outside the intended directory.",
+        "violated_expectations": "A secure file server should validate and restrict file paths to prevent traversal outside the intended directory, but this code allows arbitrary file access.",
+        "similar_legitimate_use": "Serving static assets within a web application root is legitimate, but allowing arbitrary file access via path traversal is not.",
+        "key_indicators": [
+          "Direct use of req.path in path.join for filesystem access",
+          "No validation or sanitization of user-supplied paths",
+          "Enables '../../' traversal attacks to access sensitive files"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "User opens a markdown file in VS Code, triggering the extension to start a local web server on port 8090.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Local server is accessible on localhost:8090."
+    },
+    {
+      "step": 2,
+      "action": "Attacker tricks the developer into visiting a malicious website (e.g., via phishing or social engineering).",
+      "implemented_by": [],
+      "leads_to": "Malicious website can make requests to localhost:8090 from the victim's browser."
+    },
+    {
+      "step": 3,
+      "action": "Malicious website uses JavaScript (such as fetch, iframe, or Window.postMessage) to send crafted HTTP requests to localhost:8090 with path traversal payloads.",
+      "implemented_by": [],
+      "leads_to": "Local server receives requests with paths like /foo/?/../../../../../.ssh/id_rsa."
+    },
+    {
+      "step": 4,
+      "action": "Extension's server code processes the request and returns the contents of the targeted file (e.g., SSH private key) to the browser.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Sensitive file contents are exfiltrated to the attacker's website."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "VS Code extension starts a web server on localhost, especially on fixed ports like 8090",
+      "Extension serves files from arbitrary locations on the filesystem without access control",
+      "HTTP requests to localhost:8090 containing path traversal patterns such as '../'"
+    ],
+    "file_indicators": [
+      "Presence of express.js or similar web server code in extension source",
+      "Use of app.use(express.static(process.cwd())) or similar patterns in extension code",
+      "HTTP handler code that joins user-supplied paths (e.g., req.path) to filesystem locations without sanitization"
+    ],
+    "network_indicators": [
+      "Unusual HTTP traffic from browser to localhost:8090",
+      "Requests containing '../' or other path traversal sequences in the URL path to localhost:8090"
+    ],
+    "how_to_detect": "Monitor installed VS Code extensions for those that start local web servers, especially on common ports like 8090. Analyze extension code for use of express.static or similar file serving mechanisms without path sanitization. Detect HTTP requests from browsers to localhost:8090 containing path traversal patterns. Flag extensions that allow serving files outside the intended project directory or lack access controls."
+  }
+}

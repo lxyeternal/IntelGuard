@@ -3,7 +3,7 @@
     "package_name": "darcyclarke-manifest-pkg",
     "package_manager": "npm",
     "package_versions": "2.1.15 (and potentially others, due to manifest confusion)",
-    "why_malicious": "The package exploits a 'manifest confusion' vulnerability to conceal install scripts and dependencies from the npm registry UI and most security tools. This allows the execution of hidden, potentially malicious code during installation, enabling attackers to run arbitrary commands or install unwanted dependencies without user awareness. This undermines the integrity of the npm registry and bypasses standard security review processes."
+    "why_malicious": "The package exploits a 'manifest confusion' vulnerability in the npm registry, allowing it to conceal install scripts and dependencies from the public registry manifest while still executing them during installation. This enables attackers to stealthily execute arbitrary code and install hidden dependencies on user systems, bypassing standard auditing and trust mechanisms."
   },
   "malicious_snippets": [
     {
@@ -17,16 +17,41 @@
       },
       "code_snippet": "touch ./bad-pkg-write && echo \"bad pkg exec!\"",
       "code_language": "shell",
-      "code_behavior": "During the installation process, this script creates a file named 'bad-pkg-write' in the current directory and outputs the string 'bad pkg exec!' to the console. This demonstrates the ability to execute arbitrary shell commands on the user's system as a side effect of installing the package.",
+      "code_behavior": "During postinstall, the code creates a file named './bad-pkg-write' on the filesystem and writes 'bad pkg exec!' to the console, resulting in unauthorized file creation and user notification.",
       "malice_analysis": {
-        "why_suspicious": "The install script is deliberately hidden from the npm registry manifest and only present in the package.json inside the tarball. This allows the package to execute arbitrary shell commands on the user's machine during installation without any visible indication in the registry UI or standard metadata, evading most automated security checks.",
-        "violated_expectations": "Legitimate packages are expected to declare all install scripts and dependencies transparently in the registry manifest, allowing users and security tools to review them before installation. Concealing install scripts in the tarball violates this expectation and introduces the risk of hidden code execution.",
-        "similar_legitimate_use": "Some legitimate packages use install scripts for setup tasks such as compiling native modules or performing environment checks, but these scripts are typically documented and visible in the registry manifest. Hidden or undocumented install scripts are not standard practice and are a strong indicator of malicious intent.",
+        "why_suspicious": "The install script is hidden from the npm registry manifest but present and executed from the package.json, enabling arbitrary code execution without user awareness or consent.",
+        "violated_expectations": "Install scripts and dependencies are expected to be transparently listed in the npm registry metadata for auditing. In this case, the script is concealed from the registry manifest, violating transparency and auditability.",
+        "similar_legitimate_use": "Install scripts are legitimately used for build steps such as compiling native modules, but these scripts are always expected to be visible in the registry metadata for review.",
         "key_indicators": [
-          "Install script present in package.json tarball but absent from registry manifest",
-          "Execution of arbitrary shell commands during npm install",
-          "Creation of unexpected files (e.g., 'bad-pkg-write') as a side effect of installation",
-          "Lack of documentation or disclosure of install script in registry UI"
+          "Install script present in package.json but missing from registry manifest",
+          "Arbitrary file creation ('./bad-pkg-write') during installation",
+          "Command execution triggered by hidden install script",
+          "Discrepancy between registry metadata and actual package.json"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "install-time",
+        "file_location": "package.json (dependencies)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "\"dependencies\": { \"sleepover\": \"*\" }",
+      "code_language": "json",
+      "code_behavior": "At install-time, the package manager reads the package.json and installs the hidden dependency 'sleepover', which is not listed in the npm registry manifest, resulting in the execution and inclusion of potentially malicious code from an undisclosed source.",
+      "malice_analysis": {
+        "why_suspicious": "The dependency is concealed from the registry manifest, allowing attackers to introduce malicious or unwanted code without user knowledge or the ability to audit the dependency chain.",
+        "violated_expectations": "All dependencies should be openly declared in both the registry metadata and package.json to allow for proper auditing. Concealing dependencies undermines supply chain security.",
+        "similar_legitimate_use": "Legitimate packages declare all dependencies transparently in both the registry manifest and package.json, ensuring full visibility for users and security tools.",
+        "key_indicators": [
+          "Dependency ('sleepover') present in package.json but absent from registry manifest",
+          "Hidden installation of additional packages during install",
+          "Potential for supply chain attacks via concealed dependencies",
+          "Mismatch between registry metadata and actual package.json dependencies"
         ]
       }
     }
@@ -34,34 +59,40 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "User installs the package, unaware of hidden install scripts or dependencies due to manifest confusion.",
-      "implemented_by": [
-        "snippet_1"
-      ],
-      "leads_to": "Execution of a hidden install script on the user's machine during the installation process."
+      "action": "User installs the package, relying on the npm registry metadata, which shows no dependencies or install scripts.",
+      "implemented_by": [],
+      "leads_to": "Hidden install script and dependencies are executed and installed without user awareness."
     },
     {
       "step": 2,
-      "action": "The hidden install script executes arbitrary shell commands (e.g., creating a file and echoing text).",
+      "action": "The concealed install script in package.json executes, performing unauthorized file operations and command execution.",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Demonstrates the potential for more harmful actions, such as credential theft or malware installation, if the script is modified."
+      "leads_to": "Potential for further malicious actions, such as data exfiltration or establishing persistence."
+    },
+    {
+      "step": 3,
+      "action": "Hidden dependencies in package.json are installed, potentially introducing additional malicious code from undisclosed sources.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Expanded attack surface and risk of further compromise via hidden or malicious dependencies."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Execution of install scripts not declared in the npm registry manifest",
-      "Discrepancy between registry metadata and package.json in tarball (e.g., hidden scripts or dependencies)",
-      "Unexpected shell command execution during npm install, especially when not declared in the registry UI"
+      "Execution of install scripts present in package.json but not listed in the registry manifest",
+      "Installation of dependencies found in package.json but missing from registry metadata",
+      "Discrepancy between registry manifest and package.json contents regarding scripts and dependencies"
     ],
     "file_indicators": [
-      "package.json containing install scripts that are not present in the registry manifest",
-      "Creation of unexpected files (such as 'bad-pkg-write') during package installation"
+      "package.json containing install scripts or dependencies not reflected in registry manifest",
+      "Creation of unexpected files during install, such as './bad-pkg-write'"
     ],
     "network_indicators": [
-      "N/A in this proof-of-concept, but could include outbound network connections if the install script is modified to contact external servers"
+      "Unexpected network requests initiated by install scripts or hidden dependencies during package installation"
     ],
-    "how_to_detect": "Automated systems should compare the manifest data shown on the npm registry with the actual package.json inside the tarball. Flag any packages where install scripts or dependencies are present in the tarball but not in the registry manifest. Monitor for unexpected shell command execution during npm install, particularly when such scripts are not declared in the registry UI. Alert on the creation of unexpected files or other side effects during installation."
+    "how_to_detect": "Compare the package.json inside the package tarball with the manifest data shown on the npm registry. Flag any install scripts or dependencies present in package.json but missing from the registry metadata. Monitor for unexpected file creation or command execution during package installation. Use a registry proxy or security tool to validate manifest consistency before installation and alert on any discrepancies."
   }
 }

@@ -1,0 +1,76 @@
+{
+  "package_info": {
+    "package_name": "libX11",
+    "package_manager": "system (Linux distribution package managers, e.g., apt/yum/pacman)",
+    "package_versions": "All versions prior to the fix commit 204c3393c4c90a29ed6bef64e43849536e863a86 (see vendor advisories for exact version numbers)",
+    "why_malicious": "The package contains a critical logic flaw in its image handling code (PutSubImage), which allows a specially crafted XPM image to trigger an infinite recursion, leading to denial-of-service (DoS) or potential stack exhaustion. This is not intentional malware, but a vulnerability that can be exploited for DoS attacks."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when a crafted XPM image is loaded and displayed via libX11/libXpm consumers)",
+        "file_location": "libX11 source code (PutSubImage function), triggered via applications like sxpm or any XPM image loader",
+        "required_permissions": [
+          "filesystem (to load image)",
+          "process memory (stack)",
+          "no special privileges required"
+        ]
+      },
+      "code_snippet": "static void\nPutSubImage (\n    register Display *dpy,\n    Drawable d,\n    GC gc,\n    register XImage *image,\n    int req_xoffset,\n    int req_yoffset,\n    int x, int y,\n    unsigned int req_width,\n    unsigned int req_height,\n    int dest_bits_per_pixel,\n    int dest_scanline_pad)\n{\n    ...\n    if ((BytesPerRow * req_height) <= Available) {\n        PutImageRequest(...);\n    } else if (req_height > 1) {\n        int SubImageHeight = Available / BytesPerRow;\n        if (SubImageHeight == 0)\n            SubImageHeight = 1;\n        PutSubImage(..., req_width, (unsigned int) SubImageHeight, ...);\n        PutSubImage(..., req_width, req_height - SubImageHeight, ...);\n    } else {\n        int SubImageWidth = (((Available << 3) / dest_scanline_pad) * dest_scanline_pad) - left_pad;\n        PutSubImage(..., (unsigned int) SubImageWidth, 1, ...);\n        PutSubImage(..., req_width - SubImageWidth, 1, ...);\n    }\n}",
+      "code_language": "C",
+      "code_behavior": "At runtime, when a crafted XPM image is loaded, the code recursively splits image rows for transmission, but due to a logic error, the recursion never progresses, causing infinite recursion and stack exhaustion, resulting in denial-of-service.",
+      "malice_analysis": {
+        "why_suspicious": "This code is suspicious because it allows untrusted image data to control recursion depth, leading to unbounded stack usage and process crash.",
+        "violated_expectations": "Normal image processing code should robustly handle all input sizes and formats, ensuring recursion or iteration always makes forward progress and terminates. Here, a crafted image can cause infinite recursion.",
+        "similar_legitimate_use": "Recursive image splitting is legitimate for large images, but must always guarantee progress and termination.",
+        "key_indicators": [
+          "Recursion depth controlled by attacker-supplied image dimensions",
+          "No progress in recursion due to incorrect calculation (bits vs pixels)",
+          "Stack exhaustion/DoS from untrusted input"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious XPM image with extremely large width and specific bits_per_pixel values to trigger the bug.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Malicious image is loaded by a vulnerable application (e.g., sxpm, or any XPM image loader using libX11/libXpm)."
+    },
+    {
+      "step": 2,
+      "action": "Vulnerable application calls xpmCreatePixmapFromImage, which calls XPutImage, which calls PutSubImage with attacker-controlled parameters.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "PutSubImage enters infinite recursion due to logic flaw."
+    },
+    {
+      "step": 3,
+      "action": "Process stack is exhausted, causing application crash (denial-of-service).",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Denial-of-service; application is unavailable until restarted."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unbounded recursion in image processing functions (PutSubImage) triggered by untrusted image files",
+      "Application crash or stack overflow when loading large or malformed XPM images",
+      "Repeated calls to PutSubImage with identical or near-identical parameters"
+    ],
+    "file_indicators": [
+      "XPM images with extremely large width (e.g., > 65536 pixels) and high bits_per_pixel values",
+      "Presence of crafted XPM files known to trigger CVE-2023-43786 (e.g., https://github.com/jfrog/jfrog-CVE-2023-43786-libX11_DoS/blob/main/cve-2023-43786.xpm)"
+    ],
+    "network_indicators": [
+      "N/A (no network activity required for exploitation; local file or clipboard image load is sufficient)"
+    ],
+    "how_to_detect": "Monitor for application crashes or stack overflows in processes that load XPM images using libX11/libXpm. Scan for XPM files with suspiciously large width/height or bits_per_pixel values. Use static analysis to identify unpatched libX11 versions. Employ fuzzing or targeted test cases to trigger the bug in a controlled environment."
+  }
+}

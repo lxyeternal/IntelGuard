@@ -1,0 +1,162 @@
+{
+  "package_info": {
+    "package_name": "QCMAP (Qualcomm Mobile Access Point)",
+    "package_manager": "Firmware/Embedded (Qualcomm MDM9xxx SoCs)",
+    "package_versions": "Unknown (multiple affected, identified by binary SHA-256 hashes)",
+    "why_malicious": "The QCMAP suite contains multiple critical vulnerabilities, including command injection, stack-based buffer overflow, and NULL pointer dereference, which allow remote attackers to execute arbitrary code as root or crash device services. These flaws enable full device compromise and are trivially exploitable via network interfaces."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (web request via CGI)",
+        "file_location": "cgi-bin/qcmap_web_cgi → QCMAP_Web_CLIENT → QCMAP_ConnectionManager",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process"
+        ]
+      },
+      "code_snippet": "snprintf(cmd, sizeof(cmd), \"some_command %s\", user_input);\nsystem(cmd); // user_input not sanitized",
+      "code_language": "C",
+      "code_behavior": "At runtime, upon receiving a web request via CGI, the code constructs a shell command using unsanitized user input and executes it with system(), allowing attacker-supplied commands to be run as root.",
+      "malice_analysis": {
+        "why_suspicious": "Directly passing user-controlled input to system() without any sanitization or validation enables attackers to inject arbitrary shell commands, leading to remote code execution.",
+        "violated_expectations": "Web interfaces must strictly validate and sanitize all user input before passing it to system-level calls to prevent command injection.",
+        "similar_legitimate_use": "Legitimate use would require strict input validation or the use of safe APIs that do not invoke a shell, such as execv with argument arrays.",
+        "key_indicators": [
+          "Use of system() with unsanitized user input",
+          "Shell command string constructed directly from web parameters",
+          "No input validation or sanitization before execution"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (web request via CGI)",
+        "file_location": "QCMAP_Web_CLIENT (Tokenizer function)",
+        "required_permissions": [
+          "network",
+          "memory"
+        ]
+      },
+      "code_snippet": "strncpy(dest[i], src, strlen(src)); // No bounds check on dest[i]",
+      "code_language": "C",
+      "code_behavior": "At runtime, when processing a web request, the code copies user-supplied variables into a fixed-size buffer using strncpy with the length of the source string, without checking the destination buffer size, resulting in a stack-based buffer overflow.",
+      "malice_analysis": {
+        "why_suspicious": "Using strncpy with the length of the source string instead of the destination buffer size allows attackers to overflow the stack, potentially overwriting return addresses and enabling arbitrary code execution.",
+        "violated_expectations": "Input parsing functions must enforce strict buffer limits and always use the destination buffer size as the maximum copy length to prevent overflows.",
+        "similar_legitimate_use": "None; secure code always checks buffer sizes and uses safe string copy functions.",
+        "key_indicators": [
+          "strncpy called with strlen(src) instead of sizeof(dest[i])",
+          "No bounds check on destination buffer",
+          "User input directly copied into stack buffer"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (web request via CGI)",
+        "file_location": "QCMAP_Web_CLIENT (Tokenizer function)",
+        "required_permissions": [
+          "network",
+          "memory"
+        ]
+      },
+      "code_snippet": "char *eq = strstr(input, \"=\");\n*eq = '\\0'; // eq may be NULL, leading to crash",
+      "code_language": "C",
+      "code_behavior": "At runtime, during web request processing, the code attempts to split input on '=' by searching for the character and dereferencing the pointer without checking if it is NULL, causing a NULL pointer dereference and process crash if '=' is missing.",
+      "malice_analysis": {
+        "why_suspicious": "Dereferencing a NULL pointer returned by strstr when '=' is not present in the input can crash the process, resulting in a denial of service and potential instability of the device.",
+        "violated_expectations": "Robust input parsing must always check for NULL before dereferencing pointers returned by functions like strstr or strchr.",
+        "similar_legitimate_use": "None; secure code always checks pointer validity before dereferencing.",
+        "key_indicators": [
+          "No NULL check after strstr/strchr",
+          "Direct dereference of potentially NULL pointer",
+          "Process crash on malformed or unexpected input"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (CLI input)",
+        "file_location": "QCMAP_CLI → QCMAP_ConnectionManager → QCMAP_LAN::EnableGatewayUrl",
+        "required_permissions": [
+          "filesystem",
+          "process"
+        ]
+      },
+      "code_snippet": "snprintf(cmd, sizeof(cmd), \"set_gateway_url %s\", user_input);\nsystem(cmd); // user_input not sanitized",
+      "code_language": "C",
+      "code_behavior": "At runtime, when processing CLI input, the code constructs a shell command using unsanitized user input and executes it with system(), allowing arbitrary command execution with elevated privileges.",
+      "malice_analysis": {
+        "why_suspicious": "Directly passing CLI input to system() without sanitization enables attackers with CLI access to inject arbitrary shell commands, leading to privilege escalation or system compromise.",
+        "violated_expectations": "CLI utilities must validate and sanitize all user input before passing it to system-level calls to prevent command injection.",
+        "similar_legitimate_use": "Legitimate use would require strict input validation or the use of safe APIs that do not invoke a shell.",
+        "key_indicators": [
+          "Use of system() with unsanitized CLI input",
+          "Shell command string constructed directly from user-supplied arguments",
+          "No input validation or sanitization before execution"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted HTTP request to the web interface with malicious input, such as shell metacharacters or excessive parameters, targeting vulnerable CGI endpoints.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Command injection, buffer overflow, or process crash."
+    },
+    {
+      "step": 2,
+      "action": "Malicious input is processed by QCMAP_Web_CLIENT and/or QCMAP_ConnectionManager, triggering vulnerable code paths that result in arbitrary command execution or memory corruption.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Remote code execution as root or device crash."
+    },
+    {
+      "step": 3,
+      "action": "Attacker may use the CLI interface to inject commands via the gateway URL setting, exploiting unsanitized input handling.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Arbitrary command execution via CLI."
+    },
+    {
+      "step": 4,
+      "action": "If exploited, the attacker gains persistent root access or causes denial of service by crashing critical services.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_4"
+      ],
+      "leads_to": "Full device compromise or service disruption."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Web requests to /cgi-bin/qcmap_web_cgi with an unusually high number of query parameters (e.g., more than 40)",
+      "Web or CLI input containing shell metacharacters such as ';', '|', '&', '$(', or backticks",
+      "Unexpected process crashes or restarts in QCMAP_Web_CLIENT, especially following malformed or excessive input",
+      "Unusual delays in web interface response, such as those caused by injected 'sleep' or resource-intensive commands"
+    ],
+    "file_indicators": [
+      "QCMAP_Web_CLIENT binary with SHA-256 hashes: 71311beee4c761f85d46eaadab475541455adbd135f3c868c0800b1703378755, 5f19143efa90161bde6eb129f7b43bdf0a25e86ae7a749dc13b7ea645aa590f5, e6d505c80de7ccce0cf297715f67e0efbbc30e7427a846ea04d64af1a9e77dae, 0079e76c4c9ca3668789fd4c58c24e66519365c86479f0d7477980d0b6422eed, 0a51f755716a688225573ca4cae469acdf6c6350d83d19098580e8e295692668"
+    ],
+    "network_indicators": [
+      "HTTP/HTTPS requests to /cgi-bin/qcmap_web_cgi with suspicious or malformed parameters, especially those containing shell metacharacters",
+      "Unusual outbound network activity from embedded devices immediately after web or CLI interaction, such as connections to unexpected IPs or domains"
+    ],
+    "how_to_detect": "Monitor HTTP/HTTPS requests to /cgi-bin/qcmap_web_cgi for a high number of query parameters or the presence of shell metacharacters in parameter values. Correlate these requests with process crashes or abnormal delays in QCMAP_Web_CLIENT. Scan device firmware for known vulnerable QCMAP_Web_CLIENT binary hashes. Deploy a web application firewall (WAF) to block requests with more than 40 query parameters or containing suspicious input patterns. Audit CLI usage for unsanitized input leading to system() calls, and monitor for abnormal process terminations or privilege escalations."
+  }
+}

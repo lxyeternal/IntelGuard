@@ -1,0 +1,121 @@
+{
+  "package_info": {
+    "package_name": "Microsoft RDP Client (mstsc.exe) and any Windows software using PathCchCanonicalize",
+    "package_manager": "Windows native application / WinAPI consumer",
+    "package_versions": "All versions prior to CVE-2020-0655 patch (and any software using PathCchCanonicalize as recommended by Microsoft)",
+    "why_malicious": "The package (or any software using the vulnerable API) is susceptible to a path traversal vulnerability due to improper path canonicalization. Attackers can bypass security checks by using forward slashes (/) instead of backslashes (\\) in file paths, allowing them to write files outside intended directories, leading to potential code execution, data overwrite, or guest-to-host VM escape."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "clipboard file transfer (runtime, user-initiated or attacker-triggered)",
+        "file_location": "RDP client code handling FileGroupDescriptorW clipboard format (e.g., mstsc.exe, mstscax.dll)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "status_code = PathCchCanonicalize(&pszPathOut, 0x104ui64, pszFilename);",
+      "code_language": "C/C++",
+      "code_behavior": "At runtime, the code attempts to canonicalize a user-supplied file path using PathCchCanonicalize, but fails to normalize forward slashes, allowing attacker-supplied paths like '../../Evil.bat' to bypass directory restrictions and be written outside the intended folder.",
+      "malice_analysis": {
+        "why_suspicious": "The function is expected to sanitize all path traversal attempts, but it only processes backslashes, not forward slashes, allowing attackers to escape intended directories.",
+        "violated_expectations": "Normal behavior would block any path containing '..' or directory traversal, regardless of slash type. Actual behavior only blocks traversal with backslashes.",
+        "similar_legitimate_use": "Path canonicalization is legitimate for validating file destinations, but must handle all path separator variants.",
+        "key_indicators": [
+          "PathCchCanonicalize used as sole path sanitizer",
+          "No normalization of '/' to '\\' before canonicalization",
+          "Allows '../../' in file paths to pass validation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (file path validation before file write)",
+        "file_location": "Custom path validation logic in Windows applications (e.g., IsCanonicalSubpath function)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "if (!SUCCEEDED(PathCchCanonicalize(szCanonical, MAX_PATH, szConcat))) { return FALSE; }",
+      "code_language": "C/C++",
+      "code_behavior": "At runtime, the code uses PathCchCanonicalize to validate that a file path is within a specific directory, but fails to account for forward slashes, allowing attacker-supplied paths with '/' to escape the intended directory.",
+      "malice_analysis": {
+        "why_suspicious": "Relies on a flawed API for security boundary enforcement, enabling path traversal with alternate separators.",
+        "violated_expectations": "Expected to block all traversal attempts, but only blocks those using backslashes.",
+        "similar_legitimate_use": "Directory validation is common, but must handle all path separator types.",
+        "key_indicators": [
+          "PathCchCanonicalize used for security checks",
+          "No pre-normalization of path separators",
+          "Allows traversal with '/'"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (patched RDP client file path validation)",
+        "file_location": "CFormatDataPacker::ValidateFilePaths (mstscax.dll, post-patch)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "if (cChar == '/') pszFilename[dwIndex] = '\\'; else pszFilename[dwIndex] = cChar;",
+      "code_language": "C/C++",
+      "code_behavior": "At runtime, the code replaces all '/' with '\\' in file paths before canonicalization, ensuring that PathCchCanonicalize can properly normalize and block traversal attempts.",
+      "malice_analysis": {
+        "why_suspicious": "This is a patch/workaround, not malicious, but highlights the previous vulnerability. The absence of this normalization is the root cause of the vulnerability.",
+        "violated_expectations": "Prior code did not normalize separators, allowing traversal. This patch enforces normalization.",
+        "similar_legitimate_use": "Legitimate as a security fix.",
+        "key_indicators": [
+          "Explicit normalization of '/' to '\\' before canonicalization"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a file path with forward slashes (e.g., '../../Evil.bat') in a FileGroupDescriptorW clipboard object or other file transfer mechanism.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Path validation logic is bypassed due to improper canonicalization."
+    },
+    {
+      "step": 2,
+      "action": "Vulnerable application (e.g., RDP client) uses PathCchCanonicalize to validate the path, which fails to block traversal with forward slashes.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Malicious file is written outside the intended directory."
+    },
+    {
+      "step": 3,
+      "action": "Malicious file (e.g., Evil.bat) is placed in a sensitive location, potentially leading to code execution, privilege escalation, or VM escape.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Attacker achieves code execution or data compromise."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "File write operations with relative paths containing '../' or '..\\' and using forward slashes on Windows",
+      "Use of PathCchCanonicalize for security checks without prior normalization of path separators",
+      "Clipboard or file transfer operations resulting in files being written outside intended directories"
+    ],
+    "file_indicators": [
+      "File paths in logs or telemetry containing '../../' or '..\\' on Windows",
+      "Unexpected files appearing outside designated extraction or transfer directories"
+    ],
+    "network_indicators": [
+      "N/A (local file system attack, but may be combined with remote RDP or file transfer sessions)"
+    ],
+    "how_to_detect": "Monitor for file write operations where the destination path includes '../' or '..\\' and uses forward slashes on Windows systems. Audit applications using PathCchCanonicalize for path validation to ensure they normalize all path separators before canonicalization. Flag any file extraction or transfer operation that results in files being written outside the intended directory, especially during RDP clipboard or file transfer sessions."
+  }
+}

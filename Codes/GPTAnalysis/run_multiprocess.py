@@ -19,20 +19,30 @@ from intellgpt_multiprocess import IntelliLLMMultiProcess
 
 # 要处理的 sources（可以是单个或多个）
 SOURCES_TO_PROCESS = [
-    "bleepingcomputer",
-    "sonatype", 
-    "checkmarx",
-    "medium",
-    "qianxin",
-    "datadoghq",
-    "snyk"
+    # "bleepingcomputer",
+    # "sonatype", 
+    # "checkmarx",
+    # "medium",
+    # "qianxin",
+    # "datadoghq",
+    # "snyk",
+    "phylum",
+    "jfrog",
+    "fortinet",
+    "rhisac",
+    "socket",
+    "securityaffairs",
+    "securityweek",
+    "reversinglabs",
+    "cybersecuritynews",
+    "checkpoint"
 ]
 
 # 进程数配置
 # 选项1: 使用具体数字，例如 4
 # 选项2: 使用 cpu_count() 表示使用所有 CPU 核心
 # 选项3: 使用 cpu_count() // 2 表示使用一半 CPU 核心（推荐）
-NUM_PROCESSES = 10
+NUM_PROCESSES = 20
 
 # ============ 配置区域结束 ============
 

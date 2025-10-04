@@ -1,0 +1,97 @@
+{
+  "package_info": {
+    "package_name": "spring-beans",
+    "package_manager": "maven",
+    "package_versions": "All versions prior to 5.3.18 and 5.2.20 (also affects Spring Boot prior to 2.6.6)",
+    "why_malicious": "The package contains a critical remote code execution (RCE) vulnerability (CVE-2022-22965, 'Spring4Shell') that allows attackers to exploit Java Reflection and DataBinder functionality to load arbitrary classes and execute attacker-supplied code on affected systems. This is a macro-level design flaw, not an intentionally malicious package, but the result is equivalent to a supply chain compromise due to the ease of exploitation and the potential for full system compromise."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (during HTTP request processing and deserialization)",
+        "file_location": "org/springframework/beans/PropertyAccessorUtils.java and org/springframework/beans/PropertyValue.java (invoked via DataBinder during HTTP request parameter binding)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "HTTP request with crafted parameters: class.module.classLoader.resources.context.parent.pipeline.first.pattern, class.module.classLoader.resources.context.parent.pipeline.first.suffix, class.module.classLoader.resources.context.parent.pipeline.first.directory, class.module.classLoader.resources.context.parent.pipeline.first.prefix, class.module.classLoader.resources.context.parent.pipeline.first.fileDateFormat",
+      "code_language": "java (triggered via HTTP request parameters)",
+      "code_behavior": "At runtime, when a specially crafted HTTP request is received, the DataBinder processes parameters that manipulate internal Java class properties via reflection, allowing attacker-controlled values to be set on the server, resulting in the ability to write arbitrary files (such as a web shell) to the webroot and potentially execute arbitrary commands.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing HTTP request parameters to set internal classloader or pipeline properties via reflection is highly abnormal and enables attackers to control critical server behavior, leading to arbitrary file writes and code execution.",
+        "violated_expectations": "Normal HTTP request processing should only bind user input to explicitly defined POJO fields, not to internal server or classloader properties. This behavior violates the principle of least privilege, safe deserialization, and proper input validation.",
+        "similar_legitimate_use": "Legitimate use of DataBinder is to bind simple form data to application-defined Java objects (POJOs), not to internal server or classloader properties, which should never be exposed to user input.",
+        "key_indicators": [
+          "HTTP parameters targeting class.module.classLoader.resources.context.parent.pipeline.first.* properties",
+          "Reflection-based modification of non-public Java class fields from user input",
+          "Ability to write files or execute commands as a result of HTTP parameter manipulation",
+          "Unexpected changes to server configuration or file system from web requests"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (HTTP request to attacker-deployed web shell)",
+        "file_location": "Webroot directory (e.g., /stupidRumor_war_exploded/fuck.jsp), file created by prior exploitation of pipeline properties",
+        "required_permissions": [
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "GET /stupidRumor_war_exploded/fuck.jsp?cmd=calc",
+      "code_language": "jsp (Java Server Pages, executed by Tomcat)",
+      "code_behavior": "At runtime, after the attacker has written a malicious JSP web shell to the webroot, the attacker sends an HTTP request to the web shell with a command parameter, resulting in the execution of the supplied system command (e.g., launching the calculator application) on the server.",
+      "malice_analysis": {
+        "why_suspicious": "The presence of a writable web shell in the webroot and the ability to execute arbitrary system commands via HTTP requests is a hallmark of remote code execution exploitation and indicates a full system compromise.",
+        "violated_expectations": "Normal web applications should not allow arbitrary file writes to the webroot or execution of system commands from user input. JSP files should be static and deployed by trusted sources only.",
+        "similar_legitimate_use": "JSP files are used for dynamic web content generation, but should never be writable or executable by untrusted users, nor should they accept and execute system commands from HTTP parameters.",
+        "key_indicators": [
+          "New or modified JSP files appearing in the webroot directory",
+          "Execution of system commands via HTTP parameters in web shell requests",
+          "Presence of web shell code patterns (e.g., code that reads and executes 'cmd' parameter)",
+          "Unusual outbound network connections or file writes initiated by JSP files"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted HTTP request with malicious parameters targeting the DataBinder reflection vulnerability to manipulate internal server properties.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Allows attacker to modify internal server properties and write a malicious JSP web shell to the webroot directory."
+    },
+    {
+      "step": 2,
+      "action": "Attacker accesses the maliciously written JSP web shell and sends HTTP requests with command parameters for execution.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Remote code execution on the server, enabling full system compromise and potential lateral movement."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "HTTP requests containing parameters targeting class.module.classLoader.resources.context.parent.pipeline.first.* properties",
+      "Unexpected file writes or modifications in webroot directories (e.g., new .jsp files appearing outside of deployment events)",
+      "Execution of system commands from the web application process, especially via HTTP parameters"
+    ],
+    "file_indicators": [
+      "New or modified .jsp files in webroot directories (e.g., /stupidRumor_war_exploded/fuck.jsp)",
+      "Files with code patterns indicative of web shells (e.g., reading and executing 'cmd' or similar parameters)",
+      "Unexpected changes to server configuration files or pipeline-related files"
+    ],
+    "network_indicators": [
+      "Inbound HTTP requests with parameters such as class.module.classLoader.resources.context.parent.pipeline.first.pattern",
+      "Inbound HTTP requests to newly created JSP files with command parameters (e.g., /fuck.jsp?cmd=)",
+      "Outbound connections or callbacks initiated by web shells, especially to external IPs or domains"
+    ],
+    "how_to_detect": "Monitor HTTP request logs for parameters targeting internal Java class properties (e.g., class.module.classLoader.resources.context.parent.pipeline.first.*). Use file integrity monitoring to detect new or modified .jsp files in web application directories. Alert on execution of system commands from the web application process, especially those triggered by HTTP parameters. Deploy web application firewalls with rules to block or alert on suspicious parameter names and file writes. Correlate web server logs, file system changes, and process execution events to identify exploitation attempts."
+  }
+}

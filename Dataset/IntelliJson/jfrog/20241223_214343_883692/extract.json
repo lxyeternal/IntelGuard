@@ -1,0 +1,125 @@
+{
+  "package_info": {
+    "package_name": "OpenSSH",
+    "package_manager": "system (source/binary distribution)",
+    "package_versions": "All versions prior to and including those affected by CVE-2023-25136",
+    "why_malicious": "Not a malicious package, but contains a critical vulnerability (CVE-2023-25136) that could be exploited for remote code execution and privilege escalation if security mechanisms (Privilege Separation and Sandbox) are disabled or misconfigured."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "pre-authentication (import-time/runtime)",
+        "file_location": "sandbox-seccomp-filter.c (Linux), sandbox-darwin.c (macOS), sandbox-pledge.c (OpenBSD)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "process",
+          "memory"
+        ]
+      },
+      "code_snippet": "/* Syscalls to non-fatally deny */\n#ifdef __NR_lstat\n    SC_DENY(__NR_lstat, EACCES),\n#endif\n#ifdef __NR_lstat64\n    SC_DENY(__NR_lstat64, EACCES),\n#endif\n#ifdef __NR_fstat\n    SC_DENY(__NR_fstat, EACCES),\n#endif\n…………………\n/* Syscalls to permit */\n#ifdef __NR_brk\n    SC_ALLOW(__NR_brk),\n#endif\n#ifdef __NR_clock_gettime\n    SC_ALLOW(__NR_clock_gettime),\n#endif\n#ifdef __NR_mmap\n    SC_ALLOW_ARG_MASK(__NR_mmap, 2, PROT_READ|PROT_WRITE|PROT_NONE),\n#endif\n#ifdef __NR_mprotect\n    SC_ALLOW_ARG_MASK(__NR_mprotect, 2, PROT_READ|PROT_WRITE|PROT_NONE),\n#endif\n/* Default deny */\nBPF_STMT(BPF_RET+BPF_K, SECCOMP_FILTER_FAIL),",
+      "code_language": "C (Berkeley Packet Filter macros)",
+      "code_behavior": "At process startup (pre-authentication), the code attaches a seccomp filter that denies dangerous syscalls (like open/openat) and only allows a minimal set of syscalls, some with argument restrictions (e.g., mmap/mprotect cannot use PROT_EXEC), causing the process to be killed if a forbidden syscall is attempted.",
+      "malice_analysis": {
+        "why_suspicious": "This code is not itself malicious, but is a defensive mechanism to prevent exploitation of vulnerabilities. If this filter is absent or disabled, the process is exposed to a much larger attack surface.",
+        "violated_expectations": "Normal behavior is to restrict syscalls in the pre-auth phase; if this code is missing or altered, the process can perform dangerous actions (open files, create executable memory, etc.), which is not expected.",
+        "similar_legitimate_use": "Seccomp filters are commonly used in container runtimes and sandboxed applications to reduce attack surface.",
+        "key_indicators": [
+          "Explicit denial of open/openat syscalls",
+          "Argument-masked allowance for mmap/mprotect (no PROT_EXEC)",
+          "Default action is SECCOMP_RET_KILL (process termination on violation)"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "pre-authentication (import-time/runtime)",
+        "file_location": "sandbox-darwin.c (macOS)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "process"
+        ]
+      },
+      "code_snippet": "if (sandbox_init(kSBXProfilePureComputation, SANDBOX_NAMED, &errmsg) == -1)\n    fatal(\"%s: sandbox_init: %s\", __func__, errmsg);\nrl_zero.rlim_cur = rl_zero.rlim_max = 0;\nsetrlimit(RLIMIT_FSIZE, &rl_zero);\nsetrlimit(RLIMIT_NOFILE, &rl_zero);\nsetrlimit(RLIMIT_NPROC, &rl_zero);",
+      "code_language": "C",
+      "code_behavior": "At process startup (pre-authentication), the code initializes the most restrictive macOS sandbox profile (kSBXProfilePureComputation), then sets resource limits to zero for file size, open files, and process count, effectively preventing the process from accessing most OS services.",
+      "malice_analysis": {
+        "why_suspicious": "This code is a defensive measure. If missing or replaced with a less restrictive profile, the process could access the filesystem, network, or spawn processes, increasing the risk of exploitation.",
+        "violated_expectations": "Expected behavior is to use the most restrictive sandbox; deviation allows broader system access.",
+        "similar_legitimate_use": "macOS sandboxing is used in many security-sensitive applications.",
+        "key_indicators": [
+          "Use of kSBXProfilePureComputation",
+          "Resource limits set to zero for critical resources"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "pre-authentication (import-time/runtime)",
+        "file_location": "sandbox-pledge.c (OpenBSD)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "process"
+        ]
+      },
+      "code_snippet": "if (pledge(\"stdio\", NULL) == -1)\n    fatal_f(\"pledge()\");",
+      "code_language": "C",
+      "code_behavior": "At process startup (pre-authentication), the code restricts the process to only use standard I/O and benign syscalls by invoking pledge(\"stdio\"), preventing access to files, network, and other sensitive resources.",
+      "malice_analysis": {
+        "why_suspicious": "This is a defensive restriction. If pledge is not used or a broader promise is given, the process could perform dangerous actions, increasing the risk of privilege escalation.",
+        "violated_expectations": "Expected to use the most restrictive promise (\"stdio\"); using a broader promise or omitting pledge increases risk.",
+        "similar_legitimate_use": "pledge is used in OpenBSD for many daemons and userland tools.",
+        "key_indicators": [
+          "Use of pledge(\"stdio\")",
+          "Fatal error on failure to restrict"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker exploits a vulnerability (e.g., double-free) in the pre-authentication phase of sshd.",
+      "implemented_by": [],
+      "leads_to": "Potential code execution in the context of the unprivileged pre-auth process."
+    },
+    {
+      "step": 2,
+      "action": "If sandbox/privilege separation is disabled or misconfigured, attacker-controlled code can perform dangerous syscalls (open files, create executable memory, escalate privileges).",
+      "implemented_by": [],
+      "leads_to": "Privilege escalation or full system compromise."
+    },
+    {
+      "step": 3,
+      "action": "If sandbox/privilege separation is enabled and properly configured, seccomp/pledge/sandbox profiles prevent dangerous syscalls, causing the process to be killed or restricted.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Attack is contained; privilege escalation is prevented."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Absence or modification of seccomp/pledge/sandbox initialization in sshd child processes",
+      "Pre-authentication sshd processes making forbidden syscalls (open, openat, mmap with PROT_EXEC, etc.)",
+      "Unexpected resource access (filesystem, network) by pre-authentication sshd processes"
+    ],
+    "file_indicators": [
+      "sshd child processes not chrooted to /var/empty",
+      "sshd child processes running as root instead of sshd user",
+      "Missing or altered sandbox-seccomp-filter.c, sandbox-darwin.c, or sandbox-pledge.c"
+    ],
+    "network_indicators": [
+      "Pre-authentication sshd processes initiating outbound network connections",
+      "Unexpected network activity from processes with restricted privileges"
+    ],
+    "how_to_detect": "Monitor sshd child processes for the presence and correct application of seccomp, pledge, or sandbox profiles. Alert if pre-authentication processes attempt forbidden syscalls (open, openat, mmap with PROT_EXEC, etc.), access files outside /var/empty, or run as root. Use auditd or similar syscall auditing tools to detect violations. Check for configuration changes in /etc/sshd_config that disable or weaken UsePrivilegeSeparation or sandboxing."
+  }
+}

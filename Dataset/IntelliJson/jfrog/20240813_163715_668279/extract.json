@@ -1,0 +1,98 @@
+{
+  "package_info": {
+    "package_name": "haproxy",
+    "package_manager": "source (Linux distributions, cloud images, etc.)",
+    "package_versions": "2.0.0–2.0.24, 2.2.0–2.2.16, 2.3.0–2.3.13, 2.4.0–2.4.3",
+    "why_malicious": "These versions of HAProxy contain an integer overflow vulnerability (CVE-2021-40346) in HTTP header parsing, enabling HTTP request smuggling attacks that can bypass security controls, allow unauthorized access, and facilitate further exploitation."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP request parsing)",
+        "file_location": "src/htx.c (htx_add_header function)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "info = (val_len << 8) + name_len;",
+      "code_language": "c",
+      "code_behavior": "At runtime, the code calculates the header info field by shifting the value length left by 8 bits and adding the name length, without checking if the name length exceeds 255 bytes, leading to an unsigned integer overflow and incorrect header parsing.",
+      "malice_analysis": {
+        "why_suspicious": "This code fails to validate the length of user-supplied header names, allowing an attacker to craft headers that overflow the length field and manipulate internal parsing logic.",
+        "violated_expectations": "Normal HTTP header parsing should strictly enforce header name length limits to prevent overflows; this code does not, enabling logic bugs.",
+        "similar_legitimate_use": "Bit-packing of struct fields is common, but always with strict bounds checking.",
+        "key_indicators": [
+          "Lack of bounds check on header name length",
+          "Direct use of user-controlled input in bit-packed field",
+          "Integer overflow in security-critical parsing logic"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (HTTP request parsing)",
+        "file_location": "HTTP request sent to HAProxy (network input)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "POST /index.html HTTP/1.1\nHost: example.com\nContent-Length0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:\nContent-Length: 39\n\nGET /admin/secret.html HTTP/1.1\nDUMMY:",
+      "code_language": "http",
+      "code_behavior": "At runtime, a specially crafted HTTP request with an overlong header name (Content-Length0aaa...) triggers the integer overflow, causing HAProxy to misinterpret the request and smuggle a second HTTP request to the backend, bypassing ACLs.",
+      "malice_analysis": {
+        "why_suspicious": "This input exploits the lack of header name length validation to manipulate HAProxy's internal state and bypass security controls.",
+        "violated_expectations": "Normal HTTP requests should not contain overlong or malformed headers; such input should be rejected.",
+        "similar_legitimate_use": "None; this is a crafted exploit payload.",
+        "key_indicators": [
+          "Header name exceeding 255 bytes",
+          "Multiple Content-Length headers with malformed names",
+          "Presence of embedded HTTP requests in the body"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a specially crafted HTTP request with an overlong header name (Content-Length0aaa...) and a valid Content-Length header.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Triggering the integer overflow in HAProxy's header parsing logic."
+    },
+    {
+      "step": 2,
+      "action": "HAProxy parses the headers, overflows the name length field, and misinterprets the request structure.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Backend receives a smuggled HTTP request that bypasses HAProxy's ACLs."
+    },
+    {
+      "step": 3,
+      "action": "Backend server processes the smuggled request as a legitimate new request, executing actions that should have been blocked.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker achieves ACL bypass, unauthorized access, or further exploitation."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "HTTP requests with header names exceeding 255 bytes",
+      "Multiple Content-Length headers with malformed or non-standard names",
+      "Requests containing embedded HTTP request lines in the body"
+    ],
+    "file_indicators": [
+      "Unusually long header names in HTTP request logs",
+      "Presence of multiple Content-Length headers in a single request"
+    ],
+    "network_indicators": [
+      "Inbound HTTP requests with header names >255 bytes",
+      "Requests with both Content-Length and Transfer-Encoding headers with conflicting values"
+    ],
+    "how_to_detect": "Monitor HTTP traffic for requests containing header names longer than 255 bytes, multiple Content-Length headers, or embedded HTTP request lines in the body. Flag and block any requests that violate standard header length limits or contain suspicious header structures. Use SCA tools to identify vulnerable HAProxy versions and ensure they are upgraded or mitigated."
+  }
+}

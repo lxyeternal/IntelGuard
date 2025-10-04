@@ -1,0 +1,128 @@
+{
+  "package_info": {
+    "package_name": "Amazon Photos",
+    "package_manager": "Android (APK/Google Play)",
+    "package_versions": "Prior to Dec 18, 2021 (exact versions not specified, but all before the fix)",
+    "why_malicious": "A misconfigured exported activity in the Amazon Photos app allowed any other app on the device to launch it with a crafted intent, causing the app to send the user's Amazon access token to an attacker-controlled server. This enabled attackers to fully compromise the user's Amazon account and access or manipulate all files and data associated with it."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, when the exported activity is launched via an external intent",
+        "file_location": "AndroidManifest.xml (activity declaration for com.amazon.gallery.thor.app.activity.ThorViewActivity)",
+        "required_permissions": [
+          "android.permission.INTERNET",
+          "android.permission.INTERACT_ACROSS_USERS",
+          "android.permission.READ_EXTERNAL_STORAGE"
+        ]
+      },
+      "code_snippet": "<activity android:label=\"@ref/0x7f1300ee\" android:name=\"com.amazon.gallery.thor.app.activity.ThorViewActivity\" android:exported=\"true\">\n  <intent-filter>\n    <action android:name=\"android.intent.action.VIEW\"/>\n    <category android:name=\"android.intent.category.DEFAULT\"/>\n    <category android:name=\"android.intent.category.BROWSABLE\"/>\n    <data android:scheme=\"http\"/>\n    <data android:scheme=\"https\"/>\n    <data android:scheme=\"content\"/>\n    <data android:scheme=\"file\"/>\n    <data android:mimeType=\"video/*\"/>\n    <data android:mimeType=\"application/sdp\"/>\n    <data android:mimeType=\"application/vnd.apple.mpegurl\"/>\n    <data android:mimeType=\"application/x-mpegurl\"/>\n  </intent-filter>\n</activity>",
+      "code_language": "xml",
+      "code_behavior": "At runtime, when the exported activity is launched via an external intent, the app accepts and processes attacker-supplied URLs and file types from any app, resulting in untrusted data being handled by sensitive app components.",
+      "malice_analysis": {
+        "why_suspicious": "Exported activities with broad intent-filters and no access restrictions allow any app to interact with sensitive app components, increasing the risk of abuse.",
+        "violated_expectations": "Normal activities should not be exported unless strictly necessary, and should validate and restrict input sources to prevent untrusted data from being processed.",
+        "similar_legitimate_use": "Legitimate apps may export activities for deep linking or sharing, but should enforce strict input validation and limit accepted schemes to trusted sources.",
+        "key_indicators": [
+          "android:exported=\"true\" on sensitive activity",
+          "Intent-filter accepting http, https, file, and content schemes",
+          "No permission or signature-level protection on activity",
+          "Handles multiple MIME types without input validation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "At runtime, when the activity processes the attacker-supplied intent",
+        "file_location": "com.amazon.gallery.thor.app.activity.ThorViewActivity (Java/Kotlin code, as described in report)",
+        "required_permissions": [
+          "android.permission.INTERNET",
+          "Access to Amazon authentication token"
+        ]
+      },
+      "code_snippet": "HTTP request with header: x-amz-access-token: <user_token>",
+      "code_language": "http",
+      "code_behavior": "At runtime, when the activity processes the attacker-supplied intent, the app constructs and sends an HTTP request to the attacker-controlled URL, including the user's Amazon access token in the x-amz-access-token header, resulting in credential exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "Sending sensitive authentication tokens to arbitrary, attacker-controlled URLs exposes user accounts to compromise.",
+        "violated_expectations": "Tokens should only be transmitted to trusted Amazon endpoints, and never to user-supplied or unvalidated destinations.",
+        "similar_legitimate_use": "Legitimate use would be sending tokens to Amazon APIs for authentication or file access, never to external or user-controlled servers.",
+        "key_indicators": [
+          "Sensitive token included in HTTP header",
+          "Destination URL is attacker-controlled or user-supplied",
+          "No validation or restriction of destination domain",
+          "Token exfiltration via network request"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "After exfiltration, when attacker uses the stolen token",
+        "file_location": "External (attacker's system, using curl or similar tools)",
+        "required_permissions": [
+          "Network access",
+          "Valid Amazon access token"
+        ]
+      },
+      "code_snippet": "curl -k 'https://api.amazon.com/user/profile' -H 'x-amz-access-token: <the-token>'",
+      "code_language": "shell",
+      "code_behavior": "After exfiltration, when the attacker uses the stolen token, the attacker sends authenticated API requests to Amazon endpoints, retrieving or modifying the victim's personal data and files, resulting in full account compromise.",
+      "malice_analysis": {
+        "why_suspicious": "Use of stolen authentication tokens to access APIs is a clear indicator of account takeover and unauthorized access.",
+        "violated_expectations": "Only the legitimate app or user should use the token; external or unexpected use is unauthorized and malicious.",
+        "similar_legitimate_use": "Legitimate API calls are made by the app itself from the user's device, not from external or unknown IP addresses.",
+        "key_indicators": [
+          "API access using valid tokens from non-Amazon or unexpected IPs",
+          "Token reuse outside the expected app or device context",
+          "Unusual user agent or geolocation in API requests"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "A malicious app on the device sends a crafted intent to the exported ThorViewActivity, supplying an attacker-controlled URL.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Amazon Photos app processes the intent and prepares to send an HTTP request."
+    },
+    {
+      "step": 2,
+      "action": "Amazon Photos app sends an HTTP request to the attacker-controlled server, including the user's Amazon access token in the x-amz-access-token header.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker-controlled server receives the user's Amazon access token."
+    },
+    {
+      "step": 3,
+      "action": "Attacker uses the stolen token to access Amazon APIs, retrieve personal data, and manipulate files.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Full compromise of the user's Amazon account and files."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Exported Android activities with broad intent-filters accepting http, https, file, and content schemes without access restrictions",
+      "Sensitive authentication tokens (e.g., x-amz-access-token) sent in HTTP headers to non-Amazon or user-supplied domains",
+      "Unusual API access patterns using valid Amazon tokens from unexpected IPs, devices, or user agents"
+    ],
+    "file_indicators": [
+      "AndroidManifest.xml: exported activities (android:exported=\"true\") with VIEW/DEFAULT/BROWSABLE intent-filters and http/https schemes",
+      "App code that constructs HTTP requests including authentication tokens to arbitrary or user-supplied URLs"
+    ],
+    "network_indicators": [
+      "HTTP requests from Amazon Photos app to non-Amazon domains",
+      "Presence of x-amz-access-token header in requests to unknown or untrusted servers",
+      "API calls to Amazon endpoints using tokens from IPs or devices not associated with the legitimate user"
+    ],
+    "how_to_detect": "Monitor AndroidManifest.xml for exported activities with broad intent-filters accepting http, https, file, or content schemes. Analyze app network traffic for HTTP requests containing x-amz-access-token headers sent to non-Amazon or user-supplied domains. Monitor Amazon API access logs for use of access tokens from unexpected IP addresses, devices, or user agents, and alert on tokens used outside the expected app or device context."
+  }
+}

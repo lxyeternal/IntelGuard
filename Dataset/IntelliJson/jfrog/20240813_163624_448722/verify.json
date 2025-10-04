@@ -1,0 +1,186 @@
+{
+  "package_info": {
+    "package_name": "Apache Cassandra",
+    "package_manager": "N/A (native application, not a package manager)",
+    "package_versions": "3.0.x < 3.0.26, 3.11.x < 3.11.12, 4.0.x < 4.0.2",
+    "why_malicious": "Vulnerable configurations in Apache Cassandra allow attackers to define and execute user-defined functions (UDFs) in JavaScript that can escape the intended sandbox. This enables disabling of security controls, execution of arbitrary system commands, loading of attacker-controlled native libraries, and creation of denial-of-service conditions, resulting in full remote code execution (RCE) or service disruption on the Cassandra server."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (UDF execution via SELECT query)",
+        "file_location": "UDF definition in Cassandra database (via CQL create function statement)",
+        "required_permissions": [
+          "filesystem",
+          "process",
+          "network (if exfiltration is added)"
+        ]
+      },
+      "code_snippet": "var System = Java.type(\"java.lang.System\"); System.setSecurityManager(null); this.engine.factory.scriptEngine.eval('java.lang.Runtime.getRuntime().exec(\"touch hacked\")'); name;",
+      "code_language": "javascript (Nashorn)",
+      "code_behavior": "At runtime, when the UDF is executed via a SELECT query, the code disables the Java security manager, instantiates a new unrestricted Nashorn script engine, and executes an arbitrary shell command ('touch hacked'), resulting in arbitrary code execution on the Cassandra server.",
+      "malice_analysis": {
+        "why_suspicious": "The code disables the Java security manager and executes arbitrary shell commands from within a database UDF, which is a clear indicator of an attempt to escape sandboxing and gain unauthorized system-level access.",
+        "violated_expectations": "Normal UDFs are expected to perform safe data processing or transformation, not to alter the server's security context or execute system-level commands.",
+        "similar_legitimate_use": "Legitimate UDFs may access certain Java classes for computation, but should never disable security controls or invoke system command execution.",
+        "key_indicators": [
+          "Invocation of System.setSecurityManager(null) to disable security controls",
+          "Access to java.lang.Runtime.getRuntime().exec for command execution",
+          "Creation of a new Nashorn script engine via this.engine",
+          "Execution of shell commands from within a UDF context"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (UDF execution via SELECT query)",
+        "file_location": "UDF definition in Cassandra database (via CQL create function statement)",
+        "required_permissions": [
+          "filesystem",
+          "native library loading"
+        ]
+      },
+      "code_snippet": "var System = Java.type(\"java.lang.System\"); System.setSecurityManager(null); System.load(\"/path/to/malicious.so\");",
+      "code_language": "javascript (Nashorn)",
+      "code_behavior": "At runtime, when the UDF is executed via a SELECT query, the code disables the Java security manager and loads an attacker-controlled shared object (.so) file from the filesystem, enabling execution of arbitrary native code on the server.",
+      "malice_analysis": {
+        "why_suspicious": "Loading arbitrary native libraries after disabling security controls from a database function is a direct method for attackers to execute malicious native code, bypassing Java-level restrictions.",
+        "violated_expectations": "UDFs should not manipulate the security manager or load external native libraries, as this breaks the intended isolation and security boundaries.",
+        "similar_legitimate_use": "Legitimate use of System.load is extremely rare in UDFs and should only occur in highly privileged, trusted code, never in user-defined database functions.",
+        "key_indicators": [
+          "Use of System.setSecurityManager(null) to remove security restrictions",
+          "Use of System.load or System.loadLibrary to load external native code",
+          "Reference to a file path for a shared object (.so) file"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (UDF execution via SELECT query)",
+        "file_location": "UDF definition in Cassandra database (via CQL create function statement)",
+        "required_permissions": [
+          "CPU",
+          "threading"
+        ]
+      },
+      "code_snippet": "while(true) {}",
+      "code_language": "javascript (Nashorn)",
+      "code_behavior": "At runtime, when the UDF is executed via a SELECT query, the code enters an infinite loop, monopolizing CPU resources and causing the Cassandra daemon to hang or shut down due to the UDF timeout policy, resulting in a denial-of-service (DoS) condition.",
+      "malice_analysis": {
+        "why_suspicious": "Infinite loops in UDFs are a classic technique for causing denial-of-service, as they can exhaust server resources and trigger failover or shutdown mechanisms.",
+        "violated_expectations": "UDFs are expected to complete execution in a reasonable time frame and should not destabilize or halt the database service.",
+        "similar_legitimate_use": "While long-running computations may occur in legitimate UDFs, infinite loops with no exit condition are never legitimate.",
+        "key_indicators": [
+          "Presence of an unbounded while(true) loop",
+          "Absence of any exit or break condition",
+          "Potential to trigger UDF fail_timeout and cause daemon shutdown"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "network (upon receiving a connection on cassandra-stressd)",
+        "file_location": "StressServer.java (cassandra-stressd tool)",
+        "required_permissions": [
+          "network",
+          "deserialization",
+          "filesystem/process (if exploited)"
+        ]
+      },
+      "code_snippet": "ObjectInputStream in = new ObjectInputStream(socket.getInputStream());",
+      "code_language": "java",
+      "code_behavior": "Upon receiving a network connection, the code deserializes arbitrary objects from the socket input stream using ObjectInputStream, allowing attackers to send malicious serialized objects that can trigger arbitrary code execution via deserialization gadgets.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing untrusted data from a network socket without validation is a well-known remote code execution vector, as it enables attackers to exploit deserialization vulnerabilities.",
+        "violated_expectations": "Network services should never deserialize untrusted input without strict validation, input filtering, or sandboxing to prevent code execution attacks.",
+        "similar_legitimate_use": "Legitimate deserialization from network sources should only occur in trusted, internal environments with strong access controls and input validation.",
+        "key_indicators": [
+          "Use of ObjectInputStream directly on network input",
+          "Lack of validation or filtering of deserialized objects",
+          "Potential for exploitation via deserialization gadget chains"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker creates a malicious UDF using JavaScript via a CQL create function statement.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Malicious UDF is stored in the database and available for execution."
+    },
+    {
+      "step": 2,
+      "action": "Attacker invokes the malicious UDF via a SELECT query, triggering code execution within the Cassandra process.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Malicious code executes in the Cassandra daemon thread."
+    },
+    {
+      "step": 3,
+      "action": "Malicious UDF disables the security manager and escapes the JavaScript sandbox.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains the ability to execute arbitrary code or load native libraries on the server."
+    },
+    {
+      "step": 4,
+      "action": "Malicious UDF executes arbitrary shell commands or loads a malicious shared object file.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Full remote code execution on the Cassandra server."
+    },
+    {
+      "step": 5,
+      "action": "Alternatively, attacker creates a UDF with an infinite loop to cause denial-of-service.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Cassandra daemon hangs or shuts down due to UDF timeout policy, resulting in service disruption."
+    },
+    {
+      "step": 6,
+      "action": "Attacker exploits cassandra-stressd by sending malicious serialized objects over the network.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Arbitrary code execution via unsafe Java deserialization in the cassandra-stressd tool."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "UDFs that invoke System.setSecurityManager(null) to disable security controls",
+      "UDFs that access java.lang.Runtime.getRuntime().exec for command execution",
+      "UDFs that call System.load or System.loadLibrary to load native libraries",
+      "UDFs containing infinite loops (e.g., while(true))",
+      "Network services using ObjectInputStream to deserialize untrusted input from sockets"
+    ],
+    "file_indicators": [
+      "CQL create function statements containing suspicious JavaScript code referencing System, Runtime, or load/loadLibrary",
+      "Presence of UDFs with System.setSecurityManager, java.lang.Runtime, or System.load/System.loadLibrary references",
+      "UDFs with unbounded loops such as while(true)",
+      "cassandra-stressd process running and listening on non-localhost interfaces"
+    ],
+    "network_indicators": [
+      "Unexpected outbound connections from the Cassandra server (if UDFs are used for exfiltration)",
+      "cassandra-stressd listening on external (non-localhost) interfaces",
+      "Unusual serialized object traffic to the cassandra-stressd port"
+    ],
+    "how_to_detect": "Monitor for UDF definitions or executions that reference System.setSecurityManager, java.lang.Runtime, or System.load/System.loadLibrary. Flag UDFs containing infinite loops or unbounded while(true) constructs. Audit network-facing services for unsafe deserialization patterns, such as ObjectInputStream usage on sockets. Alert if cassandra-stressd is exposed on external interfaces. Use static analysis to detect dangerous patterns in UDF code and runtime monitoring to detect abnormal process or library loading activity from the Cassandra process. Correlate network activity with UDF execution to identify potential exfiltration or exploitation attempts."
+  }
+}

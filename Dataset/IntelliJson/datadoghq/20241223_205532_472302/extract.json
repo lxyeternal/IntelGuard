@@ -1,0 +1,76 @@
+{
+  "package_info": {
+    "package_name": "OpenSSH",
+    "package_manager": "system package manager (e.g., apt, yum, source)",
+    "package_versions": "<4.4p1 (if not patched for CVE-2006-5051 and CVE-2008-4109), 8.5p1 <= OpenSSH < 9.8p1",
+    "why_malicious": "The affected OpenSSH server versions contain a regression vulnerability (CVE-2024-6387) that allows unauthenticated remote attackers to exploit a race condition in the SIGALRM handler, leading to pre-authentication remote code execution as root. This is due to the use of async-signal-unsafe functions (like syslog(), malloc(), free()) in an asynchronous signal handler, which can corrupt process memory and allow arbitrary code execution."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "SIGALRM signal during unauthenticated SSH connection (loginGraceTime expiration)",
+        "file_location": "sshd main process (server-side, C source code, signal handler)",
+        "required_permissions": [
+          "network",
+          "process",
+          "root (for full exploitation)"
+        ]
+      },
+      "code_snippet": "void sigalrm_handler(int sig) {\n    syslog(LOG_AUTHPRIV|LOG_NOTICE, \"Timeout before authentication for %s port %d\", ...);\n    ...\n}",
+      "code_language": "c",
+      "code_behavior": "When loginGraceTime expires during an unauthenticated SSH connection, the SIGALRM handler is invoked asynchronously, which calls syslog(). syslog() internally calls malloc() and free(), which are not async-signal-safe, potentially corrupting the heap and enabling remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Calling non-async-signal-safe functions (like syslog(), malloc(), free()) from a signal handler is a well-known security anti-pattern, as it can lead to memory corruption and exploitation.",
+        "violated_expectations": "Signal handlers should only call async-signal-safe functions. Here, syslog() (and its dependencies) are called, violating this expectation and introducing a race condition.",
+        "similar_legitimate_use": "syslog() is commonly used for logging, but not safely from within signal handlers.",
+        "key_indicators": [
+          "syslog() called from SIGALRM handler",
+          "malloc()/free() called in async context",
+          "heap corruption potential",
+          "pre-authentication code path"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker initiates a large number of unauthenticated SSH connections and intentionally does not complete authentication, causing loginGraceTime to expire.",
+      "implemented_by": [],
+      "leads_to": "SIGALRM signal is triggered in sshd process."
+    },
+    {
+      "step": 2,
+      "action": "SIGALRM handler is invoked asynchronously in the sshd process.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "syslog() is called from within the signal handler."
+    },
+    {
+      "step": 3,
+      "action": "syslog() (and its dependencies) call malloc() and free() in an unsafe context, potentially corrupting the heap if interrupted.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker exploits heap corruption to achieve remote code execution as root."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "High volume of unauthenticated SSH connection attempts followed by connection timeouts",
+      "Frequent triggering of SIGALRM in sshd process",
+      "Unusual sshd process crashes or memory corruption events"
+    ],
+    "file_indicators": [
+      "sshd binary version <9.8p1 and >=8.5p1 (or <4.4p1 if not patched)",
+      "sshd_config with default or high loginGraceTime"
+    ],
+    "network_indicators": [
+      "Thousands of SSH connection attempts from a single source without authentication",
+      "Repeated connection resets/timeouts on port 22"
+    ],
+    "how_to_detect": "Monitor for excessive unauthenticated SSH connection attempts and timeouts, especially if they coincide with sshd process crashes or restarts. Check sshd binary versions and configuration for vulnerable versions and high loginGraceTime values. Use endpoint detection to alert on abnormal process signals (SIGALRM) and memory corruption in sshd."
+  }
+}

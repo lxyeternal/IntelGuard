@@ -1,0 +1,102 @@
+{
+  "package_info": {
+    "package_name": "PHP for Windows (CGI mode)",
+    "package_manager": "N/A (system package, not a language package manager)",
+    "package_versions": "All releases since 5.x up to patch (prior to 8.3.8, 8.2.20, 8.1.29)",
+    "why_malicious": "The package is vulnerable due to a flaw in character encoding conversion ('Best-Fit' feature) in CGI mode, allowing unauthenticated remote attackers to inject command-line arguments via specially crafted HTTP requests. This enables arbitrary PHP configuration changes and remote code execution, making the default configuration of PHP CGI on Windows highly dangerous."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (upon receiving a crafted HTTP request by the web server)",
+        "file_location": "php-cgi.exe (invoked by web server, typically via ScriptAlias in Apache configuration)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "php-cgi.exe -d allow_url_include=on -d auto_prepend_file=php://input",
+      "code_language": "shell (process invocation via HTTP argument injection)",
+      "code_behavior": "At runtime, when the web server receives a specially crafted HTTP request, the PHP CGI process is invoked with injected command-line arguments, enabling dangerous PHP settings and causing the server to execute arbitrary PHP code supplied in the HTTP request body, resulting in remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "This behavior allows unauthenticated remote users to inject PHP configuration options and execute arbitrary code, which is a critical remote code execution vulnerability.",
+        "violated_expectations": "Normally, web servers should not allow user input to influence command-line arguments for backend processes. PHP CGI should not accept arbitrary -d options from HTTP requests.",
+        "similar_legitimate_use": "PHP administrators may use -d options for local debugging or configuration during manual invocation, but never via untrusted user input from HTTP requests.",
+        "key_indicators": [
+          "Unexpected -d options in PHP CGI process invocation",
+          "auto_prepend_file=php://input enables direct execution of code from HTTP request body",
+          "allow_url_include=on is a high-risk setting rarely enabled in production environments"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (HTTP request with crafted query string exploiting Best-Fit encoding)",
+        "file_location": "php-cgi.exe (invoked by web server, typically via ScriptAlias in Apache configuration)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "GET /index.php?%ADd+allow_url_include=on+-d+auto_prepend_file=php://input HTTP/1.1",
+      "code_language": "HTTP request (URL encoding exploiting Windows Best-Fit mapping)",
+      "code_behavior": "At runtime, the attacker sends an HTTP request with a query string containing special characters (such as %AD) that, due to Windows Best-Fit encoding, are interpreted as command-line argument prefixes by PHP CGI, allowing injection of dangerous PHP options and leading to remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The use of non-ASCII characters in the query string to bypass input validation and inject command-line arguments is a clear exploitation of the encoding flaw, enabling remote code execution.",
+        "violated_expectations": "Web applications should not interpret URL-encoded characters as command-line arguments to backend processes. Query strings should not be able to alter PHP configuration at runtime.",
+        "similar_legitimate_use": "There is no legitimate reason for user-supplied query strings to be mapped to process arguments in this way; such mappings should be strictly controlled.",
+        "key_indicators": [
+          "Presence of %AD or similar non-ASCII bytes in query string",
+          "Query string values resembling PHP -d options",
+          "Unexpected PHP configuration changes at runtime via HTTP request"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts and sends an HTTP request with a query string containing special characters (e.g., %AD) and PHP -d options to the web server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "PHP CGI process receives and interprets injected arguments due to encoding flaw"
+    },
+    {
+      "step": 2,
+      "action": "PHP CGI process, due to Windows Best-Fit encoding, misinterprets the query string and applies the injected -d options, enabling dangerous PHP settings.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Arbitrary PHP code from the HTTP request body is executed on the server"
+    },
+    {
+      "step": 3,
+      "action": "Attacker's PHP code (supplied in the HTTP request body) is executed with the privileges of the web server process, resulting in full remote code execution.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "System compromise, data theft, or further malware deployment"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "PHP CGI process invoked with unexpected -d options from HTTP requests",
+      "auto_prepend_file=php://input or allow_url_include=on set at runtime via command-line arguments",
+      "HTTP requests with non-ASCII or percent-encoded characters in query string mapping to process arguments"
+    ],
+    "file_indicators": [
+      "php-cgi.exe or php.exe invoked from web-accessible directories",
+      "ScriptAlias directive exposing PHP CGI in Apache configuration files (e.g., httpd-xampp.conf)"
+    ],
+    "network_indicators": [
+      "Inbound HTTP requests with query strings containing %AD or similar non-ASCII bytes",
+      "Unusual POST requests with PHP code in the body targeting PHP CGI endpoints"
+    ],
+    "how_to_detect": "Monitor web server logs for HTTP requests with suspicious query strings containing non-ASCII or percent-encoded characters (e.g., %AD) and PHP -d options. Audit process creation logs for php-cgi.exe or php.exe being invoked with -d allow_url_include=on or -d auto_prepend_file=php://input. Check for ScriptAlias directives exposing PHP CGI in Apache configuration files. Alert on any runtime changes to PHP configuration via command-line arguments, especially those enabling dangerous options such as allow_url_include or auto_prepend_file."
+  }
+}

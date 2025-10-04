@@ -1,0 +1,156 @@
+{
+  "package_info": {
+    "package_name": "CUPS / cups-browsed / libcupsfilters / libppd / cups-filters",
+    "package_manager": "system (Linux distributions, typically via apt/yum/dnf/zypper/pacman)",
+    "package_versions": "cups-browsed <= 2.0.1, libcupsfilters <= 2.1b1, libppd <= 2.1b1, cups-filters <= 2.0.1",
+    "why_malicious": "The affected packages contain unauthenticated remote code execution vulnerabilities due to a chain of design and implementation flaws in the handling of network printer discovery, IPP attribute processing, and PPD file parsing. These flaws allow an attacker to plant a malicious printer and achieve arbitrary command execution when a print job is sent to the compromised printer."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "network discovery (runtime, service start)",
+        "file_location": "cups-browsed (daemon/service code)",
+        "required_permissions": [
+          "network",
+          "root"
+        ]
+      },
+      "code_snippet": "cups-browsed binds UDP INADDR_ANY:631 and trusts any packet from any source to trigger a Get-Printer-Attributes IPP request to an attacker-controlled URL.",
+      "code_language": "C",
+      "code_behavior": "At runtime during network discovery, the service binds UDP port 631 on all interfaces, accepts unauthenticated packets from any source, issues a Get-Printer-Attributes IPP request to a URL specified in the packet, and initiates external printer discovery controlled by the attacker.",
+      "malice_analysis": {
+        "why_suspicious": "Accepting unauthenticated packets from any source and making outbound requests based on their content exposes the system to remote manipulation, allowing attackers to inject malicious printer definitions.",
+        "violated_expectations": "Normal behavior would restrict printer discovery to trusted networks or authenticated sources; here, any remote attacker can inject printer definitions without validation.",
+        "similar_legitimate_use": "Network printer discovery in trusted LAN environments, where only known and authenticated devices are expected to participate.",
+        "key_indicators": [
+          "UDP 631 open on 0.0.0.0",
+          "No authentication or source validation on incoming packets",
+          "Automatic outbound IPP requests to arbitrary, potentially external hosts"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "IPP response processing (runtime, after network discovery)",
+        "file_location": "libcupsfilters (cfGetPrinterAttributes5)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "root"
+        ]
+      },
+      "code_snippet": "cfGetPrinterAttributes5 does not validate or sanitize the IPP attributes returned from an IPP server, providing attacker-controlled data to the rest of the CUPS system.",
+      "code_language": "C",
+      "code_behavior": "After network discovery, the code processes IPP responses by passing attacker-controlled attributes directly into the CUPS system without validation, resulting in untrusted data flowing into subsequent configuration and processing steps.",
+      "malice_analysis": {
+        "why_suspicious": "Lack of input validation on network-supplied data allows attackers to inject malicious attributes that can influence system configuration and behavior.",
+        "violated_expectations": "IPP attributes should be strictly validated and sanitized before use; here, they are trusted blindly and passed to critical system components.",
+        "similar_legitimate_use": "Processing IPP attributes from trusted, authenticated printers on a secure network.",
+        "key_indicators": [
+          "No input validation or sanitization on IPP attributes",
+          "Propagation of attacker-controlled data into CUPS configuration"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "PPD file generation (runtime, after IPP attribute processing)",
+        "file_location": "libppd (ppdCreatePPDFromIPP2)",
+        "required_permissions": [
+          "filesystem",
+          "root"
+        ]
+      },
+      "code_snippet": "ppdCreatePPDFromIPP2 does not validate or sanitize the IPP attributes when writing them to a temporary PPD file, allowing the injection of attacker-controlled data in the resulting PPD.",
+      "code_language": "C",
+      "code_behavior": "After IPP attribute processing, the code writes attacker-supplied IPP attributes directly to a temporary PPD file without validation, enabling the injection of malicious PPD directives into the printer configuration.",
+      "malice_analysis": {
+        "why_suspicious": "Writing untrusted data to configuration files used by privileged services enables code or command injection, as malicious directives can be executed by downstream components.",
+        "violated_expectations": "PPD files should only contain validated, safe data derived from trusted sources; here, arbitrary attacker input is written directly.",
+        "similar_legitimate_use": "Generating PPD files from trusted printer attributes in a secure environment.",
+        "key_indicators": [
+          "No sanitization or validation of PPD file contents",
+          "Presence of attacker-controlled PPD directives in generated files"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "print job execution (runtime, when a print job is sent to the malicious printer)",
+        "file_location": "cups-filters (foomatic-rip, FoomaticRIPCommandLine in PPD)",
+        "required_permissions": [
+          "filesystem",
+          "root",
+          "shell"
+        ]
+      },
+      "code_snippet": "foomatic-rip allows arbitrary command execution via the FoomaticRIPCommandLine PPD parameter.",
+      "code_language": "shell/C",
+      "code_behavior": "When a print job is sent to the malicious printer, the foomatic-rip filter executes the FoomaticRIPCommandLine directive from the PPD file, resulting in arbitrary shell commands being run as root on the target system.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing PPD files to specify shell commands that are executed as root is a classic code injection vulnerability, enabling attackers to gain full control of the system.",
+        "violated_expectations": "Print filters should only execute trusted, static commands defined by administrators; here, attacker-supplied commands are executed without restriction.",
+        "similar_legitimate_use": "Custom print filters for advanced printer drivers, which should be tightly controlled and only allow predefined, safe commands.",
+        "key_indicators": [
+          "PPD file with FoomaticRIPCommandLine directive containing shell commands",
+          "Shell command injection via print job processing",
+          "Execution of arbitrary commands as root by foomatic-rip"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted UDP packet to port 631, causing cups-browsed to initiate a Get-Printer-Attributes IPP request to an attacker-controlled URL.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "cups-browsed fetches malicious IPP attributes from attacker"
+    },
+    {
+      "step": 2,
+      "action": "Malicious IPP attributes are returned and processed without validation, propagating attacker-controlled data into the CUPS system.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker data is used to generate a PPD file"
+    },
+    {
+      "step": 3,
+      "action": "A PPD file is generated from the malicious IPP attributes, containing attacker-supplied directives (including FoomaticRIPCommandLine).",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Malicious PPD file is installed for the new printer"
+    },
+    {
+      "step": 4,
+      "action": "When a print job is sent to the malicious printer, the foomatic-rip filter executes the FoomaticRIPCommandLine directive, resulting in arbitrary command execution as root.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Remote code execution on the target system"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "cups-browsed making outbound IPP requests to untrusted or external IPs",
+      "Creation of new printers with PPD files containing FoomaticRIPCommandLine directives",
+      "Execution of unexpected shell commands by foomatic-rip during print job processing"
+    ],
+    "file_indicators": [
+      "PPD files in /etc/cups/ppd/ or /var/spool/cups/ containing FoomaticRIPCommandLine",
+      "Unusual or recently created PPD files with suspicious directives"
+    ],
+    "network_indicators": [
+      "Inbound UDP packets to port 631 from untrusted sources",
+      "Outbound IPP requests to external or non-local IP addresses"
+    ],
+    "how_to_detect": "Monitor for inbound UDP traffic to port 631 and outbound IPP requests to non-local addresses by cups-browsed. Audit PPD files for the presence of FoomaticRIPCommandLine or other suspicious directives. Monitor execution of foomatic-rip and alert on unexpected command-line arguments or child processes. Flag creation of new printers with PPD files sourced from untrusted networks."
+  }
+}

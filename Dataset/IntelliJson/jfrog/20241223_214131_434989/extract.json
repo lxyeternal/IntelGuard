@@ -1,0 +1,126 @@
+{
+  "package_info": {
+    "package_name": "wget",
+    "package_manager": "source (GNU project), system package managers (apt, yum, etc.)",
+    "package_versions": "All versions up to and including 1.24.5",
+    "why_malicious": "A critical parsing vulnerability (CVE-2024-38428) allows attackers to manipulate the host component of FTP/FTPS URLs by abusing semicolons in the userinfo segment, leading to SSRF, phishing, MiTM, and data leakage attacks."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (URL parsing during network request)",
+        "file_location": "url.c (function url_skip_credentials)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "static const char *\nurl_skip_credentials (const char *url)\n{\n  /* Look for '@' that comes before terminators, such as '/', '?',\n     '#', or ';'.  */\n  const char *p = (const char *)strpbrk (url, \"@/?#;\");\n  if (!p || *p != '@')\n    return url;\n  return p + 1;\n}",
+      "code_language": "c",
+      "code_behavior": "At runtime, the code parses the URL and incorrectly treats a semicolon in the userinfo as a host segment delimiter, causing the host to be misinterpreted and network requests to be sent to attacker-controlled domains.",
+      "malice_analysis": {
+        "why_suspicious": "The function includes ';' as a terminating character for userinfo, which is not compliant with RFC-2396 and allows attackers to manipulate the host segment.",
+        "violated_expectations": "Normal behavior would treat semicolons as valid in userinfo, not as a host delimiter. The actual behavior allows user-controlled input to override the intended host.",
+        "similar_legitimate_use": "URL parsing for authentication is legitimate, but should follow RFC standards.",
+        "key_indicators": [
+          "Inclusion of ';' as a userinfo terminator",
+          "Host segment can be attacker-controlled via crafted userinfo"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (URL parsing for host extraction)",
+        "file_location": "url.c (function init_seps)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "static const char *\ninit_seps (enum url_scheme scheme)\n{\n  static char seps[8] = \":/\";\n  char *p = seps + 2;\n  int flags = supported_schemes[scheme].flags;\n\n  if (flags & scm_has_params)\n    *p++ = ';';\n  if (flags & scm_has_query)\n    *p++ = '?';\n  if (flags & scm_has_fragment)\n    *p++ = '#';\n  *p = '\\0';\n  return seps;\n}",
+      "code_language": "c",
+      "code_behavior": "At runtime, the code determines host segment terminators based on the URL scheme, allowing ';' as a host delimiter for FTP/FTPS, which enables the attack when combined with crafted userinfo.",
+      "malice_analysis": {
+        "why_suspicious": "The function adds ';' as a host delimiter for FTP/FTPS, which, when combined with the previous snippet, enables host confusion attacks.",
+        "violated_expectations": "Normal behavior would not allow userinfo to terminate the host segment with a semicolon.",
+        "similar_legitimate_use": "Scheme-specific parsing is legitimate, but should not violate RFC userinfo rules.",
+        "key_indicators": [
+          "Scheme-dependent host terminator includes ';' for FTP/FTPS",
+          "Allows crafted userinfo to control host parsing"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (user-supplied URL input)",
+        "file_location": "user input to wget command or application using wget",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "ftp://maliciousdomain;@reliableserver",
+      "code_language": "url",
+      "code_behavior": "At runtime, a crafted URL with a semicolon in the userinfo causes wget to resolve and connect to 'maliciousdomain' instead of the intended 'reliableserver', enabling SSRF, phishing, or MiTM attacks.",
+      "malice_analysis": {
+        "why_suspicious": "The URL structure exploits the parsing bug to redirect network requests to an attacker-controlled domain.",
+        "violated_expectations": "Normal behavior would restrict the host to 'reliableserver', not allow userinfo to override it.",
+        "similar_legitimate_use": "Userinfo is used for authentication, not host control.",
+        "key_indicators": [
+          "Semicolon in userinfo segment",
+          "Host segment overridden by attacker input"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a URL with a semicolon in the userinfo segment (e.g., ftp://maliciousdomain;@reliableserver).",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "URL is supplied to wget or an application using wget."
+    },
+    {
+      "step": 2,
+      "action": "Wget parses the URL using url_skip_credentials(), misinterpreting the host segment due to the semicolon.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Host is set to attacker-controlled domain."
+    },
+    {
+      "step": 3,
+      "action": "init_seps() provides ';' as a host delimiter for FTP/FTPS, finalizing the host parsing to attacker’s domain.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Network request is sent to the attacker’s server."
+    },
+    {
+      "step": 4,
+      "action": "Attacker receives the request, enabling SSRF, phishing, MiTM, or data leakage depending on the context.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Final goal: resource access, sensitive data exposure, or malware delivery."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "FTP/FTPS requests where the host segment contains a semicolon or is derived from user-controlled input",
+      "Unexpected DNS lookups to domains matching userinfo patterns",
+      "Network requests to attacker-controlled domains when userinfo contains semicolons"
+    ],
+    "file_indicators": [
+      "wget command lines or logs with URLs containing ';' in the userinfo segment",
+      "Application logs showing FTP/FTPS URLs with semicolons before '@'"
+    ],
+    "network_indicators": [
+      "DNS queries or connections to unexpected domains matching user-controlled input",
+      "FTP/FTPS traffic to domains not in the expected allowlist"
+    ],
+    "how_to_detect": "Monitor for FTP/FTPS requests where the URL contains a semicolon in the userinfo segment, especially if the resolved host does not match the intended target. Flag or block any wget invocations or application logs where the host is derived from user-supplied credentials containing semicolons. Alert on DNS or network connections to domains that match user-controlled input patterns."
+  }
+}

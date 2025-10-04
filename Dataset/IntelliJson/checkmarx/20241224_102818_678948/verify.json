@@ -1,0 +1,125 @@
+{
+  "package_info": {
+    "package_name": "spring-cloud-function",
+    "package_manager": "Maven",
+    "package_versions": "< 3.2.6",
+    "why_malicious": "The package contains vulnerabilities that allow attackers to cause denial-of-service (DoS) by flooding the function router cache and to invoke unintended internal functions, potentially leading to remote code execution (RCE) or unauthorized configuration changes. These behaviors are not expected in normal operation and can be exploited by manipulating HTTP endpoints and payloads, exposing critical application internals to remote attackers."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP function invocation)",
+        "file_location": "SimpleFunctionRegistry.lookup() (Java source)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "String[] functionNames = StringUtils.delimitedListToStringArray(functionDefinition.replaceAll(\",\", \"|\"), \"|\").trim();",
+      "code_language": "java",
+      "code_behavior": "At runtime, after an HTTP function invocation, the code splits the function name string by ',' or '|', processes the resulting array, and registers each permutation in the function router cache, resulting in unbounded cache growth and memory exhaustion.",
+      "malice_analysis": {
+        "why_suspicious": "This code allows an attacker to generate an unlimited number of function name permutations by manipulating the HTTP endpoint, causing the function router cache to grow uncontrollably and leading to denial-of-service.",
+        "violated_expectations": "In normal operation, function registration should be limited to a fixed set of explicitly defined functions, not arbitrary permutations generated from user input after the cache check.",
+        "similar_legitimate_use": "Chaining functions for business logic is legitimate, but should be performed with strict controls and not allow arbitrary user-driven permutations that bypass cache limits.",
+        "key_indicators": [
+          "Function name splitting and permutation after cache check",
+          "Unbounded growth of function router cache",
+          "Registration of arbitrary function name combinations from user input"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (HTTP function invocation)",
+        "file_location": "SimpleFunctionRegistry.lookup() and normalizeFunctionDefinition() (Java source)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "Object functionCandidate = this.discoverFunctionInBeanFactory(functionName);\nif (functionCandidate != null) {\n    Type functionType = null;\n    FunctionRegistration functionRegistration = null;\n    if (functionCandidate instanceof FunctionRegistration) {\n        functionRegistration = (FunctionRegistration) functionCandidate;\n    } else if (this.isFunctionPojo(functionCandidate, functionName)) {\n        ...\n    } else if (this.isSpecialFunctionRegistration(functionNames, functionName)) {\n        ...\n    } else {\n        functionType = FunctionTypeUtils.discoverFunctionType(functionCandidate, functionName, this.applicationContext);\n        if (functionRegistration == null) {\n            functionRegistration = new FunctionRegistration(functionCandidate, functionName).type(functionType);\n        }\n        if (functionRegistration != null) {\n            this.register(functionRegistration);\n        }\n    }\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, following an HTTP function invocation, the code attempts to discover and register any bean in the ApplicationContext as a function based on user-supplied function names, resulting in exposure and invocation of internal or sensitive beans not intended for external access.",
+      "malice_analysis": {
+        "why_suspicious": "The code exposes internal beans as invokable functions via HTTP endpoints, allowing attackers to access or execute code paths that should remain internal, potentially leading to privilege escalation or execution of sensitive operations.",
+        "violated_expectations": "Only beans explicitly defined and intended as functions should be exposed through the function router. Arbitrary beans should not be discoverable or invokable based on user input.",
+        "similar_legitimate_use": "Dynamic function discovery is used for extensibility in some frameworks, but should be tightly restricted to prevent exposure of internal or dependency beans.",
+        "key_indicators": [
+          "Traversal of ApplicationContext for function discovery",
+          "Registration of beans as functions based on user-supplied names",
+          "Exposure of internal or dependency beans to HTTP invocation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (HTTP function invocation with crafted payload)",
+        "file_location": "User-defined bean (e.g., RabbitTest class with @Component annotation)",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "public Boolean checkMandatory(RabbitTemplate rabbitTemplate) {\n    return rabbitTemplate.isMandatoryFor(new Message(new byte[]{'a'}));\n}\n// HTTP POST: {\"mandatoryExpressionString\":\"T(java.lang.Runtime).getRuntime().exec(\\\"open -a /System/Applications/Calculator.app\\\")\"}",
+      "code_language": "java",
+      "code_behavior": "At runtime, when an HTTP function is invoked with a crafted payload, the code evaluates a user-supplied SpEL expression from the request body, resulting in arbitrary code execution (RCE) on the server.",
+      "malice_analysis": {
+        "why_suspicious": "Evaluating user-supplied SpEL expressions without validation allows attackers to execute arbitrary code on the server, leading to full remote code execution.",
+        "violated_expectations": "User input should never be directly evaluated as code or expressions without strict validation and sanitization. Exposing SpEL evaluation to untrusted input is a critical security flaw.",
+        "similar_legitimate_use": "SpEL is legitimately used for dynamic configuration or expression evaluation, but should never be exposed to untrusted user input in production environments.",
+        "key_indicators": [
+          "Direct evaluation of user-supplied SpEL expressions",
+          "Remote code execution via HTTP payload",
+          "Absence of input validation or sanitization before expression evaluation"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends HTTP requests with function names containing ',' or '|' to flood the function router cache.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Memory exhaustion and denial-of-service (DoS)."
+    },
+    {
+      "step": 2,
+      "action": "Attacker sends HTTP requests with crafted function names to invoke unintended beans from the ApplicationContext.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Exposure and invocation of internal or sensitive functions."
+    },
+    {
+      "step": 3,
+      "action": "Attacker crafts payloads to exploit exposed functions that evaluate user input as SpEL, leading to code execution.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Remote code execution (RCE) or unauthorized configuration changes."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unusually high number of function registrations in the function router cache",
+      "HTTP requests with function names containing ',' or '|' characters",
+      "Invocation of beans not explicitly defined as functions via HTTP endpoints",
+      "User-supplied SpEL expressions being evaluated at runtime in function handlers"
+    ],
+    "file_indicators": [
+      "SimpleFunctionRegistry.java",
+      "normalizeFunctionDefinition()",
+      "discoverFunctionInBeanFactory()",
+      "User-defined beans with @Component or @Service annotations that expose function endpoints"
+    ],
+    "network_indicators": [
+      "Repeated HTTP POST/GET requests to /function_name, /function_name|, or /function_a,function_b endpoints",
+      "HTTP payloads containing suspicious SpEL expressions or code execution patterns"
+    ],
+    "how_to_detect": "Monitor for excessive growth in the function router cache and alert on rapid increases in registered function names. Inspect HTTP requests for function names containing ',' or '|', and for attempts to invoke beans not explicitly defined as functions. Analyze payloads for SpEL expressions or code injection patterns. Alert on registration or invocation of unexpected functions and on memory exhaustion or abnormal resource consumption patterns in the application."
+  }
+}

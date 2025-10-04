@@ -1,0 +1,124 @@
+{
+  "package_info": {
+    "package_name": "impacket",
+    "package_manager": "PyPI",
+    "package_versions": "All versions prior to the fix committed on Apr 26, 2021 (pre-CVE-2021-31800)",
+    "why_malicious": "The package contains a critical path traversal vulnerability in its SMB server implementation (smbserver.py), which allows attackers to craft SMB requests that read or write files outside the intended share directory. This enables arbitrary file read and write, potentially leading to remote code execution (RCE) if sensitive files are accessed or malicious payloads are planted."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (upon SMB request handling)",
+        "file_location": "impacket/smbserver.py (lines 3485, 876)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "pwd = ntpath.join(self.share, pwd, wildcard)",
+      "code_language": "python",
+      "code_behavior": "At runtime, when handling SMB requests, the code concatenates user-supplied path components with the server's share directory using ntpath.join, without validating for path traversal, resulting in the server accessing directories and files outside the intended share directory.",
+      "malice_analysis": {
+        "why_suspicious": "Accepting and joining user-supplied paths without any validation or sanitization allows attackers to traverse directories and access sensitive files outside the SMB share, violating expected security boundaries.",
+        "violated_expectations": "A secure SMB server implementation should restrict all file operations to the configured share directory and sanitize user input to prevent directory traversal. This code fails to enforce such restrictions, enabling access to arbitrary filesystem locations.",
+        "similar_legitimate_use": "Legitimate file servers may join paths for file access, but always implement strict input validation and path normalization to prevent traversal attacks.",
+        "key_indicators": [
+          "No input validation or sanitization on user-supplied paths",
+          "Direct concatenation of user input with filesystem paths",
+          "Use of ntpath.join with untrusted data"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (upon SMB write request handling)",
+        "file_location": "impacket/smbserver.py (lines 2008, 2958)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "file_path = ntpath.join(self.share, pwd, filename)\nwith open(file_path, 'wb') as f:\n    f.write(contents)",
+      "code_language": "python",
+      "code_behavior": "At runtime, when processing SMB write requests, the code constructs a file path from user-supplied input and writes file contents to this path without validating for path traversal, allowing arbitrary files to be written anywhere on the server's filesystem.",
+      "malice_analysis": {
+        "why_suspicious": "Writing files to arbitrary locations based on unvalidated user input can be exploited to overwrite critical system files or plant malicious payloads, leading to privilege escalation or remote code execution.",
+        "violated_expectations": "Expected behavior is to restrict all file write operations to the SMB share directory and prevent writes outside this area. This code allows writes to any location accessible by the server process.",
+        "similar_legitimate_use": "Legitimate file servers write files based on client requests, but always restrict writes to a safe, predefined directory and validate all path components.",
+        "key_indicators": [
+          "No path traversal or directory boundary checks before file write",
+          "Direct use of user-controlled path in open() call",
+          "Ability to write files outside the configured share directory"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (client-side exploitation)",
+        "file_location": "smbclient.py (custom exploit functions: do_ls_exploit, do_put_exploit)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "do_ls_exploit ../../../../../../tmp\n do_put_exploit poc.txt ../../../../../../tmp/poc.txt",
+      "code_language": "python",
+      "code_behavior": "At runtime, the client sends SMB requests containing path traversal sequences (e.g., '../../../../../tmp') to the server, causing the server to list or write files outside the intended share directory, resulting in unauthorized file access or modification.",
+      "malice_analysis": {
+        "why_suspicious": "The client-side code is designed to exploit the server's lack of path validation by sending requests with traversal sequences, enabling access to or modification of files outside the SMB share.",
+        "violated_expectations": "Clients should not be able to access or write files outside the server's configured share directory. The server should reject such requests.",
+        "similar_legitimate_use": "Penetration testing tools may use similar code to test for path traversal vulnerabilities in authorized environments.",
+        "key_indicators": [
+          "Use of '../' or excessive path traversal in SMB request paths",
+          "Custom exploit functions that bypass normal path checks",
+          "SMB requests targeting non-shared directories"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts SMB requests with path traversal sequences (e.g., ../../../../etc/passwd or ../../../../tmp/poc.txt) to target files outside the SMB share.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "SMB server receives malicious requests containing directory traversal payloads."
+    },
+    {
+      "step": 2,
+      "action": "SMB server processes the request and joins user-supplied paths with the share directory without validation, resulting in file operations on unintended locations.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary file read or write on the server filesystem outside the intended share directory."
+    },
+    {
+      "step": 3,
+      "action": "Attacker reads sensitive files or writes malicious payloads (e.g., webshells, SSH keys) to arbitrary locations on the server.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Potential privilege escalation or remote code execution on the server."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "SMB requests containing '../' or multiple consecutive path traversal sequences in file paths",
+      "SMB server performing file operations (read/write) outside the configured share directory",
+      "Unexpected file creation or modification in sensitive directories (e.g., /tmp, /var/www/html, /root) following SMB activity"
+    ],
+    "file_indicators": [
+      "Files written to /tmp, /var/www/html, or other non-shared directories via SMB operations",
+      "Presence of unexpected files (e.g., poc.txt, webshells, SSH keys) in directories not configured as SMB shares after SMB activity"
+    ],
+    "network_indicators": [
+      "SMB traffic containing file paths with '../' or excessive directory traversal sequences",
+      "Unusual SMB write or read operations initiated from untrusted or external clients"
+    ],
+    "how_to_detect": "Monitor SMB server logs for file operations involving path traversal patterns (such as '../'). Alert on any SMB file access or write attempts targeting locations outside the configured share directory. Deploy file integrity monitoring to detect unexpected file creation or modification in sensitive directories. Analyze network traffic for SMB requests with suspicious file paths, and correlate with file system events to identify exploitation attempts."
+  }
+}

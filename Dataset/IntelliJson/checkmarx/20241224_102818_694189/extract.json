@@ -1,0 +1,101 @@
+{
+  "package_info": {
+    "package_name": "replicator",
+    "package_manager": "npm",
+    "package_versions": "<1.0.4",
+    "why_malicious": "The package contains a critical deserialization vulnerability that allows remote code execution (RCE) when untrusted input is passed to its decode function. This enables attackers to execute arbitrary code on the host system, leading to full system compromise."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when deserializing untrusted input)",
+        "file_location": "core deserialization logic (fromSerializable function in package source)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "process execution"
+        ]
+      },
+      "code_snippet": "return typeof GLOBAL[val.ctorName] === 'function' ? new GLOBAL[val.ctorName](val.arr) : val.arr;",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code takes user-controlled input and instantiates a new object using a constructor name and arguments from the input, allowing arbitrary function invocation and potential code execution.",
+      "malice_analysis": {
+        "why_suspicious": "This code allows user input to dictate which global constructor is called and with what arguments, enabling attackers to instantiate dangerous objects or execute arbitrary code.",
+        "violated_expectations": "Normal deserialization should only reconstruct safe, expected types. Here, any global function can be called, violating type safety and trust boundaries.",
+        "similar_legitimate_use": "Legitimate deserialization frameworks may reconstruct objects, but only from a strict whitelist of safe types.",
+        "key_indicators": [
+          "No validation of constructor name against a safe list during deserialization",
+          "Direct use of user input to select and invoke global constructors",
+          "Potential to invoke dangerous constructors like Function, require, or setTimeout"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when decoding attacker-supplied payload)",
+        "file_location": "application code using replicator.decode()",
+        "required_permissions": [
+          "process execution"
+        ]
+      },
+      "code_snippet": "replicator.decode('[{\"@t\":\"[[TypedArray]]\",\"data\":{\"ctorName\":\"setTimeout\",\"arr\":{\"@t\":\"[[TypedArray]]\",\"data\":{\"ctorName\":\"Function\",\"arr\":\"process.mainModule.require('child_process').exec('calc');\"}}}}]')",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code deserializes a crafted payload that creates a new Function object containing malicious code, then passes it to setTimeout, causing the code to execute and spawn a process.",
+      "malice_analysis": {
+        "why_suspicious": "This payload demonstrates chaining of dangerous constructors (Function and setTimeout) to achieve code execution, exploiting the lack of input validation.",
+        "violated_expectations": "Deserialization should not allow arbitrary code execution or process spawning from untrusted input.",
+        "similar_legitimate_use": "No legitimate use case for deserializing and executing arbitrary code from untrusted sources.",
+        "key_indicators": [
+          "Chained use of Function and setTimeout constructors",
+          "Payload includes process.mainModule.require('child_process').exec",
+          "Direct execution of attacker-supplied code"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious JSON payload targeting the TypedArray deserialization logic.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Payload is passed to replicator.decode() in a vulnerable application."
+    },
+    {
+      "step": 2,
+      "action": "replicator.decode() processes the payload, invoking fromSerializable with attacker-controlled ctorName and arr.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Arbitrary global constructors are invoked with attacker-supplied arguments."
+    },
+    {
+      "step": 3,
+      "action": "Chained constructors (Function and setTimeout) are used to execute arbitrary code, such as spawning a shell or running system commands.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Remote code execution and full system compromise."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Deserialization of untrusted input using replicator.decode()",
+      "Dynamic invocation of global constructors based on user input",
+      "Chained use of Function and setTimeout or similar constructors during deserialization"
+    ],
+    "file_indicators": [
+      "Presence of replicator.decode() in application code",
+      "Unvalidated user input passed to deserialization routines"
+    ],
+    "network_indicators": [
+      "Outbound connections or process execution following deserialization events",
+      "Unexpected child process creation (e.g., calc.exe, bash, sh) after JSON decode"
+    ],
+    "how_to_detect": "Monitor for use of replicator.decode() on untrusted input, especially where the input contains objects with '@t': '[[TypedArray]]' and 'ctorName' fields. Flag any deserialization that results in invocation of global constructors not in a strict allowlist. Detect process creation or network activity immediately following deserialization events. Audit code for use of replicator <1.0.4 and ensure input validation or upgrade to a patched version."
+  }
+}

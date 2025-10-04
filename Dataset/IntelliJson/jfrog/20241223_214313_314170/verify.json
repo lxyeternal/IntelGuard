@@ -1,0 +1,97 @@
+{
+  "package_info": {
+    "package_name": "spring-security",
+    "package_manager": "Maven (Java)",
+    "package_versions": "5.6.0 to 5.6.11, 5.7.0 to 5.7.9, 5.8.0 to 5.8.4, 6.0.0 to 6.0.4, 6.1.0 to 6.1.1 (fixed in 5.6.12+, 5.7.10+, 5.8.5+, 6.0.5+, 6.1.2+)",
+    "why_malicious": "The affected versions of Spring Security contain a broken access control vulnerability (CVE-2023-34034) that allows authentication and authorization bypass in Spring WebFlux applications. Specifically, path-based access control rules that do not start with a leading slash (e.g., 'admin/**') are not enforced, allowing unauthorized access to protected endpoints. This undermines the security model by silently disabling intended protections for critical application routes."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (request-time URL matching in access control evaluation)",
+        "file_location": "org.springframework.security.web.server.util.matcher.PathPatternParserServerWebExchangeMatcher.java (Spring Security core)",
+        "required_permissions": [
+          "none (affects access control logic, no special permissions required)"
+        ]
+      },
+      "code_snippet": "this.pattern = DEFAULT_PATTERN_PARSER.parse(pattern); // vulnerable\n// ...\n// fixed:\nthis.pattern = parse(pattern);",
+      "code_language": "java",
+      "code_behavior": "At runtime, during request-time URL matching, the code parses the provided path pattern for access control rules using DEFAULT_PATTERN_PARSER without normalizing the pattern to start with a leading slash, resulting in patterns like 'admin/**' not matching '/admin/...' URLs and causing access control bypass.",
+      "malice_analysis": {
+        "why_suspicious": "This code is suspicious because it silently fails to enforce access control rules when the pattern does not start with a leading slash, allowing unauthorized users to access endpoints that should be protected.",
+        "violated_expectations": "Normally, access control patterns such as 'admin/**' are expected to match all '/admin/...' URLs, regardless of the presence of a leading slash. The actual behavior fails to enforce these rules, breaking the intended security boundaries and leaving endpoints unprotected.",
+        "similar_legitimate_use": "Parsing path patterns for access control is legitimate, but only when the implementation correctly normalizes and matches patterns as intended. Failure to do so introduces critical security flaws.",
+        "key_indicators": [
+          "Use of DEFAULT_PATTERN_PARSER.parse without prepending a leading slash to the pattern",
+          "Access control rules with patterns missing a leading slash are not enforced",
+          "No error or warning is generated when a misconfigured pattern is used",
+          "Wildcard patterns (e.g., '**') fail to match intended protected paths"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (request-time URL matching in application access control configuration)",
+        "file_location": "Spring Security configuration (application code, e.g., SecurityConfig.java or WebSecurityConfigurerAdapter implementation)",
+        "required_permissions": [
+          "none (affects access control logic, no special permissions required)"
+        ]
+      },
+      "code_snippet": ".authorizeExchange()\n    .pathMatchers(\"admin/**\")\n    .hasRole(Roles.ADMIN)\n.and()\n.authorizeExchange()\n    .anyExchange()\n    .permitAll();",
+      "code_language": "java (Spring Security DSL)",
+      "code_behavior": "At runtime, during request-time URL matching, the application configures access control so that only users with the ADMIN role should access 'admin/**' endpoints, but due to the missing leading slash, this rule is not enforced and all users can access these endpoints, resulting in a silent access control bypass.",
+      "malice_analysis": {
+        "why_suspicious": "This configuration appears to restrict access to admin endpoints, but due to the underlying vulnerability, the rule is not enforced, allowing unauthorized access to sensitive endpoints without any warning or error.",
+        "violated_expectations": "Developers expect 'admin/**' to protect all '/admin/...' endpoints, but the actual behavior leaves these endpoints unprotected, violating the principle of least privilege and intended security controls.",
+        "similar_legitimate_use": "Legitimate use of pathMatchers for access control is common, but only when patterns are correctly specified and enforced by the framework.",
+        "key_indicators": [
+          "Access control rules using pathMatchers with patterns not starting with '/'",
+          "Critical endpoints (e.g., /admin/...) accessible without authentication or required roles",
+          "No error or warning when misconfigured patterns are used in security configuration"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Application configures access control using pathMatchers(\"admin/**\").hasRole(Roles.ADMIN), expecting to restrict access to admin endpoints.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Access control rules are registered in the application configuration, but due to the pattern parsing bug, these rules are not enforced for the intended endpoints."
+    },
+    {
+      "step": 2,
+      "action": "Spring Security parses the pattern 'admin/**' without prepending a leading slash, causing the rule to not match any actual '/admin/...' URL.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "No access control is applied to admin endpoints, leaving them unprotected."
+    },
+    {
+      "step": 3,
+      "action": "Attacker accesses '/admin/supershell' or any '/admin/...' endpoint without authentication or required role.",
+      "implemented_by": [],
+      "leads_to": "Authentication and authorization bypass; attacker gains unauthorized access to privileged endpoints."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Access control rules using pathMatchers with patterns not starting with '/' in Spring WebFlux applications",
+      "Critical endpoints (e.g., /admin/*) accessible without authentication or required roles",
+      "Wildcard patterns (e.g., '**') in access control rules not matching expected URLs, resulting in unprotected endpoints"
+    ],
+    "file_indicators": [
+      "Spring Security configuration files (e.g., SecurityConfig.java) with pathMatchers(\"admin/**\") or similar patterns lacking leading slash",
+      "org/springframework/security/web/server/util/matcher/PathPatternParserServerWebExchangeMatcher.java in affected Spring Security versions"
+    ],
+    "network_indicators": [
+      "Unusual access to /admin/* or other sensitive endpoints by unauthenticated or unauthorized users",
+      "Absence of authentication/authorization checks on sensitive endpoints in access logs"
+    ],
+    "how_to_detect": "Perform static analysis of Spring Security configuration files to identify pathMatchers rules that do not start with a leading slash (e.g., 'admin/**' instead of '/admin/**'). Cross-reference application dependencies to ensure Spring Security is not running an affected version. Monitor access logs for unauthenticated or unauthorized access to sensitive endpoints (e.g., /admin/*) in Spring WebFlux applications. Flag applications where critical endpoints are accessible without authentication or required roles, and verify that the application is running a fixed version of Spring Security."
+  }
+}

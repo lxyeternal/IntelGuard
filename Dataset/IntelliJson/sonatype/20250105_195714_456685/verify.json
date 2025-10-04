@@ -1,0 +1,132 @@
+{
+  "package_info": {
+    "package_name": "express-fileupload",
+    "package_manager": "npm",
+    "package_versions": "<1.1.10 (notably 1.1.8 and below, 1.1.9 partially fixed)",
+    "why_malicious": "The package contains a critical Prototype Pollution vulnerability (CVE-2020-7699) that allows attackers to manipulate JavaScript object prototypes via crafted file upload payloads. This vulnerability enables attackers to inject arbitrary properties into global objects, potentially leading to Denial of Service (DoS), privilege escalation, and, in advanced exploitation scenarios, remote code execution (RCE) on backend Node.js applications."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when handling file upload payloads)",
+        "file_location": "internal data parsing logic (e.g., within the main fileupload handler)",
+        "required_permissions": [
+          "filesystem",
+          "network (if exfiltration is chained)",
+          "environment_vars (if polluted)"
+        ]
+      },
+      "code_snippet": "keyParts = key.replace(new RegExp(/\\[/g), '.').replace(new RegExp(/\\]/g), '').split('.');\nfor (let index = 0; index < keyParts.length; index++) {\n  let k = keyParts[index];\n  // Ensure we don't allow prototype pollution\n  if (INVALID_KEYS.includes(k)) {\n    continue;\n  }\n  if (index >= keyParts.length - 1) {\n    current[k] = value;\n  }\n}",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code parses user-supplied keys from uploaded file payloads, traverses and assigns values to nested object properties based on those keys, and, due to insufficient filtering, allows assignment to prototype properties, resulting in prototype pollution and arbitrary property injection.",
+      "malice_analysis": {
+        "why_suspicious": "The code allows user-controlled input to directly modify object properties, including prototype properties, with only minimal filtering. This enables attackers to exploit prototype pollution by injecting properties into Object.prototype or Array.prototype, which can alter application behavior globally.",
+        "violated_expectations": "Normal file upload handlers should never allow user input to affect the global object prototype or application-wide object behavior. Here, user input can alter application logic globally by polluting prototypes.",
+        "similar_legitimate_use": "Deep property assignment from user input is sometimes used for configuration merging or dynamic object construction, but must be strictly validated to prevent prototype pollution.",
+        "key_indicators": [
+          "Direct assignment to object properties based on user input",
+          "Insufficient filtering of prototype mutators (e.g., only checking '__proto__')",
+          "Use of split('.') or similar logic to traverse and assign nested properties from user input",
+          "Assignment to object properties within a loop over user-controlled key parts"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when handling file upload payloads)",
+        "file_location": "internal data parsing logic (e.g., within the main fileupload handler, version 1.1.9)",
+        "required_permissions": [
+          "filesystem",
+          "network (if exfiltration is chained)",
+          "environment_vars (if polluted)"
+        ]
+      },
+      "code_snippet": "const INVALID_KEYS = ['__proto__', 'constructor'];\n...\nif (INVALID_KEYS.includes(k)) {\n  continue;\n}",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code attempts to filter out both '__proto__' and 'constructor' keys from user-supplied input during file upload parsing, but still allows other prototype mutators or array prototype keys, leaving the application partially vulnerable to prototype pollution.",
+      "malice_analysis": {
+        "why_suspicious": "While this is an improvement over previous versions, it still relies on a static blacklist, which is error-prone and can be bypassed by using other prototype mutators or array prototype keys, leaving some attack surface exposed.",
+        "violated_expectations": "A robust implementation should use a whitelist or block all prototype and array prototype keys, not just a static blacklist. Relying on a blacklist is insufficient for preventing prototype pollution.",
+        "similar_legitimate_use": "Filtering dangerous keys is a common practice in input validation, but must be comprehensive and not limited to a small set of known dangerous keys.",
+        "key_indicators": [
+          "Blacklist-based filtering of prototype mutators",
+          "Presence of only '__proto__' and 'constructor' in the filter list",
+          "Potential for bypass with other keys (e.g., 'prototype', array prototype keys)",
+          "Continued use of user-controlled keys for deep property assignment"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (when handling file upload payloads)",
+        "file_location": "internal data parsing logic (e.g., within the main fileupload handler, version 1.1.10+)",
+        "required_permissions": [
+          "filesystem",
+          "network (if exfiltration is chained)",
+          "environment_vars (if polluted)"
+        ]
+      },
+      "code_snippet": "const OBJECT_PROTOTYPE_KEYS = Object.getOwnPropertyNames(Object.prototype);\nconst ARRAY_PROTOTYPE_KEYS = Object.getOwnPropertyNames(Array.prototype);\n...\nconst IN_ARRAY_PROTOTYPE = ARRAY_PROTOTYPE_KEYS.includes(k) && Array.isArray(current);\nif (OBJECT_PROTOTYPE_KEYS.includes(k) || IN_ARRAY_PROTOTYPE) {\n  continue;\n}",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code blocks assignment to any property names found in Object.prototype or Array.prototype, as well as array prototype keys, when parsing user-supplied file upload payloads, thereby preventing prototype pollution via user input.",
+      "malice_analysis": {
+        "why_suspicious": "This is a defensive fix, not malicious, but demonstrates the correct approach to prevent prototype pollution by blocking all prototype keys, not just a static blacklist. It closes the attack vector exploited in previous versions.",
+        "violated_expectations": "Earlier versions failed to block all prototype keys, allowing malicious input to pollute prototypes. This version meets secure coding expectations for deep property assignment.",
+        "similar_legitimate_use": "Comprehensive prototype key filtering is a best practice for secure deep property assignment and is a legitimate defensive coding technique.",
+        "key_indicators": [
+          "Use of Object.getOwnPropertyNames to enumerate all prototype keys",
+          "Blocking both object and array prototype pollution",
+          "Conditional logic to prevent assignment to prototype properties based on user input"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a file upload payload with malicious keys (e.g., {\"constructor.prototype.shell\": \"malicious_value\"})",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Payload is parsed and keys are assigned to object properties"
+    },
+    {
+      "step": 2,
+      "action": "Vulnerable code assigns user-supplied values to prototype properties (e.g., Object.prototype or Array.prototype)",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Global object prototype is polluted"
+    },
+    {
+      "step": 3,
+      "action": "Polluted prototype enables attacker to alter application logic, cause Denial of Service, or achieve remote code execution (RCE) if chained with other vulnerabilities (e.g., template injection)",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Denial of Service, privilege escalation, or RCE"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Assignment to object properties based on user-supplied keys without comprehensive prototype key filtering",
+      "Presence of split('.') or similar logic for deep property assignment from user input",
+      "Blacklist-based filtering of prototype mutators (e.g., only '__proto__', 'constructor')",
+      "Custom file upload handlers that parse and assign nested properties from user input"
+    ],
+    "file_indicators": [
+      "Use of express-fileupload versions <1.1.10",
+      "Presence of custom file upload handler code that parses and assigns nested properties from user input",
+      "Code containing split('.') or similar logic in file upload parsing routines"
+    ],
+    "network_indicators": [
+      "Unusual outbound connections following file upload (if RCE is achieved)",
+      "Unexpected reverse shell activity (e.g., netcat connections as shown in PoC)",
+      "Outbound connections to attacker-controlled infrastructure after file upload"
+    ],
+    "how_to_detect": "Scan for use of express-fileupload versions below 1.1.10. Analyze file upload handlers for deep property assignment from user input, especially where split('.') or similar logic is used. Flag any code that assigns to object properties based on user input without comprehensive prototype key filtering (i.e., not using Object.getOwnPropertyNames for both Object.prototype and Array.prototype). Monitor for outbound network connections or reverse shell activity following file uploads, which may indicate successful exploitation. Review application logs for unexpected property injection or prototype pollution errors."
+  }
+}

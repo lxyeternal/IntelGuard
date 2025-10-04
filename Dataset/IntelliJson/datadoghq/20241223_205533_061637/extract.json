@@ -1,0 +1,102 @@
+{
+  "package_info": {
+    "package_name": "AWS AppSync (abused via API payload case manipulation)",
+    "package_manager": "AWS Cloud Service (not a package manager, but a managed service)",
+    "package_versions": "Prior to September 6, 2022 (before AWS remediation)",
+    "why_malicious": "The vulnerability in AWS AppSync allowed attackers to bypass cross-account role assumption restrictions by manipulating the case of JSON payload properties, enabling them to assume IAM roles in other AWS accounts and access sensitive resources. This constitutes a critical cross-tenant privilege escalation and data exfiltration risk."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "API call to create AppSync data source",
+        "file_location": "API request payload (JSON) to AWS AppSync CreateDataSource endpoint",
+        "required_permissions": [
+          "network",
+          "IAM:CreateDataSource",
+          "knowledge of victim role ARN"
+        ]
+      },
+      "code_snippet": "{\n  \"name\": \"malicioussource\",\n  \"type\": \"HTTP\",\n  \"servicerolearn\": \"arn:aws:iam::677301038893:role/service-role/appsync-ds-ddb-yoczrt-AppSyncEventTable-xr\",\n  \"httpConfig\": {\n    \"endpoint\": \"https://dynamodb.us-east-1.amazonaws.com/\",\n    \"authorizationConfig\": {\n      \"authorizationType\": \"AWS_IAM\",\n      \"awsIamConfig\": {\n        \"signingRegion\": \"us-east-1\",\n        \"signingServiceName\": \"dynamodb\"\n      }\n    }\n  }\n}",
+      "code_language": "json",
+      "code_behavior": "During AppSync data source creation, the attacker submits a JSON payload with a non-standard property case (e.g., 'servicerolearn' instead of 'serviceRoleArn'), bypassing cross-account validation, causing AppSync to assume a role in another AWS account and granting the attacker access to victim resources.",
+      "malice_analysis": {
+        "why_suspicious": "This behavior is suspicious because it intentionally manipulates the case of a critical property to bypass security validation, enabling unauthorized cross-account access.",
+        "violated_expectations": "Normally, AppSync should only allow assuming roles within the same AWS account, and property names should be strictly validated. Here, the service fails to enforce case sensitivity, allowing privilege escalation.",
+        "similar_legitimate_use": "Legitimate use would involve creating data sources with correct property casing and only referencing roles within the same account.",
+        "key_indicators": [
+          "Non-standard casing of sensitive property names in API payloads (e.g., 'servicerolearn')",
+          "Cross-account role ARNs in data source creation",
+          "Unexpected AppSync data sources referencing external account roles"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "AppSync resolver execution (runtime)",
+        "file_location": "AppSync resolver mapping template (request mapping for DynamoDB)",
+        "required_permissions": [
+          "IAM:AssumeRole",
+          "dynamodb:Scan",
+          "network"
+        ]
+      },
+      "code_snippet": "Request mapping template to call dynamodb:Scan (not shown in full, but implied in the attack chain)",
+      "code_language": "VTL (Velocity Template Language) / configuration",
+      "code_behavior": "At runtime, the attacker invokes the malicious AppSync data source, which uses the assumed cross-account role to perform privileged DynamoDB operations (e.g., Scan), resulting in exfiltration of the victim's database contents.",
+      "malice_analysis": {
+        "why_suspicious": "The resolver is configured to perform broad data access (e.g., Scan) on a victim's database using a role that should not be accessible to the attacker's account.",
+        "violated_expectations": "Resolvers should only access resources within the same account and with least privilege. Here, the attacker leverages a cross-account role to access sensitive data.",
+        "similar_legitimate_use": "Legitimate resolvers may perform scans on owned databases, but not via cross-account role abuse.",
+        "key_indicators": [
+          "Resolvers configured to access resources in external accounts",
+          "Unusual or broad data access patterns (e.g., full table scans)",
+          "Use of roles with trust policy for AppSync but assumed from unexpected accounts"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a CreateDataSource API request with a non-standard property case (e.g., 'servicerolearn') referencing a role in the victim's AWS account.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Bypass of cross-account role validation and creation of a malicious data source."
+    },
+    {
+      "step": 2,
+      "action": "AppSync service, due to the case manipulation, assumes the victim's IAM role and creates the data source.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker's AppSync instance is now authorized to access victim resources."
+    },
+    {
+      "step": 3,
+      "action": "Attacker configures a resolver to perform privileged operations (e.g., dynamodb:Scan) on the victim's database using the assumed role.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Exfiltration or manipulation of victim data."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "AppSync CreateDataSource API calls with non-standard property casing (e.g., 'servicerolearn')",
+      "AppSync data sources referencing cross-account IAM role ARNs",
+      "Unusual or anomalous AppSync activity patterns (e.g., new data sources, broad data access)"
+    ],
+    "file_indicators": [
+      "AppSync data source definitions with property names in unexpected case",
+      "Resolvers configured for resources in external accounts"
+    ],
+    "network_indicators": [
+      "AppSync service assuming roles in external AWS accounts (CloudTrail: AssumeRole events with 'appsync.amazonaws.com' as source)",
+      "Unexpected DynamoDB or other AWS API calls originating from AppSync in the victim account"
+    ],
+    "how_to_detect": "Monitor CloudTrail logs for AppSync CreateDataSource API calls with property names in non-standard case (e.g., 'servicerolearn'). Flag any data sources referencing IAM roles in external accounts. Correlate AppSync AssumeRole events with the source account and role ARN to detect cross-account assumptions. Look for anomalous data access patterns (e.g., full table scans) initiated by AppSync, especially if the role has not previously performed such actions."
+  }
+}

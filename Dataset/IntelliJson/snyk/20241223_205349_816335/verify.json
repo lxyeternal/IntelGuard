@@ -1,0 +1,103 @@
+{
+  "package_info": {
+    "package_name": "SnakeYaml",
+    "package_manager": "Maven/Gradle (Java ecosystem)",
+    "package_versions": "1.x (prior to 2.0)",
+    "why_malicious": "SnakeYaml 1.x is vulnerable to unsafe deserialization, which allows attackers to supply YAML files that instantiate arbitrary Java classes present on the application's classpath. When untrusted YAML input is parsed, the library by default deserializes to a generic Object and does not restrict which classes can be instantiated, enabling attackers to trigger arbitrary code execution through class constructors or static initializers."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when application parses YAML input using SnakeYaml 1.x with default settings)",
+        "file_location": "application code where SnakeYaml is used (e.g., Yaml yaml = new Yaml(); yaml.load(inputStream);)",
+        "required_permissions": [
+          "filesystem (to read YAML file or input stream)",
+          "JVM class loading",
+          "potentially network or OS-level permissions if attacker-supplied class is instantiated"
+        ]
+      },
+      "code_snippet": "Yaml yaml = new Yaml();\nObject obj = yaml.load(inputStream);",
+      "code_language": "java",
+      "code_behavior": "At runtime, the application invokes SnakeYaml's default constructor and parses YAML input into a generic Object, causing the library to deserialize any class referenced in the YAML. This results in arbitrary class instantiation and can trigger code execution via class constructors or static initializers.",
+      "malice_analysis": {
+        "why_suspicious": "Parsing untrusted YAML input into a generic Object using SnakeYaml's default constructor allows the deserialization of arbitrary classes, which can be exploited by attackers to execute code through malicious or vulnerable classes present on the classpath.",
+        "violated_expectations": "Normal YAML parsing should only deserialize safe, expected data types (such as maps, lists, or primitives). This code violates safe deserialization practices by allowing any class to be instantiated, breaching the principle of least privilege and exposing the application to code execution risks.",
+        "similar_legitimate_use": "Deserializing trusted configuration files in a controlled environment where the YAML input is guaranteed to be safe and only known, expected classes are present.",
+        "key_indicators": [
+          "Use of new Yaml() constructor without specifying SafeConstructor or LoaderOptions",
+          "Parsing YAML input from untrusted or external sources",
+          "No explicit restriction on allowed YAML tags or classes during deserialization"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when attacker-supplied YAML file is parsed by the application)",
+        "file_location": "YAML file provided to the application (e.g., !!Gadget [\"env\"] or !!mypackage.Person ...)",
+        "required_permissions": [
+          "JVM class loading",
+          "potentially network or filesystem access if the instantiated class performs such actions"
+        ]
+      },
+      "code_snippet": "!!Gadget [\"env\"]",
+      "code_language": "yaml",
+      "code_behavior": "At runtime, when the YAML parser processes the !!Gadget tag, it attempts to instantiate the Gadget class with the argument \"env\". If Gadget exists on the classpath and its constructor or static block has side effects, this can result in arbitrary code execution.",
+      "malice_analysis": {
+        "why_suspicious": "YAML tags referencing arbitrary classes (such as !!Gadget) enable attackers to instantiate classes with potentially malicious behavior, especially if those classes have constructors or static initializers that execute code upon instantiation.",
+        "violated_expectations": "YAML files are expected to represent data structures, not to trigger the instantiation of arbitrary classes with side effects. Allowing arbitrary tags breaks this expectation and introduces code execution risk.",
+        "similar_legitimate_use": "Custom YAML tags for domain-specific objects in trusted, internal environments where all YAML input is controlled and validated.",
+        "key_indicators": [
+          "Presence of !!<arbitrary-class> tags in YAML input",
+          "Arguments supplied to class constructors via YAML",
+          "No tag or class restrictions enforced in SnakeYaml parser configuration"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious YAML file containing a tag that references a class available on the application's classpath (e.g., !!Gadget [\"env\"]).",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Malicious YAML file is delivered to and accepted by the application."
+    },
+    {
+      "step": 2,
+      "action": "Application parses the attacker-supplied YAML file using SnakeYaml 1.x with default settings, deserializing the content into a generic Object.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "SnakeYaml attempts to instantiate the referenced class, executing any code in its constructor or static initializer."
+    },
+    {
+      "step": 3,
+      "action": "If the referenced class contains a constructor or static block with malicious or exploitable side effects, arbitrary code execution occurs (such as running system commands or exfiltrating data).",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Attacker achieves code execution on the target system, potentially compromising confidentiality, integrity, or availability."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Deserialization of YAML input using SnakeYaml with the default Yaml() constructor and generic Object type",
+      "Parsing of YAML files containing !!<arbitrary-class> tags from untrusted or external sources",
+      "Unexpected instantiation of classes during YAML parsing, especially those not explicitly allowed by the application"
+    ],
+    "file_indicators": [
+      "YAML files containing !!<class> tags (e.g., !!Gadget, !!mypackage.Person)",
+      "Application source code using new Yaml() without SafeConstructor or LoaderOptions",
+      "Absence of explicit tag or class whitelisting in SnakeYaml configuration"
+    ],
+    "network_indicators": [
+      "Unusual outbound network connections or system commands executed during or immediately after YAML parsing (if attacker-supplied class is loaded)",
+      "Unexpected class loading events in the JVM correlated with YAML parsing activity"
+    ],
+    "how_to_detect": "Perform static analysis of application code to identify use of SnakeYaml 1.x with the default Yaml() constructor and generic Object deserialization. Scan YAML files for !!<arbitrary-class> tags, especially those originating from untrusted sources. Flag code paths where YAML input is parsed without tag or class restrictions. At runtime, monitor for unexpected class instantiations, system activity, or network connections occurring during YAML parsing. Implement allowlists for permitted YAML tags and classes, and alert on deviations."
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "package_info": {
+    "package_name": "netty",
+    "package_manager": "Maven (Java)",
+    "package_versions": "4.1.0 to 4.1.67",
+    "why_malicious": "The affected versions of Netty contain a critical denial-of-service vulnerability in the Bzip2 decompression logic. Attackers can exploit this by submitting specially crafted Bzip2 files (zip bombs), causing the application to allocate excessive memory and potentially crash. This is a severe vulnerability, not intentional malware, but it enables remote DoS attacks through resource exhaustion."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, when decompressing user-supplied Bzip2 data",
+        "file_location": "Bzip2Decoder.java (internal Netty source)",
+        "required_permissions": [
+          "filesystem (to read/write files)",
+          "memory (to allocate buffers for decompression)"
+        ]
+      },
+      "code_snippet": "for (;;) { // Loop until EOF - Problematic\n    ...\n    switch (currentState) {\n    …\n    case DECODE_HUFFMAN_DATA:\n        blockDecompressor = this.blockDecompressor;\n        ...\n        final int blockLength = blockDecompressor.blockLength();\n        final ByteBuf uncompressed = ctx.alloc().buffer(blockLength);\n        boolean success = false;\n        try {\n            int uncByte;\n            while ((uncByte = blockDecompressor.read()) >= 0) {\n                uncompressed.writeByte(uncByte); // Read entire block\n            }\n        ...\n        break;\n    case EOF:\n        in.skipBytes(in.readableBytes()); // Return on EOF, not end-of-block\n        return;\n    }\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, when decompressing user-supplied Bzip2 data, the code enters an infinite loop that allocates a buffer for the entire decompressed block and reads all data into memory in one go, resulting in unbounded memory allocation and potential memory exhaustion if the input is a zip bomb.",
+      "malice_analysis": {
+        "why_suspicious": "This code is suspicious because it processes the entire decompressed block in a single operation, allocating memory proportional to the uncompressed size without any checks or chunking. If an attacker submits a highly compressed (zip bomb) file, this can cause the application to allocate massive amounts of memory, leading to denial-of-service.",
+        "violated_expectations": "Normal decompression routines should process data in small, manageable chunks and enforce resource limits to prevent memory exhaustion. This code violates those expectations by allocating memory for the entire decompressed block at once and not returning control until the end of the file, making it vulnerable to resource exhaustion attacks.",
+        "similar_legitimate_use": "Legitimate decompression libraries may process large files, but they typically implement chunked processing and enforce limits on memory allocation to prevent abuse. Processing the entire decompressed block in one go without limits is not standard practice.",
+        "key_indicators": [
+          "Infinite loop over input stream without chunked processing",
+          "Allocates memory for the entire decompressed block at once",
+          "Returns only at EOF, not after each decompressed chunk",
+          "No internal resource release or enforcement of memory limits",
+          "Lack of safeguards against unbounded memory allocation"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits a specially crafted Bzip2 file (zip bomb) to an application using Netty's Bzip2Decoder.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The decoder attempts to decompress the entire file in one go, allocating memory for the full decompressed size."
+    },
+    {
+      "step": 2,
+      "action": "The decoder allocates large amounts of memory for the decompressed data, as the code does not enforce chunking or memory limits.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Application process crashes due to out-of-memory error, resulting in denial of service."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Decompression routines that allocate memory for the entire input or decompressed block without chunking or resource limits",
+      "Infinite or unbounded loops over user-supplied compressed data during decompression",
+      "Sudden and excessive memory usage spikes during decompression of Bzip2 files",
+      "Absence of chunked processing or memory limit enforcement in decompression logic"
+    ],
+    "file_indicators": [
+      "Bzip2 files with extremely high compression ratios (e.g., small file size but decompresses to gigabytes of data)",
+      "Unusually large heap allocations observed during Bzip2 decompression",
+      "Presence of Bzip2 files with known zip bomb signatures"
+    ],
+    "network_indicators": [
+      "User uploads or network streams containing Bzip2 data with suspiciously high compression ratios",
+      "Repeated or automated attempts to upload large or highly compressed Bzip2 files"
+    ],
+    "how_to_detect": "Monitor applications using Netty for excessive memory usage or crashes during decompression of Bzip2 files. Flag decompression routines that do not return control after processing manageable chunks or that allocate memory for entire decompressed blocks. Detect and block Bzip2 files with abnormally high compression ratios or known zip bomb patterns. Upgrade Netty to version 4.1.68 or later to mitigate this vulnerability."
+  }
+}

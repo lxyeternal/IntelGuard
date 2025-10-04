@@ -1,0 +1,138 @@
+{
+  "package_info": {
+    "package_name": "RAUC",
+    "package_manager": "source (embedded Linux integration)",
+    "package_versions": "all versions < 1.5",
+    "why_malicious": "A vulnerability in RAUC allows an attacker to replace a firmware bundle after it has been cryptographically verified but before it is installed, due to a race condition between signature verification and installation. This enables arbitrary code execution and full device compromise, breaking the core security guarantee of the update mechanism."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (during firmware installation process after signature verification, before mounting)",
+        "file_location": "internal RAUC logic (check_bundle() and mount_bundle() functions in the source code)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "check_bundle(); // validates bundle signature\n// ... attacker can replace bundle file here ...\nmount_bundle(); // mounts and installs bundle",
+      "code_language": "C (conceptual, as described in report)",
+      "code_behavior": "At runtime during the firmware installation process, the code validates the bundle signature using check_bundle(), then closes the file. Before mount_bundle() is called to mount and install the bundle, the file is re-opened, allowing an attacker to swap in a malicious bundle. This results in the installation of attacker-controlled firmware and arbitrary code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The separation between signature verification and actual use of the file introduces a Time-of-Check-Time-of-Use (TOCTOU) race condition, allowing the file to be swapped after verification but before installation.",
+        "violated_expectations": "Firmware update processes are expected to atomically verify and install the exact same file, preventing any tampering between verification and installation steps.",
+        "similar_legitimate_use": "None; atomicity is a fundamental security requirement for update mechanisms, and legitimate processes should never allow the verified file to be replaced before installation.",
+        "key_indicators": [
+          "TOCTOU race condition between check_bundle() and mount_bundle()",
+          "No file locking or atomic operation between verification and use",
+          "File is closed and re-opened between signature verification and installation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (remote attack via web interface during firmware upload and installation)",
+        "file_location": "upload.cgi and install.cgi endpoints (typically in /www/cgi-bin/ or similar web server directory)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "authenticated web access"
+        ]
+      },
+      "code_snippet": "POST /cgi-bin/upload.cgi (to /tmp/rauc/bundle.raucb)\nPOST /cgi-bin/install.cgi (runs 'rauc install /tmp/rauc/bundle.raucb')\nPOST /cgi-bin/upload.cgi (malicious bundle, overwrites /tmp/rauc/bundle.raucb)",
+      "code_language": "shell/HTTP (web application logic)",
+      "code_behavior": "At runtime, an attacker remotely uploads a valid firmware bundle via upload.cgi to /tmp/rauc/bundle.raucb, triggers installation via install.cgi, and then quickly uploads a malicious bundle to the same path before the mount step. This sequence results in the installation of attacker-controlled firmware.",
+      "malice_analysis": {
+        "why_suspicious": "The web interface allows the bundle file to be overwritten after signature verification but before installation, enabling a remote attacker to exploit the race condition and install malicious firmware.",
+        "violated_expectations": "Web-based firmware update endpoints should enforce locking and prevent overwriting of files during critical operations, ensuring that the verified bundle cannot be replaced before installation.",
+        "similar_legitimate_use": "Legitimate firmware upload and install operations should not allow overlapping or concurrent access to the same bundle file during installation.",
+        "key_indicators": [
+          "No locking or synchronization between upload.cgi and install.cgi endpoints",
+          "Bundle file path (/tmp/rauc/bundle.raucb) is attacker-writable during installation",
+          "Ability to overwrite bundle file after verification and before installation"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (local privilege escalation during manual or automated firmware installation)",
+        "file_location": "filesystem (e.g., /tmp/mybundle.raucb), sudoers configuration (e.g., /etc/sudoers)",
+        "required_permissions": [
+          "filesystem",
+          "sudo access to rauc"
+        ]
+      },
+      "code_snippet": "sudo rauc install /tmp/mybundle.raucb\n# Attacker replaces /tmp/mybundle.raucb after verification, before mount",
+      "code_language": "shell",
+      "code_behavior": "At runtime, a local attacker with access to a writable bundle path and the ability to invoke or trigger 'rauc install' can replace the bundle file after signature verification but before mounting. This leads to privilege escalation and arbitrary code execution as root.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing installation from world-writable or user-writable paths enables unprivileged users to exploit the race condition and escalate privileges by replacing the bundle after verification.",
+        "violated_expectations": "Firmware installation should only occur from secure, root-only paths, and the bundle file should not be modifiable by unprivileged users during installation.",
+        "similar_legitimate_use": "None; using world-writable firmware paths for installation is always insecure and not a legitimate use case.",
+        "key_indicators": [
+          "Installation of firmware from /tmp or other insecure, user-writable locations",
+          "Sudoers entry permitting unprivileged users to run rauc install",
+          "No atomic copy or move of the bundle to a secure location before installation"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker uploads or places a valid, signed firmware bundle to a writable path (e.g., via web interface or local filesystem).",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Triggering the installation process with a bundle under attacker control."
+    },
+    {
+      "step": 2,
+      "action": "Attacker triggers the installation process (via web endpoint or local command), causing RAUC to verify the bundle signature and close the file.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Bundle is verified, but the file is no longer locked or protected."
+    },
+    {
+      "step": 3,
+      "action": "Attacker quickly replaces the bundle file with a malicious version after signature verification but before the mount/install step.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "RAUC mounts and installs the malicious firmware bundle."
+    },
+    {
+      "step": 4,
+      "action": "Malicious firmware is installed, granting the attacker full control (root privileges) over the device.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Device compromise and persistent attacker control."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Firmware bundle file is modified between signature verification and installation (TOCTOU condition)",
+      "Multiple rapid writes or overwrites to the same bundle file during the installation process",
+      "Firmware installation initiated from world-writable or user-writable paths (e.g., /tmp)",
+      "Concurrent or overlapping access to upload.cgi and install.cgi endpoints during firmware update"
+    ],
+    "file_indicators": [
+      "/tmp/rauc/bundle.raucb",
+      "/tmp/mybundle.raucb",
+      "Any firmware bundle path that is world-writable or not restricted to root-only access"
+    ],
+    "network_indicators": [
+      "Multiple HTTP POST requests to /cgi-bin/upload.cgi and /cgi-bin/install.cgi in rapid succession from the same source",
+      "Unusual or unauthorized remote access to firmware update endpoints (upload.cgi, install.cgi)"
+    ],
+    "how_to_detect": "Monitor for modifications to firmware bundle files after initial upload or signature verification but before installation. Flag any installation attempts from insecure paths such as /tmp or other user-writable directories. Detect rapid, repeated access to upload.cgi and install.cgi endpoints, especially from the same IP address or user session. Audit sudoers and web interface configurations for insecure permissions or lack of file locking mechanisms. Implement file integrity monitoring to detect changes to bundle files during the installation window."
+  }
+}

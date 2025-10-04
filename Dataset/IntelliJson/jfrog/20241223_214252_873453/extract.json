@@ -1,0 +1,93 @@
+{
+  "package_info": {
+    "package_name": "curl / libcurl",
+    "package_manager": "system package manager (apt/yum/apk/homebrew/etc), source distribution",
+    "package_versions": "7.69.0 up to and including 8.3.0 (CVE-2023-38545); 7.9.1 up to and including 8.3.0 (CVE-2023-38546)",
+    "why_malicious": "The affected versions of curl/libcurl contain a heap overflow vulnerability (CVE-2023-38545) that can be triggered when connecting to an attacker-controlled HTTP server over a SOCKS5 proxy with remote hostname resolving (socks5h://). This allows an attacker to potentially achieve denial of service or remote code execution by exploiting improper buffer handling in the state machine logic."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when making a network request via SOCKS5 proxy with remote hostname resolution)",
+        "file_location": "libcurl source code (SOCKS5 state machine, e.g., url.c or socks.c)",
+        "required_permissions": [
+          "network",
+          "heap memory allocation"
+        ]
+      },
+      "code_snippet": "if(!socks5_resolve_local && hostname_len > 255) {\n  socks5_resolve_local = TRUE;\n}",
+      "code_language": "C",
+      "code_behavior": "At runtime, when a hostname longer than 255 bytes is encountered in a SOCKS5 proxy connection, the code attempts to fall back to local resolution but later incorrectly constructs a protocol frame, copying the long hostname into a small heap buffer, resulting in a heap overflow.",
+      "malice_analysis": {
+        "why_suspicious": "This code fails to properly handle the case where a hostname exceeds the SOCKS5 protocol limit, leading to a buffer overflow.",
+        "violated_expectations": "Normal behavior would strictly enforce the 255-byte limit and reject or truncate overlong hostnames, not attempt to process them further.",
+        "similar_legitimate_use": "Legitimate code would handle protocol limits gracefully, never allowing buffer overflows.",
+        "key_indicators": [
+          "Improper bounds checking on hostname length",
+          "Heap buffer overflow due to unchecked copy",
+          "Protocol fallback logic that does not prevent unsafe memory operations"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when following HTTP redirects from attacker-controlled server)",
+        "file_location": "libcurl HTTP redirect handling logic",
+        "required_permissions": [
+          "network",
+          "heap memory allocation"
+        ]
+      },
+      "code_snippet": "Location: https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/ (host name can be extended up to 64KB)",
+      "code_language": "HTTP (protocol interaction)",
+      "code_behavior": "At runtime, the client receives an HTTP 30x redirect with a Location header containing an excessively long hostname, which is then processed by the vulnerable SOCKS5 state machine, triggering the heap overflow.",
+      "malice_analysis": {
+        "why_suspicious": "The use of an extremely long hostname in the Location header is abnormal and designed to trigger memory handling bugs.",
+        "violated_expectations": "Normal HTTP redirects use valid, reasonably sized hostnames; overlong hostnames should be rejected.",
+        "similar_legitimate_use": "No legitimate use for such long hostnames in redirects.",
+        "key_indicators": [
+          "Redirect Location header with >255-byte hostname",
+          "Interaction with SOCKS5 proxy using remote resolution"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sets up a malicious HTTP server to issue a redirect with an overlong hostname in the Location header.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Client processes the redirect and attempts to connect to the new hostname via SOCKS5 proxy."
+    },
+    {
+      "step": 2,
+      "action": "Client (curl/libcurl) processes the redirect and attempts to connect to the attacker-supplied hostname using a SOCKS5 proxy with remote hostname resolution (socks5h://).",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Heap buffer overflow is triggered in the client, potentially leading to denial of service or remote code execution."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "SOCKS5 proxy usage with remote hostname resolution (socks5h:// or CURLPROXY_SOCKS5_HOSTNAME)",
+      "HTTP redirects with extremely long hostnames (>255 bytes)",
+      "Heap buffer overflows or segmentation faults in curl/libcurl processes"
+    ],
+    "file_indicators": [
+      "curl_easy_setopt(handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME)",
+      "curl_easy_setopt(handle, CURLOPT_PROXY, \"socks5h://...\")",
+      "curl_easy_setopt(handle, CURLOPT_PRE_PROXY, \"socks5h://...\")",
+      "Command-line usage: curl -x socks5h://... or --socks5-hostname"
+    ],
+    "network_indicators": [
+      "Outbound connections to SOCKS5 proxies using the socks5h:// scheme",
+      "HTTP 30x redirects with Location headers containing hostnames longer than 255 bytes"
+    ],
+    "how_to_detect": "Monitor for use of the socks5h:// scheme in curl/libcurl invocations, either via command-line flags (--socks5-hostname, -x socks5h://) or API usage (CURLPROXY_SOCKS5_HOSTNAME). Inspect HTTP traffic for 30x redirects with abnormally long hostnames in the Location header. Watch for segmentation faults or abnormal crashes in curl/libcurl processes, especially when interacting with SOCKS5 proxies. Use static analysis to flag code that sets CURLOPT_PROXYTYPE to CURLPROXY_SOCKS5_HOSTNAME or uses socks5h:// in proxy settings."
+  }
+}

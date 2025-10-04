@@ -1,0 +1,155 @@
+{
+  "package_info": {
+    "package_name": "openssl",
+    "package_manager": "source (C library, system package managers, and embedded in runtimes like Node.js)",
+    "package_versions": "3.0.0 to 3.0.6 (inclusive)",
+    "why_malicious": "These versions of OpenSSL contain a high-severity memory corruption vulnerability (CVE-2022-3602) in the ossl_punycode_decode function, which can be triggered by processing a maliciously crafted X.509 certificate. This can lead to denial of service (DoS) or, in rare cases, remote code execution (RCE) depending on compilation and runtime environment."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (certificate validation, e.g., during TLS handshake)",
+        "file_location": "crypto/punycode.c (ossl_punycode_decode function)",
+        "required_permissions": [
+          "filesystem (to load certificates)",
+          "network (if validating remote certificates)"
+        ]
+      },
+      "code_snippet": "if (written_out > max_out)\n    return 0;\n\nmemmove(pDecoded + i + 1, pDecoded + i, (written_out - i) * sizeof *pDecoded);\npDecoded[i] = n;\ni++;\nwritten_out++;\n\n*pout_length = written_out;\nreturn 1;",
+      "code_language": "c",
+      "code_behavior": "At runtime, when validating a certificate with a punycode-encoded email address, the code performs an off-by-one check on the output buffer size, then writes one integer past the end of the buffer, potentially overwriting adjacent stack variables (such as stack cookies or function pointers), leading to memory corruption and possible denial of service or code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The code allows a 4-byte (integer) write past the end of a stack buffer due to an off-by-one error in the bounds check, which is a classic memory corruption vulnerability.",
+        "violated_expectations": "Normal behavior would strictly limit writes to within the bounds of the provided buffer. Here, the function can overwrite adjacent stack memory, violating memory safety.",
+        "similar_legitimate_use": "Buffer manipulation is common in C, but always with strict bounds checking. Overwriting stack cookies or function pointers is never legitimate.",
+        "key_indicators": [
+          "Off-by-one error in buffer bounds check",
+          "memmove operation with unchecked length",
+          "Potential overwrite of stack cookie or function pointer",
+          "Triggered by attacker-controlled certificate input"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (certificate validation, e.g., during TLS handshake)",
+        "file_location": "test/testutil/driver.c (test_puny_overrun_crash PoC)",
+        "required_permissions": [
+          "filesystem (to load certificates)",
+          "network (if validating remote certificates)"
+        ]
+      },
+      "code_snippet": "char* in = \"3B-ww4c5e180e575a65lsy2b\";\nunsigned int out[] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00};\nunsigned int bsize = OSSL_NELEM(out);\n__debugbreak();\nint result = ossl_punycode_decode(in, strlen(in), out, &bsize);\n__debugbreak();",
+      "code_language": "c",
+      "code_behavior": "At runtime, when a malicious punycode string is processed, the code triggers the vulnerable ossl_punycode_decode function with a buffer of insufficient size, causing a 4-byte overwrite past the end of the buffer, which can corrupt the stack cookie and crash the process (DoS).",
+      "malice_analysis": {
+        "why_suspicious": "The test demonstrates that attacker-controlled input can cause a stack buffer overflow, leading to a crash by corrupting the stack cookie.",
+        "violated_expectations": "Certificate parsing should never allow user input to overwrite stack memory or crash the process.",
+        "similar_legitimate_use": "None; test harnesses may intentionally trigger bugs, but production code should never allow this.",
+        "key_indicators": [
+          "Stack buffer overflow via crafted input",
+          "Stack cookie corruption and process crash",
+          "Triggered by certificate field"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (certificate validation, e.g., during TLS handshake)",
+        "file_location": "crypto/punycode.c (ossl_a2ulabel function, called from certificate validation chain)",
+        "required_permissions": [
+          "filesystem (to load certificates)",
+          "network (if validating remote certificates)"
+        ]
+      },
+      "code_snippet": "unsigned int buf[LABEL_BUF_SIZE];\nmemset(buf, 0xdd, sizeof(buf));\n...\nif (ossl_punycode_decode(inptr + 4, delta - 4, buf, &bufsize) <= 0)\n    return -1;\nfor (i = 0; i < bufsize; i++) {\n    unsigned char seed[6];\n    size_t utfsize = codepoint2utf8(seed, buf[i]);\n    if (utfsize == 0)\n        return -1;\n}",
+      "code_language": "c",
+      "code_behavior": "At runtime, when validating a certificate with a punycode-encoded email address, the code calls ossl_punycode_decode with a buffer of fixed size. If the input decodes to more elements than the buffer can hold, the function writes past the end of the buffer, potentially corrupting adjacent stack variables (such as stack cookies or local variables), leading to memory corruption and possible denial of service.",
+      "malice_analysis": {
+        "why_suspicious": "The function chain allows attacker-controlled certificate fields to trigger a buffer overflow in a stack-allocated buffer, which can corrupt critical stack data.",
+        "violated_expectations": "Certificate parsing should not allow user input to cause stack buffer overflows.",
+        "similar_legitimate_use": "None; buffer overflows are always a bug.",
+        "key_indicators": [
+          "Stack buffer allocated for punycode decoding",
+          "Unchecked output size from ossl_punycode_decode",
+          "Potential overwrite of stack cookie or local variables"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (certificate validation, e.g., during TLS handshake)",
+        "file_location": "certificate parsing chain (X.509 name constraint validation, nc_match -> nc_match_single -> nc_email_eai -> ossl_a2ulabel)",
+        "required_permissions": [
+          "filesystem (to load certificates)",
+          "network (if validating remote certificates)"
+        ]
+      },
+      "code_snippet": "if (ossl_a2ulabel(baseptr, ulabel, &size) <= 0) {\n    ret = X509_V_ERR_UNSPECIFIED;\n    goto end;\n}",
+      "code_language": "c",
+      "code_behavior": "At runtime, when validating a certificate with a punycode-encoded email address in a name constraint, the code calls ossl_a2ulabel, which in turn calls the vulnerable ossl_punycode_decode function, allowing attacker-controlled input to trigger the buffer overflow.",
+      "malice_analysis": {
+        "why_suspicious": "This call chain allows attacker-controlled certificate fields to reach the vulnerable function, making exploitation possible via crafted certificates.",
+        "violated_expectations": "Certificate validation should not allow user input to reach unsafe buffer operations.",
+        "similar_legitimate_use": "None; this is a bug in the validation chain.",
+        "key_indicators": [
+          "Attacker-controlled input reaches vulnerable function",
+          "No bounds check on decoded punycode output"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a malicious X.509 certificate with a punycode-encoded email address in the subjectAltName or nameConstraint fields.",
+      "implemented_by": [],
+      "leads_to": "Certificate is presented to a vulnerable client or server."
+    },
+    {
+      "step": 2,
+      "action": "Vulnerable application (client or server) receives and begins validating the certificate, triggering the name constraint and email address validation logic.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "ossl_a2ulabel is called with attacker-controlled input."
+    },
+    {
+      "step": 3,
+      "action": "ossl_a2ulabel calls ossl_punycode_decode with a stack-allocated buffer and attacker-controlled input.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "ossl_punycode_decode processes the input."
+    },
+    {
+      "step": 4,
+      "action": "ossl_punycode_decode performs an off-by-one buffer overflow, writing past the end of the stack buffer.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Stack corruption, which may result in process crash (DoS) or, in rare cases, code execution (RCE)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Process crash or abnormal termination during certificate validation",
+      "Stack buffer overflow detected in OpenSSL routines",
+      "Unusual or malformed punycode-encoded email addresses in X.509 certificates"
+    ],
+    "file_indicators": [
+      "X.509 certificates with subjectAltName or nameConstraint fields containing long or malformed punycode email addresses",
+      "Crash dumps referencing ossl_punycode_decode or ossl_a2ulabel"
+    ],
+    "network_indicators": [
+      "Inbound or outbound TLS connections where the peer presents a certificate with a punycode-encoded email address",
+      "Repeated failed TLS handshakes with the same peer (potential DoS attempt)"
+    ],
+    "how_to_detect": "Monitor for process crashes or abnormal terminations in applications using OpenSSL 3.0.0–3.0.6, especially during or immediately after TLS handshakes. Inspect X.509 certificates for subjectAltName or nameConstraint fields containing unusually long or malformed punycode-encoded email addresses. Use memory protection tools or runtime instrumentation to detect stack buffer overflows in OpenSSL routines. Network monitoring can flag repeated failed TLS handshakes or certificates with suspicious punycode fields."
+  }
+}

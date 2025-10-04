@@ -1,0 +1,133 @@
+{
+  "package_info": {
+    "package_name": "TeamCity On-Premises",
+    "package_manager": "proprietary (JetBrains distribution)",
+    "package_versions": "All versions through 2023.11.3",
+    "why_malicious": "Multiple authentication bypass vulnerabilities (CVE-2024-27198, CVE-2024-27199) allow remote unauthenticated attackers to gain full control over the TeamCity server. Attackers can create admin accounts, generate admin tokens, and modify server settings, enabling supply chain attacks, data exfiltration, and disruption of CI/CD pipelines."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "HTTP request-time",
+        "file_location": "jetbrains.buildServer.controllers.BaseController (web-openapi.jar)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "if (modelAndView.hasViewName() && !request.getServletPath().endsWith('.jsp')) {\n    String jsp = getJspFromRequest(request);\n    if (jsp.endsWith('.jsp') && !jsp.contains('admin/')) {\n        modelAndView.setViewName(jsp);\n    }\n}",
+      "code_language": "java",
+      "code_behavior": "At HTTP request-time, the code inspects the incoming request for a 'jsp' parameter, checks if it ends with '.jsp' and does not contain 'admin/', then dynamically sets the server-side view to the attacker-supplied JSP, allowing unauthenticated access to arbitrary endpoints.",
+      "malice_analysis": {
+        "why_suspicious": "The code allows user-supplied input to dictate which server-side JSP is rendered, bypassing authentication and access controls. This enables attackers to access sensitive endpoints by manipulating request parameters.",
+        "violated_expectations": "Normal behavior would restrict view rendering to authenticated users and only allow access to validated, non-sensitive endpoints. Here, arbitrary endpoints can be accessed by manipulating the 'jsp' parameter, violating standard access control practices.",
+        "similar_legitimate_use": "Dynamic view rendering based on user input may be used in development or debugging tools, but should always enforce strict validation and authentication.",
+        "key_indicators": [
+          "User-controlled 'jsp' parameter directly sets server-side view",
+          "Lack of authentication or authorization checks before rendering",
+          "Insufficient validation of endpoint access",
+          "Bypass of authentication for sensitive or internal resources"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "HTTP request-time",
+        "file_location": "TeamCity web server routing (multiple endpoints, e.g., /res/, /update/, /.well-known/acme-challenge/)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "GET /res/../admin/diagnostic.jsp",
+      "code_language": "http",
+      "code_behavior": "At HTTP request-time, the code fails to properly sanitize URL paths, allowing path traversal via crafted URLs such as '../', which enables unauthenticated access to restricted resources like admin pages.",
+      "malice_analysis": {
+        "why_suspicious": "Path traversal in web requests is a well-known vulnerability that allows attackers to bypass access controls and reach sensitive files or endpoints.",
+        "violated_expectations": "Normal web server behavior would sanitize and validate all incoming paths to prevent traversal outside allowed directories. Here, the lack of such validation allows attackers to access protected resources.",
+        "similar_legitimate_use": "There is no legitimate use for path traversal in production web applications; such patterns should always be blocked.",
+        "key_indicators": [
+          "Presence of '../' in URL paths",
+          "Direct access to admin or internal resources without authentication",
+          "Lack of path normalization or sanitization in request handling"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "HTTP POST request-time",
+        "file_location": "/app/https/settings/uploadCertificate endpoint (via path traversal)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "POST /res/../app/https/settings/uploadCertificate\nBody: <attacker-controlled certificate>",
+      "code_language": "http",
+      "code_behavior": "At HTTP POST request-time, the code allows unauthenticated upload of a new HTTPS certificate to the server via a path traversal exploit, enabling attackers to overwrite critical server configuration and potentially cause denial-of-service or facilitate further attacks.",
+      "malice_analysis": {
+        "why_suspicious": "The endpoint allows unauthenticated modification of critical server configuration files, such as HTTPS certificates, which can disrupt service, enable man-in-the-middle attacks, or facilitate persistent compromise.",
+        "violated_expectations": "Normal behavior would require strict authentication and authorization for certificate uploads, and would prevent path traversal to sensitive endpoints.",
+        "similar_legitimate_use": "Certificate upload is a legitimate administrative action, but should never be accessible without authentication and proper authorization.",
+        "key_indicators": [
+          "Unauthenticated POST requests to sensitive configuration endpoints",
+          "Path traversal in request URL to reach protected resources",
+          "Modification of HTTPS certificate files without admin activity"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a request to a non-existent resource with a 'jsp' parameter pointing to a sensitive endpoint and appends ';.jsp' to the path.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Bypass of authentication and access to arbitrary endpoints."
+    },
+    {
+      "step": 2,
+      "action": "Attacker accesses admin endpoints (e.g., /app/rest/users) to create a new admin account or generate an admin token.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Full administrative control of the TeamCity server."
+    },
+    {
+      "step": 3,
+      "action": "Attacker uses path traversal in URLs (e.g., /res/../admin/diagnostic.jsp) to access restricted resources.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Information disclosure or further privilege escalation."
+    },
+    {
+      "step": 4,
+      "action": "Attacker uploads a malicious certificate via unauthenticated POST to /res/../app/https/settings/uploadCertificate.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Modification of server settings or denial-of-service."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "HTTP requests with 'jsp' parameters targeting sensitive or internal endpoints",
+      "Requests to non-existent resources with appended ';.jsp' in the path",
+      "URL paths containing '../' targeting admin or configuration endpoints",
+      "Unauthenticated POST requests to certificate upload or configuration endpoints"
+    ],
+    "file_indicators": [
+      "Access to /admin/diagnostic.jsp or other admin JSPs via path traversal",
+      "Modification of HTTPS certificate files without corresponding authenticated admin activity"
+    ],
+    "network_indicators": [
+      "Unusual or sudden requests to /app/rest/users, /app/rest/server, or /app/https/settings/uploadCertificate",
+      "HTTP requests with 'jsp' parameters or path traversal patterns (e.g., '../') in the URL",
+      "Unauthenticated access attempts to admin or configuration endpoints"
+    ],
+    "how_to_detect": "Monitor web server logs for requests containing 'jsp' parameters, appended ';.jsp', or '../' in the path. Flag unauthenticated access to admin endpoints or configuration uploads. Correlate with sudden creation of admin accounts, changes to server certificates, or access to admin JSPs. Implement alerting for unauthenticated POST requests to sensitive endpoints and for any modification of configuration files outside of authenticated admin sessions."
+  }
+}

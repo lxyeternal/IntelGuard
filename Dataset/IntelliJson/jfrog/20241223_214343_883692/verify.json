@@ -1,0 +1,128 @@
+{
+  "package_info": {
+    "package_name": "OpenSSH",
+    "package_manager": "system (source/binary distribution)",
+    "package_versions": "All versions prior to and including those affected by CVE-2023-25136",
+    "why_malicious": "OpenSSH is not a malicious package, but it contains a critical vulnerability (CVE-2023-25136) that, if exploited, can allow remote code execution and privilege escalation. The risk is significantly increased if security mechanisms such as Privilege Separation and Sandbox are disabled, misconfigured, or bypassed, exposing the process to a broader attack surface."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "pre-authentication (import-time/runtime)",
+        "file_location": "sandbox-seccomp-filter.c (Linux), sandbox-darwin.c (macOS), sandbox-pledge.c (OpenBSD)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "process",
+          "memory"
+        ]
+      },
+      "code_snippet": "/* Syscalls to non-fatally deny */\n#ifdef __NR_lstat\n    SC_DENY(__NR_lstat, EACCES),\n#endif\n#ifdef __NR_lstat64\n    SC_DENY(__NR_lstat64, EACCES),\n#endif\n#ifdef __NR_fstat\n    SC_DENY(__NR_fstat, EACCES),\n#endif\n…………………\n/* Syscalls to permit */\n#ifdef __NR_brk\n    SC_ALLOW(__NR_brk),\n#endif\n#ifdef __NR_clock_gettime\n    SC_ALLOW(__NR_clock_gettime),\n#endif\n#ifdef __NR_mmap\n    SC_ALLOW_ARG_MASK(__NR_mmap, 2, PROT_READ|PROT_WRITE|PROT_NONE),\n#endif\n#ifdef __NR_mprotect\n    SC_ALLOW_ARG_MASK(__NR_mprotect, 2, PROT_READ|PROT_WRITE|PROT_NONE),\n#endif\n/* Default deny */\nBPF_STMT(BPF_RET+BPF_K, SECCOMP_FILTER_FAIL),",
+      "code_language": "C (Berkeley Packet Filter macros)",
+      "code_behavior": "At process startup (pre-authentication), the code attaches a seccomp filter that explicitly denies dangerous syscalls (such as open/openat) and only allows a minimal set of syscalls, some with argument restrictions (e.g., mmap/mprotect cannot use PROT_EXEC), resulting in process termination if a forbidden syscall is attempted.",
+      "malice_analysis": {
+        "why_suspicious": "This code is a defensive security mechanism. Its absence, modification, or improper configuration exposes the process to a significantly larger attack surface, making exploitation of vulnerabilities like CVE-2023-25136 much more feasible.",
+        "violated_expectations": "Normal behavior is to restrict syscalls in the pre-auth phase using a strict seccomp filter. If this code is missing, altered, or weakened, the process can perform dangerous actions (such as opening files, creating executable memory, or escalating privileges), which is not expected and increases risk.",
+        "similar_legitimate_use": "Seccomp filters are widely used in container runtimes and sandboxed applications to reduce the attack surface by limiting available syscalls.",
+        "key_indicators": [
+          "Explicit denial of open/openat syscalls in seccomp filter",
+          "Argument-masked allowance for mmap/mprotect (no PROT_EXEC permitted)",
+          "Default action is SECCOMP_RET_KILL (process termination on violation)",
+          "Presence of BPF macros for syscall filtering in sandbox-seccomp-filter.c"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "pre-authentication (import-time/runtime)",
+        "file_location": "sandbox-darwin.c (macOS)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "process"
+        ]
+      },
+      "code_snippet": "if (sandbox_init(kSBXProfilePureComputation, SANDBOX_NAMED, &errmsg) == -1)\n    fatal(\"%s: sandbox_init: %s\", __func__, errmsg);\nrl_zero.rlim_cur = rl_zero.rlim_max = 0;\nsetrlimit(RLIMIT_FSIZE, &rl_zero);\nsetrlimit(RLIMIT_NOFILE, &rl_zero);\nsetrlimit(RLIMIT_NPROC, &rl_zero);",
+      "code_language": "C",
+      "code_behavior": "At process startup (pre-authentication), the code initializes the most restrictive macOS sandbox profile (kSBXProfilePureComputation), then sets resource limits to zero for file size, open files, and process count, effectively preventing the process from accessing most OS services and resources.",
+      "malice_analysis": {
+        "why_suspicious": "This code is a defensive measure. If it is missing, replaced with a less restrictive profile, or resource limits are not set to zero, the process could access the filesystem, network, or spawn processes, increasing the risk of exploitation and privilege escalation.",
+        "violated_expectations": "Expected behavior is to use the most restrictive sandbox profile and set resource limits to zero for critical resources. Any deviation, such as using a less restrictive profile or omitting these restrictions, allows broader system access and increases risk.",
+        "similar_legitimate_use": "macOS sandboxing is used in many security-sensitive applications to restrict process capabilities and limit the impact of potential vulnerabilities.",
+        "key_indicators": [
+          "Use of kSBXProfilePureComputation in sandbox_init",
+          "Resource limits (RLIMIT_FSIZE, RLIMIT_NOFILE, RLIMIT_NPROC) set to zero",
+          "Fatal error handling on sandbox initialization failure"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "pre-authentication (import-time/runtime)",
+        "file_location": "sandbox-pledge.c (OpenBSD)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "process"
+        ]
+      },
+      "code_snippet": "if (pledge(\"stdio\", NULL) == -1)\n    fatal_f(\"pledge()\");",
+      "code_language": "C",
+      "code_behavior": "At process startup (pre-authentication), the code restricts the process to only use standard I/O and benign syscalls by invoking pledge(\"stdio\"), thereby preventing access to files, network, and other sensitive resources.",
+      "malice_analysis": {
+        "why_suspicious": "This is a defensive restriction. If pledge is not used, is omitted, or a broader promise is given, the process could perform dangerous actions, such as accessing files or the network, which increases the risk of privilege escalation or exploitation.",
+        "violated_expectations": "Expected behavior is to use the most restrictive promise (\"stdio\") in the pre-auth phase. Using a broader promise or omitting pledge increases the process's capabilities and the risk of exploitation.",
+        "similar_legitimate_use": "pledge is used in OpenBSD for many daemons and userland tools to restrict process capabilities and limit the impact of vulnerabilities.",
+        "key_indicators": [
+          "Use of pledge(\"stdio\") to restrict syscalls",
+          "Immediate fatal error on failure to apply pledge",
+          "Restriction to standard I/O only in pre-authentication phase"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker exploits a vulnerability (such as a double-free) in the pre-authentication phase of sshd, gaining the ability to execute code within the context of the unprivileged pre-auth process.",
+      "implemented_by": [],
+      "leads_to": "Potential code execution in the context of the unprivileged pre-auth process."
+    },
+    {
+      "step": 2,
+      "action": "If sandboxing or privilege separation is disabled, misconfigured, or bypassed, attacker-controlled code can perform dangerous syscalls (such as opening files, creating executable memory, or escalating privileges).",
+      "implemented_by": [],
+      "leads_to": "Privilege escalation or full system compromise."
+    },
+    {
+      "step": 3,
+      "action": "If sandboxing and privilege separation are enabled and properly configured, seccomp, pledge, or sandbox profiles prevent dangerous syscalls, causing the process to be killed or restricted if a violation occurs.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Attack is contained; privilege escalation is prevented."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Absence or modification of seccomp, pledge, or sandbox initialization in sshd child processes during pre-authentication",
+      "Pre-authentication sshd processes making forbidden syscalls (such as open, openat, or mmap with PROT_EXEC)",
+      "Unexpected resource access (filesystem, network, or process creation) by pre-authentication sshd processes"
+    ],
+    "file_indicators": [
+      "sshd child processes not chrooted to /var/empty",
+      "sshd child processes running as root instead of the sshd user",
+      "Missing or altered sandbox-seccomp-filter.c, sandbox-darwin.c, or sandbox-pledge.c files"
+    ],
+    "network_indicators": [
+      "Pre-authentication sshd processes initiating outbound network connections",
+      "Unexpected network activity from processes with restricted privileges during pre-authentication"
+    ],
+    "how_to_detect": "Monitor sshd child processes for the presence and correct application of seccomp, pledge, or sandbox profiles during the pre-authentication phase. Alert if pre-authentication processes attempt forbidden syscalls (such as open, openat, or mmap with PROT_EXEC), access files outside /var/empty, or run as root. Use auditd or similar syscall auditing tools to detect violations. Regularly check for configuration changes in /etc/sshd_config that disable or weaken UsePrivilegeSeparation or sandboxing. Verify the integrity and presence of sandbox-seccomp-filter.c, sandbox-darwin.c, and sandbox-pledge.c."
+  }
+}

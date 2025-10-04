@@ -1,0 +1,85 @@
+{
+  "package_info": {
+    "package_name": "redis-py",
+    "package_manager": "PyPI",
+    "package_versions": "4.5.3, 5.0.0b1, and earlier (see CVE-2023-28858, CVE-2023-28859)",
+    "why_malicious": "The affected versions of redis-py contain a race condition vulnerability that can lead to unintended information disclosure. Specifically, when asynchronous requests are cancelled after being queued but before a response is dequeued, the library may return cached or stale data belonging to other users. This results in a breach of confidentiality and exposure of sensitive information, such as chat histories and payment data, in multi-tenant environments."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, during asynchronous request cancellation",
+        "file_location": "Internal library code managing redis-py cluster/client connection pool (e.g., connection_pool.py or async connection management modules)",
+        "required_permissions": [
+          "network",
+          "memory access"
+        ]
+      },
+      "code_snippet": "// Pseudocode representation of the vulnerable logic\nasync def handle_request(request):\n    incoming_queue.push(request)\n    try:\n        response = await outgoing_queue.pop()\n        return response\n    except CancelledError:\n        # Request cancelled after being queued, but before response dequeued\n        # Connection state may be corrupted here\n        pass\n    finally:\n        connection_pool.release(connection)\n",
+      "code_language": "python",
+      "code_behavior": "At runtime, when an asynchronous Redis command is cancelled after being queued but before its response is dequeued, the connection's state is not properly reset, causing subsequent requests to receive cached or stale data from previous requests, resulting in unintended information disclosure.",
+      "malice_analysis": {
+        "why_suspicious": "This behavior enables data from one user's request to be returned to another user, directly violating data isolation and confidentiality guarantees expected in multi-tenant or user-segregated environments.",
+        "violated_expectations": "Normally, a Redis client library must ensure that each request/response pair is strictly isolated and that connection state is reset or cleaned up after cancellation. The actual behavior allows cross-user data leakage due to improper state management after cancellation.",
+        "similar_legitimate_use": "Connection pooling and asynchronous request handling are legitimate for performance and scalability, but must be implemented with strict state management to prevent data leakage between users or sessions.",
+        "key_indicators": [
+          "Race condition in asynchronous request/response handling logic",
+          "Improper connection state reset after request cancellation",
+          "Cross-user or cross-session data returned from cache or connection pool",
+          "Out-of-sequence or unexpected responses observed in client/server communication"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "A user sends an asynchronous request to the Redis server via redis-py.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The request is queued for processing by the connection pool."
+    },
+    {
+      "step": 2,
+      "action": "The request is cancelled after being queued but before the response is dequeued.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The connection state becomes corrupted or is not properly reset."
+    },
+    {
+      "step": 3,
+      "action": "A subsequent, unrelated request is processed using the same connection from the pool.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The response returned may contain data from the previous, cancelled request."
+    },
+    {
+      "step": 4,
+      "action": "The user receives data belonging to another user, such as chat history or payment information.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Information disclosure and breach of confidentiality."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Asynchronous request cancellation followed by unexpected or out-of-sequence data returned from Redis client cache or connection pool",
+      "Cross-user or cross-session data leakage in multi-tenant environments after request cancellation",
+      "Out-of-sequence or mismatched responses in Redis client/server communication, especially after cancellations"
+    ],
+    "file_indicators": [
+      "Use of vulnerable redis-py versions (4.5.3, 5.0.0b1, and earlier as referenced in CVE-2023-28858, CVE-2023-28859)",
+      "Presence of custom or modified connection pool or asynchronous queue management code in Redis client libraries"
+    ],
+    "network_indicators": [
+      "Redis protocol traffic exhibiting mismatched request/response pairs",
+      "Unexpected or duplicate data returned in Redis responses, especially following client-side cancellations"
+    ],
+    "how_to_detect": "Monitor for the use of vulnerable redis-py versions in your environment by scanning dependency manifests and installed packages. Instrument Redis client/server communication to detect out-of-sequence or mismatched responses, particularly after request cancellations. Audit application logs for evidence of users receiving data not belonging to them, especially following request cancellations or server errors. Use static analysis to identify custom or non-standard async connection pool implementations that may mishandle cancellation and state reset. In multi-tenant environments, implement runtime checks to detect cross-user data exposure."
+  }
+}

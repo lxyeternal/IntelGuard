@@ -1,0 +1,137 @@
+{
+  "package_info": {
+    "package_name": "spring-security",
+    "package_manager": "Maven (Java ecosystem)",
+    "package_versions": "5.0.0 - 5.6.8, 5.7.0 - 5.7.4",
+    "why_malicious": "These versions of Spring Security contain a critical authorization bypass vulnerability (CVE-2022-31692) that allows attackers to access protected endpoints (such as /admin) without proper authorization by abusing the 'forward' dispatcher type. The vulnerability arises from improper filter application on certain dispatcher types, enabling privilege escalation and unauthorized access."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP request with forward dispatcher type)",
+        "file_location": "Controller method (e.g., MyController.java)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "@GetMapping(\"/forward\")\npublic String redirect() {\n  return \"forward:/admin\";\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, the /forward endpoint forwards the request to /admin, bypassing normal authentication and authorization checks due to improper filter application, resulting in unauthorized access to the /admin endpoint.",
+      "malice_analysis": {
+        "why_suspicious": "This code enables a user to access a higher-privilege endpoint (/admin) by forwarding a request from a less-privileged endpoint (/forward), exploiting the filter misconfiguration.",
+        "violated_expectations": "Normally, forwarding to a protected endpoint should still enforce authorization checks. Here, the filter chain is not re-applied, so access control is bypassed.",
+        "similar_legitimate_use": "Forwarding is commonly used for internal routing, but should not bypass security controls.",
+        "key_indicators": [
+          "Forwarding to a protected endpoint from a public endpoint",
+          "No re-application of security filters on forward dispatcher type"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "application startup (security configuration)",
+        "file_location": "Security configuration class (e.g., SecurityConfig.java)",
+        "required_permissions": []
+      },
+      "code_snippet": "@Bean\npublic SecurityFilterChain filterChain(HttpSecurity http) throws Exception {\n  http\n    .authorizeHttpRequests((authorize) -> authorize\n      .antMatchers(\"/\").permitAll()\n      .antMatchers(\"/forward\").permitAll()\n      .antMatchers(\"/admin\").hasAuthority(\"ROLE_ADMIN\")\n      .shouldFilterAllDispatcherTypes(true)\n    )\n    .httpBasic().and()\n    .userDetailsService(userDetailsService());\n  return http.build();\n}",
+      "code_language": "java",
+      "code_behavior": "At application startup, the security filter chain is configured to permit all users to access / and /forward, and restrict /admin to ROLE_ADMIN. However, due to the use of shouldFilterAllDispatcherTypes(true) and underlying filter misconfiguration, authorization checks are not enforced on forward dispatcher types, enabling bypass.",
+      "malice_analysis": {
+        "why_suspicious": "The configuration appears to secure endpoints, but due to the vulnerability, the intended restrictions are not enforced for forward dispatcher types.",
+        "violated_expectations": "Security filters should be applied on all dispatcher types as configured, but the implementation fails to do so.",
+        "similar_legitimate_use": "Configuring endpoint access is standard, but should not result in bypass.",
+        "key_indicators": [
+          "shouldFilterAllDispatcherTypes(true) used without effect",
+          "antMatchers for sensitive endpoints"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "application startup (legacy security configuration)",
+        "file_location": "Security configuration class extending WebSecurityConfigurerAdapter",
+        "required_permissions": []
+      },
+      "code_snippet": "@Configuration\npublic class SecurityConfig extends WebSecurityConfigurerAdapter {\n  @Override\n  protected void configure(HttpSecurity http) throws Exception {\n    http\n      .authorizeRequests()\n      .antMatchers(\"/\").permitAll()\n      .antMatchers(\"/forward\").permitAll()\n      .antMatchers(\"/admin\").hasAuthority(\"ROLE_ADMIN\");\n  }\n}",
+      "code_language": "java",
+      "code_behavior": "At application startup, the legacy security configuration sets up endpoint access rules, but due to the same filter misapplication, forward dispatcher types are not properly filtered, allowing unauthorized access to /admin via /forward.",
+      "malice_analysis": {
+        "why_suspicious": "The configuration is intended to restrict /admin, but due to the vulnerability, the restriction is ineffective for forwarded requests.",
+        "violated_expectations": "Security filters should be enforced regardless of dispatcher type.",
+        "similar_legitimate_use": "Standard endpoint security configuration, but vulnerable due to framework flaw.",
+        "key_indicators": [
+          "WebSecurityConfigurerAdapter with antMatchers for sensitive endpoints",
+          "No explicit handling of dispatcher types"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "application configuration (startup)",
+        "file_location": "application.properties",
+        "required_permissions": []
+      },
+      "code_snippet": "spring.security.filter.dispatcher-types = request, error, async, forward, include",
+      "code_language": "properties",
+      "code_behavior": "At application startup, the configuration attempts to include all dispatcher types for security filtering, but due to the vulnerability, forward and include types are not properly filtered, enabling bypass.",
+      "malice_analysis": {
+        "why_suspicious": "Explicitly including forward and include dispatcher types should enforce security, but the vulnerability prevents this.",
+        "violated_expectations": "Dispatcher type configuration should be respected by the security filter chain.",
+        "similar_legitimate_use": "Legitimate to configure dispatcher types for security, but not effective here.",
+        "key_indicators": [
+          "Explicit inclusion of forward/include dispatcher types",
+          "Still results in authorization bypass"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a request to the /forward endpoint, which is publicly accessible.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Request is internally forwarded to /admin endpoint."
+    },
+    {
+      "step": 2,
+      "action": "Due to misconfigured or ineffective security filters for the forward dispatcher type, the forwarded request to /admin is not subject to authorization checks.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Attacker gains unauthorized access to the /admin endpoint."
+    },
+    {
+      "step": 3,
+      "action": "Attacker can now perform privileged actions or access sensitive data on the /admin endpoint without proper authorization.",
+      "implemented_by": [],
+      "leads_to": "Privilege escalation, data leakage, or unauthorized actions."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Public endpoints forwarding requests to protected endpoints",
+      "Access to protected endpoints via forward/include dispatcher types without authentication",
+      "Security filter chains that include forward/include dispatcher types but do not enforce authorization"
+    ],
+    "file_indicators": [
+      "Controller methods returning 'forward:/<protected-endpoint>'",
+      "application.properties with 'spring.security.filter.dispatcher-types' including 'forward' or 'include'",
+      "Security configuration using 'shouldFilterAllDispatcherTypes(true)' or missing 'filterSecurityInterceptorOncePerRequest(false)'"
+    ],
+    "network_indicators": [
+      "Unusual access patterns: requests to public endpoints (e.g., /forward) resulting in access to protected endpoints (e.g., /admin) without authentication"
+    ],
+    "how_to_detect": "Review application controllers for endpoints that forward to protected resources. Analyze security configuration for use of 'shouldFilterAllDispatcherTypes(true)' or inclusion of 'forward'/'include' dispatcher types without 'filterSecurityInterceptorOncePerRequest(false)'. Monitor logs for access to protected endpoints via internal forwards from public endpoints. Use static analysis to flag controller methods that forward to sensitive endpoints and verify that security filters are correctly applied to all dispatcher types."
+  }
+}

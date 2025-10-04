@@ -1,0 +1,125 @@
+{
+  "package_info": {
+    "package_name": "spring-beans",
+    "package_manager": "Maven (Java)",
+    "package_versions": "All versions prior to 5.3.18 and 5.2.20",
+    "why_malicious": "Older versions of the spring-beans package are vulnerable to the Spring4Shell exploit, which allows remote attackers to manipulate internal properties of the application server. This manipulation can lead to remote code execution or arbitrary file read by enabling attackers to set writable properties such as the class loader's docBase, effectively exposing the server's filesystem and enabling unauthorized access to sensitive files or execution of arbitrary code."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP POST request to vulnerable endpoint)",
+        "file_location": "Java application endpoint (e.g., /greeting) using Spring Framework",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "curl -X POST -F 'class.module.classLoader.resources.dirContext.docBase=/' http://localhost:8080/handling-form-submission-complete/greeting",
+      "code_language": "shell",
+      "code_behavior": "At runtime, the code sends an HTTP POST request to a Spring application endpoint, setting the 'class.module.classLoader.resources.dirContext.docBase' property to '/'. This action manipulates the internal server configuration, causing the web application's document root to point to the filesystem root, which results in subsequent HTTP requests being able to access arbitrary files on the server.",
+      "malice_analysis": {
+        "why_suspicious": "This behavior is suspicious because it leverages user input to alter critical internal server properties, specifically the document root, which can expose the entire filesystem to external access.",
+        "violated_expectations": "Normally, user input should never be able to modify server configuration or class loader properties. The application should prevent external requests from changing the document root or accessing arbitrary files.",
+        "similar_legitimate_use": "Legitimate administrative interfaces may allow configuration changes, but never through unauthenticated or user-facing endpoints, and always with strict access controls.",
+        "key_indicators": [
+          "Setting internal class loader properties via HTTP POST parameters",
+          "Changing docBase to '/' (filesystem root) through user input",
+          "Absence of authentication or authorization checks on configuration changes"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (HTTP GET request after exploit)",
+        "file_location": "Java application endpoint (e.g., /etc/passwd mapped via manipulated docBase)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "curl http://localhost:8080/handling-form-submission-complete/etc/passwd",
+      "code_language": "shell",
+      "code_behavior": "After the document root is set to '/', the code sends an HTTP GET request to the application, which now serves files directly from the server's filesystem. This enables the attacker to retrieve sensitive files such as /etc/passwd by requesting them through the web application endpoint.",
+      "malice_analysis": {
+        "why_suspicious": "This behavior is suspicious because it exposes sensitive system files through a web application endpoint, which should never be possible in a secure configuration.",
+        "violated_expectations": "Web applications should not serve arbitrary files from the server's filesystem, especially sensitive files like /etc/passwd, and should restrict file serving to designated static directories.",
+        "similar_legitimate_use": "Serving static files is legitimate, but only from explicitly configured directories (e.g., /static or /public), never from the entire filesystem.",
+        "key_indicators": [
+          "Access to /etc/passwd or other sensitive files via web endpoint",
+          "Serving files outside the intended application or static directory",
+          "Unusual mapping of web endpoints to system file paths"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (Java method call in application code)",
+        "file_location": "Java application code (e.g., HandlingFormSubmissionApplication.java)",
+        "required_permissions": [
+          "reflection",
+          "application internals"
+        ]
+      },
+      "code_snippet": "public static HashSet<String> findWritablePds(Object root, String path, int depth, HashSet<Object> visited) { ... }",
+      "code_language": "java",
+      "code_behavior": "At runtime, this Java function uses the Spring API to recursively enumerate all writable properties of a given object, including deeply nested properties. This process identifies which internal properties can be manipulated via user input, enabling attackers or researchers to discover potential targets for exploitation.",
+      "malice_analysis": {
+        "why_suspicious": "While not directly malicious, this code is used to facilitate the discovery of attack vectors by identifying writable properties that can be targeted for exploitation, increasing the attack surface.",
+        "violated_expectations": "Normal application code should not expose or enumerate internal writable properties for external manipulation, as this can aid attackers in crafting exploits.",
+        "similar_legitimate_use": "Security auditing tools may use similar code for legitimate vulnerability assessment, but such functionality should not be present in production code or exposed to untrusted users.",
+        "key_indicators": [
+          "Recursive enumeration of writable properties using reflection",
+          "Use of BeanWrapperImpl or similar mechanisms to access internal state",
+          "Potential to reveal attack surface for property injection or manipulation"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker enumerates writable properties using a helper function or prior knowledge to identify exploitable properties such as docBase.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Identification of internal properties that can be manipulated, such as docBase, which are critical for exploitation."
+    },
+    {
+      "step": 2,
+      "action": "Attacker sends a crafted HTTP POST request to set the docBase property to the filesystem root ('/'), altering the web application's document root.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The web application's document root is now the server's filesystem root, enabling access to arbitrary files."
+    },
+    {
+      "step": 3,
+      "action": "Attacker sends HTTP GET requests to access sensitive files (e.g., /etc/passwd) via the web application endpoint, leveraging the new document root.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Exfiltration of sensitive files and potential for further attacks, such as privilege escalation or lateral movement."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "HTTP POST requests that set internal server or class loader properties via parameters (e.g., class.module.classLoader.resources.dirContext.docBase)",
+      "Unexpected changes to the web application's document root (docBase) at runtime",
+      "Web endpoints serving files outside the intended static or application directory"
+    ],
+    "file_indicators": [
+      "Access to /etc/passwd or other sensitive system files via web endpoints",
+      "Presence of unusual property names in HTTP POST parameters (e.g., class.module.classLoader.resources.dirContext.docBase)",
+      "Application logs showing document root changes to '/' or other non-standard locations"
+    ],
+    "network_indicators": [
+      "HTTP POST requests containing property names matching internal Java class loader or server configuration",
+      "Subsequent HTTP GET requests for sensitive system files (e.g., /etc/passwd, /root/.ssh/authorized_keys) via web endpoints"
+    ],
+    "how_to_detect": "Monitor HTTP POST requests to application endpoints for parameters that match internal server or class loader property names (such as docBase). Alert on any requests attempting to set these properties, especially if the value is '/'. Additionally, monitor for HTTP GET requests to endpoints that map to sensitive files (e.g., /etc/passwd) or files outside the application's static directory. Review application and server logs for evidence of document root changes or unexpected file serving behavior. Implement strict input validation and access controls to prevent unauthorized property manipulation."
+  }
+}

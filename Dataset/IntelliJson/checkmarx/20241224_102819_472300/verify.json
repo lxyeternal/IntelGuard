@@ -1,0 +1,165 @@
+{
+  "package_info": {
+    "package_name": "raspap-webgui",
+    "package_manager": "manual (Debian-based systems)",
+    "package_versions": "<2.6.6",
+    "why_malicious": "Multiple critical vulnerabilities allow unauthenticated and authenticated attackers to execute arbitrary OS commands, escalate privileges to root, and fully compromise the host system. The package fails to sanitize user input in several locations, leading to command injection and privilege escalation via insecure sudoers configuration and writable privileged scripts."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "HTTP GET request to /ajax/networking/get_netcfg.php with 'iface' parameter",
+        "file_location": "ajax/networking/get_netcfg.php",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "exec('cat ' . RASPI_DNSMASQ_PREFIX . $interface . '.conf', $return);",
+      "code_language": "php",
+      "code_behavior": "Upon receiving an HTTP GET request to /ajax/networking/get_netcfg.php, the code concatenates the unsanitized 'iface' parameter from user input into a shell command and executes it, allowing arbitrary command execution and potential data exfiltration as the www-data user.",
+      "malice_analysis": {
+        "why_suspicious": "Directly concatenating user input into a shell command without any sanitization or validation enables attackers to inject arbitrary commands, resulting in command injection vulnerabilities.",
+        "violated_expectations": "Normal behavior would strictly validate or sanitize user input before passing it to shell commands to prevent code execution; here, user input is executed as part of the command.",
+        "similar_legitimate_use": "Reading configuration files for a given network interface, provided the interface name is strictly validated against a whitelist of known interfaces.",
+        "key_indicators": [
+          "Unsanitized user input from 'iface' parameter in shell command",
+          "No authentication or CSRF protection for GET requests",
+          "Use of exec() with concatenated user input",
+          "Critical command injection vector in a web-accessible endpoint"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "HTTP POST request to /hostapd_conf with 'interface' parameter",
+        "file_location": "includes/hostapd.php",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "exec('iwgetid ' . $_POST['interface'] . ' -r', $wifiNetworkID);",
+      "code_language": "php",
+      "code_behavior": "Upon receiving an HTTP POST request to /hostapd_conf, the code concatenates the unsanitized 'interface' POST parameter into a shell command and executes it, enabling authenticated attackers to perform command injection as the www-data user.",
+      "malice_analysis": {
+        "why_suspicious": "User input from the 'interface' POST parameter is directly inserted into a shell command, allowing attackers to inject arbitrary commands and execute them on the server.",
+        "violated_expectations": "Expected behavior is to validate or sanitize input before using it in shell commands, especially in privileged operations.",
+        "similar_legitimate_use": "Querying wireless interface status, if the interface name is strictly validated against a list of allowed interfaces.",
+        "key_indicators": [
+          "Unsanitized POST parameter in shell command",
+          "Command injection in authenticated web application context",
+          "Use of exec() with user-controlled input"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "HTTP POST request to /hostapd_conf (to set SSID or wpa_passphrase), then HTTP GET request to /app/img/wifi-qr-code.php",
+        "file_location": "app/img/wifi-qr-code.php",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "wpa_passphrase=$(touch /tmp/555)",
+      "code_language": "shell (injected via PHP)",
+      "code_behavior": "When generating a WiFi QR code, the code processes SSID and password fields from the configuration file, which can contain shell command substitution syntax (e.g., $(...)). If an attacker injects shell syntax into these fields via a prior POST request, arbitrary commands are executed during QR code generation, resulting in code execution as www-data.",
+      "malice_analysis": {
+        "why_suspicious": "Allows shell command execution via user-controlled fields (SSID or wpa_passphrase) in the configuration file, which are processed without proper escaping, enabling attackers to execute arbitrary commands when the QR code is generated.",
+        "violated_expectations": "Expected behavior is to treat SSID and password fields as plain data and escape or sanitize any special characters to prevent code execution.",
+        "similar_legitimate_use": "None; credentials and identifiers should never be interpreted or executed as code.",
+        "key_indicators": [
+          "Shell command substitution in user-controlled configuration fields",
+          "Lack of proper escaping or sanitization for special characters in SSID or password",
+          "Arbitrary command execution triggered by secondary HTTP request"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "During installation and at runtime (sudoers configuration applies at all times)",
+        "file_location": "/etc/sudoers.d/090_raspap",
+        "required_permissions": [
+          "root",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "www-data ALL=(ALL) NOPASSWD: /etc/raspap/lighttpd/configport.sh",
+      "code_language": "sudoers (configuration)",
+      "code_behavior": "At installation and runtime, the web server user (www-data) is granted passwordless sudo access to scripts in /etc/raspap, including scripts that are writable by www-data. This allows attackers to modify these scripts and execute them as root, resulting in privilege escalation and full system compromise.",
+      "malice_analysis": {
+        "why_suspicious": "Granting passwordless sudo to scripts that are writable by a low-privileged user (www-data) allows attackers to escalate privileges by modifying those scripts and executing them as root.",
+        "violated_expectations": "Expected behavior is to restrict sudo access to root-owned, non-writable files to prevent privilege escalation via script modification.",
+        "similar_legitimate_use": "Automating privileged operations via secure, root-owned scripts with tightly controlled sudo permissions.",
+        "key_indicators": [
+          "Passwordless sudo for web server user (www-data)",
+          "Privileged scripts in /etc/raspap are writable by www-data",
+          "Potential for privilege escalation via script modification"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted GET request to /ajax/networking/get_netcfg.php with a command injection payload in the 'iface' parameter.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Arbitrary command execution as the www-data user."
+    },
+    {
+      "step": 2,
+      "action": "Attacker leverages command injection to modify a writable script in /etc/raspap (e.g., configport.sh) to include malicious commands.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_4"
+      ],
+      "leads_to": "Preparation for privilege escalation by altering a script executed with sudo."
+    },
+    {
+      "step": 3,
+      "action": "Attacker triggers execution of the modified script via passwordless sudo, gaining root privileges.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Full system compromise as root."
+    },
+    {
+      "step": 4,
+      "action": "Alternatively, an authenticated attacker injects commands via POST to /hostapd_conf in 'interface', 'ssid', or 'wpa_passphrase' fields.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Arbitrary command execution as www-data, and potentially root via privilege escalation if combined with writable sudo scripts."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Shell command execution with unsanitized user input from HTTP GET or POST parameters",
+      "Creation of unexpected files in /tmp (e.g., /tmp/checkinterface, /tmp/checkpass, /tmp/checkssid, /tmp/555) by www-data",
+      "Modification and execution of scripts in /etc/raspap by www-data user",
+      "Passwordless sudo execution of scripts by www-data",
+      "Presence of shell command substitution syntax in SSID or wpa_passphrase fields"
+    ],
+    "file_indicators": [
+      "/etc/raspap/lighttpd/configport.sh",
+      "/etc/raspap/hostapd/enablelog.sh",
+      "/etc/raspap/hostapd/disablelog.sh",
+      "/tmp/checkinterface",
+      "/tmp/checkpass",
+      "/tmp/checkssid",
+      "/tmp/555"
+    ],
+    "network_indicators": [
+      "Outbound HTTP requests to attacker-controlled IPs or domains (e.g., via curl or wget in injected commands)",
+      "Unexpected outbound connections from www-data or root to external hosts, especially following suspicious HTTP requests"
+    ],
+    "how_to_detect": "Monitor web application logs for shell command execution patterns where user input is passed to system commands, especially in GET or POST parameters. Audit sudoers files for passwordless sudo permissions granted to web server users and verify that privileged scripts are not writable by non-root users. Watch for creation of suspicious files in /tmp and for modifications to scripts in /etc/raspap by www-data. Monitor for outbound network connections initiated by www-data or root, particularly after web requests containing suspicious payloads. Deploy web application firewalls to block command injection payloads in HTTP parameters and implement strict input validation."
+  }
+}

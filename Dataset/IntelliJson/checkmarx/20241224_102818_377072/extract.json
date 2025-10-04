@@ -1,0 +1,97 @@
+{
+  "package_info": {
+    "package_name": "c{api}tal",
+    "package_manager": "custom/docker-compose (Python FastAPI, JS React)",
+    "package_versions": "2022 CTF release (all versions, intentionally vulnerable)",
+    "why_malicious": "The application is intentionally designed to be vulnerable for educational purposes, exposing multiple critical API security flaws (e.g., Broken Object Level Authorization, Mass Assignment) that allow unauthorized access, privilege escalation, and data manipulation."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (API call to DELETE /api/comments/{comment_id})",
+        "file_location": "comments router (Python FastAPI backend)",
+        "required_permissions": [
+          "authenticated user",
+          "network"
+        ]
+      },
+      "code_snippet": "@router.delete(\n    \"/{comment_id}\",\n    status_code=status.HTTP_204_NO_CONTENT,\n    name=\"comments:delete-comment-from-article\",\n)\nasync def delete_comment_from_article(\n    comment: Comment = Depends(get_comment_by_id_from_path),\n    comments_repo: CommentsRepository = Depends(get_repository(CommentsRepository)),\n    user: User = Depends(get_current_user_authorizer()),\n) -> JSONResponse:\n    await comments_repo.delete_comment(comment=comment)\n    json_compatible_item_data = jsonable_encoder({\"message\": \"Your comment has been deleted\"})\n    if comment.author.username != user.username:\n        json_compatible_item_data = jsonable_encoder({\"message\": strings.BOLA})\n    return JSONResponse(content=json_compatible_item_data)",
+      "code_language": "python",
+      "code_behavior": "At runtime, when an authenticated user calls the DELETE /api/comments/{comment_id} endpoint, the code deletes the specified comment from the database without verifying that the requesting user is the comment's author, allowing any authenticated user to delete any comment, resulting in unauthorized data manipulation.",
+      "malice_analysis": {
+        "why_suspicious": "The code allows any authenticated user to delete any comment, regardless of ownership, which is a clear violation of object-level authorization.",
+        "violated_expectations": "Normal behavior would restrict comment deletion to the comment's author or an admin; this code fails to enforce that, enabling privilege escalation and unauthorized actions.",
+        "similar_legitimate_use": "Legitimate admin moderation tools may allow comment deletion, but only with explicit role checks.",
+        "key_indicators": [
+          "No check that user is comment author before deletion",
+          "Object-level authorization missing",
+          "Action performed solely based on comment_id and authentication"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (API call to PUT /api/user)",
+        "file_location": "user profile update handler (Python FastAPI backend)",
+        "required_permissions": [
+          "authenticated user",
+          "network"
+        ]
+      },
+      "code_snippet": "profile = Profile(username=user.username, bio=user.bio, image=user.image, admin=user.admin)\n# ...\n# In update user endpoint, accepts arbitrary fields from client, e.g. {\"admin\": true}",
+      "code_language": "python",
+      "code_behavior": "At runtime, when an authenticated user calls the PUT /api/user endpoint, the code binds all client-supplied fields (including sensitive ones like 'admin') directly to the user object, allowing users to escalate their privileges by setting admin=true, resulting in unauthorized privilege escalation.",
+      "malice_analysis": {
+        "why_suspicious": "The code exposes and allows modification of sensitive internal properties (e.g., admin status) via mass assignment, which should never be user-controlled.",
+        "violated_expectations": "Normal behavior would restrict updates to non-sensitive fields (e.g., bio, image); this code allows arbitrary property updates, including privilege fields.",
+        "similar_legitimate_use": "Some frameworks allow bulk updates for convenience, but should always filter/validate sensitive fields.",
+        "key_indicators": [
+          "Sensitive property ('admin') exposed in API response and accepted in update requests",
+          "No filtering or validation of updatable fields",
+          "Direct mapping of client input to internal object properties"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker authenticates as a normal user.",
+      "implemented_by": [],
+      "leads_to": "Ability to interact with API endpoints."
+    },
+    {
+      "step": 2,
+      "action": "Attacker exploits BOLA by sending DELETE /api/comments/{comment_id} for a comment they do not own.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Unauthorized deletion of another user's comment."
+    },
+    {
+      "step": 3,
+      "action": "Attacker exploits Mass Assignment by sending PUT /api/user with {\"admin\": true} in the request body.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Privilege escalation to admin user."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "API endpoints that allow modification or deletion of resources based solely on object ID and authentication, without ownership checks",
+      "API endpoints that accept arbitrary fields in update requests and reflect sensitive properties (e.g., admin) in responses"
+    ],
+    "file_indicators": [
+      "Python FastAPI route handlers lacking explicit authorization checks",
+      "Profile or user update handlers that map all client fields to internal objects"
+    ],
+    "network_indicators": [
+      "DELETE requests to /api/comments/{comment_id} from users who are not the comment author",
+      "PUT requests to /api/user containing sensitive fields like 'admin' in the payload"
+    ],
+    "how_to_detect": "Monitor API traffic for requests where users attempt to modify or delete resources they do not own, especially DELETE or PUT requests with object IDs or sensitive fields. Review backend code for endpoints that lack explicit ownership or role checks before performing sensitive actions. Flag any update operations that allow arbitrary field updates, especially for privilege-related properties."
+  }
+}

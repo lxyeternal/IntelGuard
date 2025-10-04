@@ -1,0 +1,101 @@
+{
+  "package_info": {
+    "package_name": "openssl",
+    "package_manager": "source (C/C++ open source)",
+    "package_versions": "up to 3.0.6",
+    "why_malicious": "The affected versions of OpenSSL contain critical buffer overflow vulnerabilities (CVE-2022-3602 and CVE-2022-3786) in the punycode.c file. These vulnerabilities can be triggered during X.509 certificate verification when processing punycode-encoded domain names, allowing attackers to overwrite memory beyond buffer boundaries, potentially resulting in remote code execution, application crashes, or information disclosure."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (X.509 certificate verification, name constraint checking)",
+        "file_location": "crypto/punycode.c (ossl_punycode_decode function, line 184)",
+        "required_permissions": [
+          "memory access"
+        ]
+      },
+      "code_snippet": "if (written_out > max_out)\n    return 0;",
+      "code_language": "c",
+      "code_behavior": "At runtime, during X.509 certificate verification, the code checks if the written_out value exceeds max_out, but fails to prevent the case where written_out equals max_out, allowing a buffer of exactly max_out size to be written to, resulting in a potential off-by-one buffer overflow.",
+      "malice_analysis": {
+        "why_suspicious": "The conditional check only prevents buffer writes when written_out is greater than max_out, but not when it is equal, which allows writing one byte past the end of the buffer. This off-by-one error can be exploited to overwrite adjacent memory.",
+        "violated_expectations": "Normal buffer management code should use a check like 'if (written_out >= max_out)' to strictly prevent writing when the buffer is full or overfilled. The actual code only checks for '>', missing the equals case and violating safe memory handling practices.",
+        "similar_legitimate_use": "Legitimate code for buffer management always checks for both greater-than and equals-to conditions to prevent overflows. Off-by-one errors are a common source of vulnerabilities and are never intentional in secure code.",
+        "key_indicators": [
+          "Off-by-one error in buffer size check (uses '>' instead of '>=')",
+          "Allows writing to buffer when written_out equals max_out",
+          "Potential for memory corruption due to boundary overrun",
+          "Conditional check is insufficient for safe buffer management"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (X.509 certificate verification, name constraint checking)",
+        "file_location": "crypto/punycode.c (ossl_punycode_decode function, lines 276, 297)",
+        "required_permissions": [
+          "memory access"
+        ]
+      },
+      "code_snippet": "memcpy(outptr, inptr, delta + 1);\noutptr += delta + 1;\n...\nmemcpy(outptr, seed, utfsize);\noutptr += utfsize;",
+      "code_language": "c",
+      "code_behavior": "At runtime, during X.509 certificate verification, the code copies data into a buffer using memcpy without ensuring the buffer is null-terminated, resulting in improper string handling and enabling buffer overflows or out-of-bounds reads if the buffer is later used as a string.",
+      "malice_analysis": {
+        "why_suspicious": "The code copies data into a buffer with memcpy but does not append a null terminator, which is dangerous if the buffer is subsequently used as a C string. This can lead to out-of-bounds reads or memory corruption.",
+        "violated_expectations": "Normal behavior for string buffers is to ensure null-termination after copying data. The absence of explicit null-termination violates safe string handling conventions in C.",
+        "similar_legitimate_use": "Direct memory copying with memcpy is legitimate for binary data, but when buffers are used as strings, null-termination is mandatory. Omitting this step is a common programming error leading to vulnerabilities.",
+        "key_indicators": [
+          "Lack of null-termination after memcpy in string context",
+          "Buffer used in string operations without proper termination",
+          "Potential for out-of-bounds reads or memory corruption",
+          "No explicit check or write for null terminator after buffer copy"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits a specially crafted X.509 certificate containing maliciously encoded domain names using punycode to a vulnerable OpenSSL application.",
+      "implemented_by": [],
+      "leads_to": "Triggering vulnerable code paths in punycode.c during certificate verification"
+    },
+    {
+      "step": 2,
+      "action": "During certificate verification, the ossl_punycode_decode function is called to process the punycode-encoded domain name, executing the vulnerable code.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Buffer overflow conditions due to improper boundary checks and lack of null-termination"
+    },
+    {
+      "step": 3,
+      "action": "As a result of the off-by-one error and missing null-termination, memory beyond the intended buffer is overwritten or read, leading to memory corruption.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Potential remote code execution, application crash, or information disclosure"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Buffer write operations where the index or length is allowed to equal the buffer size (off-by-one errors in boundary checks)",
+      "Use of memcpy or similar functions to copy data into buffers that are later used as strings, without explicit null-termination",
+      "Conditional checks in buffer management code using only '>' instead of '>=' for buffer limits, especially in security-critical code paths"
+    ],
+    "file_indicators": [
+      "ossl_punycode_decode function in crypto/punycode.c",
+      "memcpy operations on buffers used in string contexts without subsequent null-termination",
+      "Conditional statements in punycode.c that check 'written_out > max_out' instead of 'written_out >= max_out'"
+    ],
+    "network_indicators": [
+      "Submission of X.509 certificates with punycode-encoded domain names to TLS endpoints",
+      "Repeated certificate verification failures, crashes, or memory corruption events in OpenSSL-based services when processing certificates"
+    ],
+    "how_to_detect": "Use static analysis tools to identify off-by-one errors in buffer size checks, such as 'if (written_out > max_out)' instead of 'if (written_out >= max_out)', within crypto/punycode.c. Scan for memcpy or similar buffer copy operations where the destination buffer is later used as a string but is not explicitly null-terminated. Monitor for application crashes, memory corruption, or abnormal certificate verification failures, especially when processing X.509 certificates containing punycode-encoded domain names."
+  }
+}

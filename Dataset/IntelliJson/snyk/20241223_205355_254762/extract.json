@@ -1,0 +1,104 @@
+{
+  "package_info": {
+    "package_name": "Instant Markdown",
+    "package_manager": "VS Code Extension Marketplace",
+    "package_versions": "All versions prior to the fix (exact version not specified)",
+    "why_malicious": "The extension exposes a local web server with a path traversal vulnerability, allowing any process or website able to access localhost to read arbitrary files from the developer's machine. This enables attackers to exfiltrate sensitive files (e.g., SSH keys, configuration files) simply by tricking the developer into opening a malicious website, making the extension a severe supply chain risk."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (whenever a markdown file is opened in VS Code)",
+        "file_location": "main extension JavaScript code (entry point of Instant Markdown extension)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "const express = require('express');\nconst app = express();\napp.use(express.static(process.cwd()));\napp.listen(8090, 'localhost');",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the extension starts a web server on localhost:8090, serving files from the current working directory and its parent directories, enabling file access via HTTP requests.",
+      "malice_analysis": {
+        "why_suspicious": "Exposing a web server that serves arbitrary files from the developer's filesystem is highly dangerous, especially without proper path sanitization.",
+        "violated_expectations": "A normal markdown preview extension should only render the current markdown file, not expose a web server that allows access to arbitrary files on the system.",
+        "similar_legitimate_use": "Serving only the current markdown file for preview in a browser is legitimate, but not arbitrary file access.",
+        "key_indicators": [
+          "Web server listens on localhost:8090",
+          "Serves files from process.cwd() (potentially the user's home directory or project root)",
+          "No path sanitization or access control"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when HTTP requests are made to the local server)",
+        "file_location": "HTTP request handler in the extension's server code",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "app.get('/*', function(req, res) {\n  const filePath = path.join(process.cwd(), req.path);\n  res.sendFile(filePath);\n});",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the server handles HTTP GET requests by joining the requested path to the current working directory and serving the resulting file, allowing path traversal via crafted URLs.",
+      "malice_analysis": {
+        "why_suspicious": "The code does not sanitize or restrict the requested path, enabling attackers to use '../' sequences to access files outside the intended directory.",
+        "violated_expectations": "A secure file server should validate and restrict file paths to prevent traversal outside the intended directory.",
+        "similar_legitimate_use": "Serving static assets within a web application root is legitimate, but not arbitrary file access via traversal.",
+        "key_indicators": [
+          "Direct use of user-supplied path in file system access",
+          "No validation or sanitization of req.path",
+          "Enables '../../' traversal attacks"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "User opens a markdown file in VS Code, triggering the extension to start a local web server on port 8090.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Local server is accessible on localhost:8090."
+    },
+    {
+      "step": 2,
+      "action": "Attacker tricks the developer into visiting a malicious website (e.g., via phishing or social engineering).",
+      "implemented_by": [],
+      "leads_to": "Malicious website can make requests to localhost:8090 from the victim's browser."
+    },
+    {
+      "step": 3,
+      "action": "Malicious website uses JavaScript (e.g., fetch, iframe, Window.postMessage) to send crafted HTTP requests to localhost:8090 with path traversal payloads.",
+      "implemented_by": [],
+      "leads_to": "Local server receives requests with paths like /foo/?/../../../../../.ssh/id_rsa."
+    },
+    {
+      "step": 4,
+      "action": "Extension's server code processes the request and returns the contents of the targeted file (e.g., SSH private key) to the browser.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Sensitive file contents are exfiltrated to the attacker's website."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "VS Code extension starts a web server on localhost (especially on fixed ports like 8090)",
+      "Extension serves files from arbitrary locations on the filesystem",
+      "HTTP requests to localhost:8090 with path traversal patterns (../)"
+    ],
+    "file_indicators": [
+      "Presence of express.js or similar web server code in extension source",
+      "Use of app.use(express.static(process.cwd())) or similar patterns",
+      "HTTP handler code that joins user-supplied paths to filesystem locations without sanitization"
+    ],
+    "network_indicators": [
+      "Unusual HTTP traffic from browser to localhost:8090",
+      "Requests containing '../' or other traversal sequences in the URL path"
+    ],
+    "how_to_detect": "Monitor installed VS Code extensions for those that start local web servers, especially on common ports like 8090. Analyze extension code for use of express.static or similar file serving mechanisms without path sanitization. Detect HTTP requests from browsers to localhost:8090 containing path traversal patterns. Flag extensions that allow serving files outside the intended project directory."
+  }
+}

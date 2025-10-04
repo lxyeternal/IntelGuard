@@ -1,0 +1,150 @@
+{
+  "package_info": {
+    "package_name": "cups-browsed (with cups-filters, libcupsfilters, libppd)",
+    "package_manager": "system package manager (apt/yum/zypper)",
+    "package_versions": "2.0.1 or lower (notably 1.27.4-1ubuntu0.2 and below)",
+    "why_malicious": "The CUPS printing stack, when configured with default settings and vulnerable versions, allows remote attackers to inject and execute arbitrary code by exploiting a chain of vulnerabilities. Attackers can install a malicious printer via UDP port 631, supply a crafted PPD file with a FoomaticRIPCommandLine directive, and achieve code execution when a print job is triggered."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "network event (UDP packet to port 631)",
+        "file_location": "cups-browsed service (network listener)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "Attacker sends a UDP packet to port 631 containing a URL to an attacker-controlled IPP server.",
+      "code_language": "network protocol (IPP over UDP)",
+      "code_behavior": "Upon receiving a UDP packet on port 631, the cups-browsed service processes the packet, which contains a reference to a remote IPP server controlled by the attacker. This causes the CUPS service to initiate a connection to the attacker's server.",
+      "malice_analysis": {
+        "why_suspicious": "Accepting remote printer definitions via UDP from untrusted sources exposes the system to remote manipulation.",
+        "violated_expectations": "Normally, printer discovery should be limited to trusted local networks or authenticated sources, not arbitrary remote hosts.",
+        "similar_legitimate_use": "Legitimate printer discovery on trusted local networks.",
+        "key_indicators": [
+          "UDP port 631 exposed to the internet",
+          "Unrestricted acceptance of remote printer definitions"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "network event (CUPS initiates outbound connection)",
+        "file_location": "CUPS daemon (network client)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "CUPS makes a POST request to the attacker-controlled IPP server to fetch printer attributes (Get-Printer-Attributes).",
+      "code_language": "network protocol (IPP over HTTP/HTTPS)",
+      "code_behavior": "After receiving the printer reference, CUPS sends a Get-Printer-Attributes request to the attacker's IPP server, retrieving a crafted set of printer attributes including a malicious PPD file.",
+      "malice_analysis": {
+        "why_suspicious": "Fetching printer configuration from an untrusted remote server allows the attacker to supply arbitrary configuration data.",
+        "violated_expectations": "Printer attribute retrieval should be from trusted, authenticated sources.",
+        "similar_legitimate_use": "Fetching printer attributes from legitimate network printers.",
+        "key_indicators": [
+          "Outbound connection to untrusted IPP server",
+          "Unvalidated printer attribute data"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "file creation (PPD file written to disk)",
+        "file_location": "Temporary directory for PPD files (e.g., /tmp/ or /var/spool/cups/tmp/)",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "CUPS writes a PPD file containing a FoomaticRIPCommandLine directive with attacker-supplied shell commands.",
+      "code_language": "PostScript Printer Description (PPD) / shell",
+      "code_behavior": "When the PPD file is created, it includes a FoomaticRIPCommandLine directive that specifies arbitrary shell commands to be executed during print jobs.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing arbitrary shell commands in PPD files from untrusted sources enables code injection.",
+        "violated_expectations": "PPD files should not contain untrusted or arbitrary command execution directives.",
+        "similar_legitimate_use": "Custom PPDs for advanced printer features (from trusted sources).",
+        "key_indicators": [
+          "FoomaticRIPCommandLine with shell metacharacters",
+          "PPD file sourced from remote, unauthenticated server"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "user action (print job sent to malicious printer)",
+        "file_location": "foomatic-rip process (child of print job)",
+        "required_permissions": [
+          "filesystem",
+          "process execution"
+        ]
+      },
+      "code_snippet": "foomatic-rip executes the shell command specified in the FoomaticRIPCommandLine directive from the malicious PPD file.",
+      "code_language": "shell",
+      "code_behavior": "When a print job is sent to the malicious printer, foomatic-rip executes the attacker-supplied shell command, resulting in arbitrary code execution under the privileges of the printing service.",
+      "malice_analysis": {
+        "why_suspicious": "Execution of arbitrary shell commands as a result of a print job is a clear code execution vulnerability.",
+        "violated_expectations": "Print jobs should not trigger arbitrary shell command execution from untrusted sources.",
+        "similar_legitimate_use": "Custom print filters for advanced printing features (from trusted admins).",
+        "key_indicators": [
+          "foomatic-rip process with unexpected child processes",
+          "Shell commands in PPD files"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a UDP packet to port 631 with a reference to a malicious IPP server.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Victim CUPS service initiates connection to attacker's IPP server."
+    },
+    {
+      "step": 2,
+      "action": "CUPS fetches printer attributes and a malicious PPD file from the attacker's IPP server.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Malicious PPD file is written to disk."
+    },
+    {
+      "step": 3,
+      "action": "CUPS writes the attacker-supplied PPD file containing a FoomaticRIPCommandLine directive.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Malicious command is staged for execution."
+    },
+    {
+      "step": 4,
+      "action": "User triggers a print job to the malicious printer, causing foomatic-rip to execute the attacker's command.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Arbitrary code execution on the victim system (final goal)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Inbound UDP packets to port 631 from untrusted sources",
+      "CUPS making outbound connections to unknown IPP servers",
+      "Creation of PPD files containing FoomaticRIPCommandLine with shell commands",
+      "foomatic-rip process spawning unexpected child processes"
+    ],
+    "file_indicators": [
+      "PPD files in /tmp/, /var/spool/cups/tmp/, or similar with FoomaticRIPCommandLine directives",
+      "foomatic-rip process execution logs"
+    ],
+    "network_indicators": [
+      "Outbound HTTP/IPP requests to suspicious or external IP addresses",
+      "Inbound UDP traffic to port 631 from the internet"
+    ],
+    "how_to_detect": "Monitor for inbound UDP traffic to port 631, especially from untrusted or external sources. Alert on CUPS making outbound connections to unknown IPP servers. Scan newly created PPD files for FoomaticRIPCommandLine directives containing shell metacharacters or suspicious commands. Monitor foomatic-rip process executions and flag any unexpected child processes or command-line arguments. Correlate these events to identify the full attack chain."
+  }
+}

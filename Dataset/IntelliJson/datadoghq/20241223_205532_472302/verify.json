@@ -1,0 +1,78 @@
+{
+  "package_info": {
+    "package_name": "OpenSSH",
+    "package_manager": "system package manager (e.g., apt, yum, source)",
+    "package_versions": "<4.4p1 (if not patched for CVE-2006-5051 and CVE-2008-4109), 8.5p1 <= OpenSSH < 9.8p1",
+    "why_malicious": "The affected OpenSSH server versions contain a regression vulnerability (CVE-2024-6387) that allows unauthenticated remote attackers to exploit a race condition in the SIGALRM handler, leading to pre-authentication remote code execution as root. This is due to the use of async-signal-unsafe functions (such as syslog(), malloc(), and free()) in an asynchronous signal handler, which can corrupt process memory and allow arbitrary code execution."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "SIGALRM signal is delivered during an unauthenticated SSH connection when loginGraceTime expires",
+        "file_location": "sshd main process (server-side, C source code, signal handler function sigalrm_handler in OpenSSH source)",
+        "required_permissions": [
+          "network (to initiate SSH connections)",
+          "process (to interact with sshd process)",
+          "root (for successful exploitation and code execution as root)"
+        ]
+      },
+      "code_snippet": "void sigalrm_handler(int sig) {\n    syslog(LOG_AUTHPRIV|LOG_NOTICE, \"Timeout before authentication for %s port %d\", ...);\n    ...\n}",
+      "code_language": "c",
+      "code_behavior": "When the loginGraceTime expires during an unauthenticated SSH connection, the SIGALRM handler is invoked asynchronously, which calls syslog(); syslog() internally calls malloc() and free(), which are not async-signal-safe, potentially corrupting the heap and enabling remote code execution as root.",
+      "malice_analysis": {
+        "why_suspicious": "Calling non-async-signal-safe functions such as syslog(), malloc(), and free() from within a signal handler is a well-known security anti-pattern, as it can lead to memory corruption and exploitation. In this context, the attacker can reliably trigger the signal handler by causing loginGraceTime to expire, making exploitation practical.",
+        "violated_expectations": "Signal handlers are expected to only invoke async-signal-safe functions to avoid undefined behavior. Here, syslog() (and its dependencies) are called from the SIGALRM handler, violating this expectation and introducing a race condition that can be exploited for memory corruption.",
+        "similar_legitimate_use": "syslog() is commonly used for logging authentication events in server applications, but it is not safe to call from within asynchronous signal handlers. Legitimate use would restrict such calls to non-signal contexts.",
+        "key_indicators": [
+          "syslog() invoked directly from sigalrm_handler in sshd",
+          "malloc()/free() called in asynchronous signal context",
+          "Signal handler for SIGALRM executes non-async-signal-safe code",
+          "Heap corruption potential in pre-authentication code path",
+          "Vulnerability is reachable before user authentication"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker initiates a large number of unauthenticated SSH connections and intentionally does not complete authentication, causing loginGraceTime to expire for each connection.",
+      "implemented_by": [],
+      "leads_to": "SIGALRM signal is triggered in the sshd process for each unauthenticated connection."
+    },
+    {
+      "step": 2,
+      "action": "SIGALRM handler is invoked asynchronously in the sshd process upon loginGraceTime expiration.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "syslog() is called from within the signal handler, which in turn calls malloc() and free() in an unsafe context."
+    },
+    {
+      "step": 3,
+      "action": "syslog() and its dependencies call malloc() and free() in an async-signal-unsafe context, potentially corrupting the heap if interrupted.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Attacker exploits heap corruption to achieve pre-authentication remote code execution as root."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "High volume of unauthenticated SSH connection attempts followed by connection timeouts (loginGraceTime expirations)",
+      "Frequent triggering of SIGALRM in sshd process, especially in pre-authentication code paths",
+      "Unusual sshd process crashes, restarts, or memory corruption events coinciding with bursts of unauthenticated connections"
+    ],
+    "file_indicators": [
+      "sshd binary version <9.8p1 and >=8.5p1 (or <4.4p1 if not patched for CVE-2006-5051 and CVE-2008-4109)",
+      "sshd_config with default or elevated loginGraceTime value (e.g., 120 seconds or higher)"
+    ],
+    "network_indicators": [
+      "Thousands of SSH connection attempts from a single source IP without authentication completion",
+      "Repeated connection resets or timeouts on port 22/TCP, especially from the same source",
+      "Spike in incomplete SSH handshakes leading to timeouts"
+    ],
+    "how_to_detect": "Monitor for excessive unauthenticated SSH connection attempts and timeouts, particularly if they coincide with sshd process crashes, restarts, or memory corruption events. Audit sshd binary versions and configuration files for vulnerable versions and high loginGraceTime values. Use endpoint detection to alert on abnormal process signals (SIGALRM) and memory corruption in sshd. Correlate network logs for repeated incomplete SSH handshakes from the same source IP."
+  }
+}

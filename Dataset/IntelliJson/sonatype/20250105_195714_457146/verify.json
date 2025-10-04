@@ -3,55 +3,53 @@
     "package_name": "lodash",
     "package_manager": "npm",
     "package_versions": "[4.17.5, 4.17.11)",
-    "why_malicious": "Lodash versions 4.17.5 through 4.17.10 are vulnerable to prototype pollution due to insufficient sanitization of user-supplied object keys in deep merge functions (such as merge, mergeWith, and defaultsDeep). This allows attackers to inject properties into Object.prototype, potentially leading to Denial of Service (DoS), privilege escalation, or Remote Code Execution (RCE) if application logic is subverted."
+    "why_malicious": "Versions 4.17.5 through 4.17.10 of lodash are vulnerable to prototype pollution due to insufficient property checks in the safeGet() function. This allows attackers to inject properties into Object.prototype by submitting specially crafted JSON payloads, leading to application-wide privilege escalation, logic bypass, Denial of Service (DoS), or, in some cases, Remote Code Execution (RCE) if polluted properties are leveraged in sensitive code paths."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
-        "trigger": "At runtime, when lodash's merge, mergeWith, or defaultsDeep is called on user-supplied data (e.g., after receiving JSON input from an API endpoint or request body).",
-        "file_location": "lodash.js (core library file), invoked via application code that uses lodash's deep merge functions.",
+        "trigger": "runtime (when merging user-supplied JSON)",
+        "file_location": "lodash.js (merge function, called by merge/mergeWith/defaultsDeep)",
         "required_permissions": [
-          "filesystem (if application state or files are affected by polluted objects)",
-          "environment_vars (if polluted objects are used to access or modify environment variables)",
-          "network (if attacker can submit JSON payloads to endpoints using lodash merge functions)"
+          "filesystem (if polluted prototype is used for file operations)",
+          "network (if polluted prototype is used for exfiltration)",
+          "environment_vars (if prototype pollution is leveraged for further attacks)"
         ]
       },
-      "code_snippet": "var _ = require('lodash');\nvar payload = JSON.parse('{\"constructor\": {\"prototype\": {\"isAdmin\": true}}}');\n_.merge({}, payload);\nconsole.log({}.isAdmin); // true",
+      "code_snippet": "var payload = JSON.parse('{\"constructor\": {\"prototype\": {\"isAdmin\": true}}}');\n_.merge({}, payload);\nconsole.log({}.isAdmin); // true",
       "code_language": "javascript",
-      "code_behavior": "This code demonstrates a prototype pollution attack by merging a malicious payload into an empty object using lodash's merge function. The payload is crafted with nested 'constructor' and 'prototype' keys, resulting in the addition of an 'isAdmin' property to Object.prototype. After the merge, all objects inherit the 'isAdmin' property, which can be exploited for privilege escalation or bypassing application logic checks.",
+      "code_behavior": "At runtime, when user-supplied JSON is merged into an object using lodash's merge function, the code recursively copies properties from the payload—including those on the constructor.prototype chain—into the target object, resulting in the addition of isAdmin to Object.prototype. This pollutes all objects in the application, enabling privilege escalation or logic bypass.",
       "malice_analysis": {
-        "why_suspicious": "The code allows user-supplied keys to traverse and modify the Object prototype, a classic prototype pollution vector. This can be exploited to manipulate application logic globally.",
-        "violated_expectations": "Expected: merge should only affect the target object and its direct properties. Actual: merge allows modification of Object.prototype, affecting all objects in the runtime environment.",
-        "similar_legitimate_use": "Legitimate use involves deep merging of trusted configuration objects. However, merging untrusted user input without key sanitization is unsafe and enables prototype pollution.",
+        "why_suspicious": "The code enables user input to modify the global Object prototype, which can affect all objects in the application and lead to privilege escalation, logic manipulation, or application crashes.",
+        "violated_expectations": "Normal behavior expects merge to only copy safe, own properties, not to traverse or modify built-in prototypes. Here, attacker input is able to modify global prototypes, violating the principle of object isolation.",
+        "similar_legitimate_use": "Legitimate use of merge is to combine configuration or data objects, but never to modify built-in prototypes or global objects.",
         "key_indicators": [
-          "User-controlled keys such as 'constructor' and 'prototype' are not filtered or sanitized before merging.",
-          "merge() function applies changes recursively, allowing traversal into prototype chain.",
-          "After merge, new properties (e.g., isAdmin: true) appear on all objects, not just the merge target.",
-          "No explicit check for dangerous keys like '__proto__', 'constructor', or 'prototype' in merge logic."
+          "User input containing constructor/prototype/__proto__ keys",
+          "merge/mergeWith/defaultsDeep called on untrusted data",
+          "Object prototype properties unexpectedly set after merge"
         ]
       }
     },
     {
       "snippet_id": "snippet_2",
       "execution_context": {
-        "trigger": "During execution of lodash's internal safeGet function, typically called as part of deep merge operations.",
-        "file_location": "lodash.js (safeGet function, internal utility used by merge and related functions).",
+        "trigger": "internal function call (safeGet in lodash.js)",
+        "file_location": "lodash.js (safeGet function, pre-fix)",
         "required_permissions": [
-          "none (core library logic, but impact depends on how polluted objects are used elsewhere in the application)"
+          "none (logic flaw in code)"
         ]
       },
-      "code_snippet": "var value = object[key];\nif (key === 'prototype' && value === objectProto) {\n  return;\n}\nreturn value;",
+      "code_snippet": "var value = object[key];\nif (key == 'prototype' && value === objectProto) {\n  return;\n}\nreturn value;",
       "code_language": "javascript",
-      "code_behavior": "This code is part of lodash's safeGet function, which attempts to prevent access to the 'prototype' property. However, it only checks for the exact key 'prototype' and fails to block other dangerous keys such as '__proto__' and 'constructor'. As a result, attackers can bypass this check and pollute the prototype chain.",
+      "code_behavior": "During property access, when the safeGet function is called internally, the code attempts to prevent prototype pollution by checking for the 'prototype' key, but the logic is incomplete and fails to block all attack vectors, allowing malicious keys to pass through and enabling prototype pollution.",
       "malice_analysis": {
-        "why_suspicious": "The filtering is incomplete, only blocking 'prototype' but not other keys that can be used for prototype pollution. This oversight allows attackers to exploit the merge logic.",
-        "violated_expectations": "Expected: safeGet should block all keys that can lead to prototype pollution, including '__proto__', 'constructor', and 'prototype'. Actual: only 'prototype' is checked, leaving other vectors open.",
-        "similar_legitimate_use": "Accessing object properties by key is normal in JavaScript, but when keys are attacker-controlled and not properly sanitized, it becomes a security risk.",
+        "why_suspicious": "The check is insufficient and does not prevent all forms of prototype pollution, especially with nested or alternative property names such as __proto__ or constructor.prototype.",
+        "violated_expectations": "A robust implementation should block all prototype pollution attempts, not just a specific case. This incomplete check leaves the application vulnerable.",
+        "similar_legitimate_use": "Safe property access is legitimate, but incomplete filtering of dangerous keys is not.",
         "key_indicators": [
-          "safeGet only checks for 'prototype', not for '__proto__' or 'constructor'.",
-          "Allows traversal and assignment to dangerous prototype properties via unfiltered keys.",
-          "No comprehensive blacklist or sanitization of keys in property access logic."
+          "Special handling for 'prototype' key in property access",
+          "Bypassable logic for prototype pollution due to incomplete checks"
         ]
       }
     }
@@ -59,43 +57,44 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker crafts a malicious JSON payload containing nested 'constructor' and 'prototype' keys (e.g., {\"constructor\": {\"prototype\": {\"isAdmin\": true}}}) and submits it to an API endpoint or function that uses lodash's deep merge functions.",
+      "action": "Attacker crafts a malicious JSON payload with nested constructor.prototype keys (e.g., {\"constructor\": {\"prototype\": {\"isAdmin\": true}}})",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Payload is received and processed by application code that uses lodash's merge, mergeWith, or defaultsDeep functions."
+      "leads_to": "Payload is submitted to an endpoint that uses lodash's merge/mergeWith/defaultsDeep"
     },
     {
       "step": 2,
-      "action": "Application code calls lodash's merge function on the user-supplied data, triggering the vulnerable safeGet logic within lodash.",
+      "action": "Application merges attacker-supplied payload into an object using lodash's vulnerable merge function, which fails to block prototype pollution due to incomplete checks in safeGet.",
       "implemented_by": [
         "snippet_1",
         "snippet_2"
       ],
-      "leads_to": "safeGet fails to block prototype-polluting keys, allowing the malicious payload to modify Object.prototype."
+      "leads_to": "Object.prototype is polluted with attacker-controlled properties"
     },
     {
       "step": 3,
-      "action": "Object prototype is polluted (e.g., all objects now have isAdmin: true), which can be leveraged for privilege escalation, logic bypass, or to cause application crashes (Denial of Service).",
+      "action": "All objects in the application now inherit the polluted property (e.g., isAdmin: true), potentially enabling privilege escalation, logic bypass, or application crash (DoS)",
       "implemented_by": [
         "snippet_1"
       ],
-      "leads_to": "Potential Denial of Service, privilege escalation, or Remote Code Execution depending on how polluted objects are used in the application."
+      "leads_to": "Denial of Service, privilege escalation, or further exploitation (e.g., RCE if application logic is subverted)"
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Deep merge operations (merge, mergeWith, defaultsDeep) performed on user-supplied objects containing keys such as '__proto__', 'constructor', or 'prototype'.",
-      "Unexpected properties (e.g., isAdmin: true) appearing on all objects or Object.prototype at runtime after processing user input.",
-      "Application errors, crashes, or logic anomalies (such as privilege escalation) occurring after processing JSON input with suspicious keys."
+      "merge/mergeWith/defaultsDeep called on untrusted or user-supplied data",
+      "Presence of constructor/prototype/__proto__ keys in incoming JSON payloads",
+      "Unexpected properties appearing on Object.prototype at runtime after merge operations"
     ],
     "file_indicators": [
-      "lodash.js (versions 4.17.5 through 4.17.10 inclusive)",
-      "Application code that invokes _.merge, _.mergeWith, or _.defaultsDeep on data derived from user input"
+      "lodash.js (versions 4.17.5 to <4.17.11)",
+      "Application code that merges user input without property filtering or validation"
     ],
     "network_indicators": [
-      "Inbound HTTP requests with JSON bodies containing keys: '__proto__', 'constructor', or 'prototype' (especially in nested objects)"
+      "Incoming JSON payloads containing constructor/prototype/__proto__ keys",
+      "Repeated requests with similar payload structure targeting endpoints that perform object merging"
     ],
-    "how_to_detect": "Use static analysis to identify usage of lodash versions <4.17.11 and flag deep merge operations on user-supplied data. Monitor runtime for the appearance of new properties on Object.prototype after processing user input. Inspect logs for application errors or crashes following JSON input processing. Implement input validation to reject or sanitize objects containing dangerous keys before merging."
+    "how_to_detect": "Monitor for use of lodash's merge/mergeWith/defaultsDeep functions on user-supplied data, especially when payloads contain keys like constructor, prototype, or __proto__. Inspect Object.prototype at runtime for unexpected properties after merge operations. Use static analysis to flag code paths where untrusted input is merged without property filtering. Upgrade lodash to >=4.17.11 to remediate the vulnerability."
   }
 }

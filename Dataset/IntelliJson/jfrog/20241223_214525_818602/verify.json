@@ -1,0 +1,78 @@
+{
+  "package_info": {
+    "package_name": "Linux kernel (Filesystem Context module)",
+    "package_manager": "kernel source (Linux distributions, not a package manager like npm/PyPI)",
+    "package_versions": "5.1 to 5.16.1 (vanilla kernel)",
+    "why_malicious": "A critical integer underflow vulnerability (CVE-2022-0185) in the Filesystem Context module allows local attackers to perform out-of-bounds writes, leading to arbitrary code execution in kernel context, privilege escalation, container escape, or denial of service."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At runtime, when legacy_parse_param is called via privileged system calls such as fsopen() or fsconfig()",
+        "file_location": "fs/fs_context.c (legacy_parse_param function in the Linux kernel source)",
+        "required_permissions": [
+          "CAP_SYS_ADMIN (in any namespace)",
+          "Ability to invoke fsopen() or fsconfig()",
+          "Access to user namespaces (if CONFIG_USER_NS is enabled)"
+        ]
+      },
+      "code_snippet": "if (len > PAGE_SIZE - 2 - size)\n\treturn invalf(fc, \"VFS: Legacy: Cumulative options too large\");\nif (strchr(param->key, ',') ||\n   (param->type == fs_value_is_string &&\n    memchr(param->string, ',', param->size)))\n\treturn invalf(fc, \"VFS: Legacy: Option '%s' contained comma\",\n\t\t      param->key);\nif (!ctx->legacy_data) {\n\tctx->legacy_data = kmalloc(PAGE_SIZE, GFP_KERNEL);\n\tif (!ctx->legacy_data)\n\t\treturn -ENOMEM;\n}\nctx->legacy_data[size++] = ',';\nlen = strlen(param->key);\nmemcpy(ctx->legacy_data + size, param->key, len);\nsize += len;\nif (param->type == fs_value_is_string) {\n\tctx->legacy_data[size++] = '=';",
+      "code_language": "C",
+      "code_behavior": "At runtime, when legacy_parse_param is called via fsopen() or fsconfig(), the code checks if the provided length 'len' is greater than PAGE_SIZE - 2 - size. If 'size' is 4095 or greater, this calculation underflows, allowing the check to be bypassed. As a result, attacker-controlled parameters can cause out-of-bounds writes to ctx->legacy_data, leading to kernel memory corruption and potential arbitrary code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The code performs a buffer size check using an arithmetic expression that can underflow if 'size' is large, specifically if 'size' >= 4095. This allows an attacker to bypass the intended buffer boundary check and write beyond the allocated memory, which is a classic memory corruption vulnerability exploitable for privilege escalation.",
+        "violated_expectations": "Kernel code is expected to strictly enforce buffer boundaries and prevent integer underflow or overflow in size calculations. Here, the check is flawed, allowing user-controlled input to subvert memory safety, which violates secure coding standards for kernel memory operations.",
+        "similar_legitimate_use": "Legitimate kernel code may manipulate buffers and perform size checks, but always with robust validation to prevent underflow or overflow. Out-of-bounds writes to kernel memory are never legitimate and always indicate a vulnerability.",
+        "key_indicators": [
+          "Integer underflow in buffer size calculation (PAGE_SIZE - 2 - size)",
+          "Out-of-bounds write to ctx->legacy_data in kernel memory",
+          "User-controlled 'size' parameter influencing kernel memory operations",
+          "Bypass of intended buffer boundary checks in fs_context.c"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker obtains CAP_SYS_ADMIN capability in a user or mount namespace (e.g., via unshare in Kubernetes or a privileged container).",
+      "implemented_by": [],
+      "leads_to": "Ability to invoke privileged system calls such as fsopen() or fsconfig()."
+    },
+    {
+      "step": 2,
+      "action": "Attacker calls fsopen() or fsconfig() and triggers legacy_parse_param with crafted parameters to set 'size' >= 4095.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Bypass of buffer size check and out-of-bounds write in kernel memory."
+    },
+    {
+      "step": 3,
+      "action": "Out-of-bounds write is leveraged to corrupt kernel memory and execute arbitrary code in kernel context.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Privilege escalation, container escape, or denial of service."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unprivileged or containerized processes invoking fsopen() or fsconfig() syscalls with unusually large or crafted parameters",
+      "Kernel memory corruption or crashes originating from fs_context.c or legacy_parse_param",
+      "Processes gaining CAP_SYS_ADMIN in new user or mount namespaces (e.g., via unshare or setns)",
+      "Repeated or anomalous use of fsopen()/fsconfig() by non-root or containerized users"
+    ],
+    "file_indicators": [
+      "No direct file indicators (vulnerability is in kernel memory, not file-based)",
+      "Kernel logs containing errors, warnings, or crashes referencing fs_context.c or legacy_parse_param",
+      "dmesg output showing memory corruption or OOPS in fs_context.c"
+    ],
+    "network_indicators": [
+      "No direct network indicators (local privilege escalation vulnerability)",
+      "Possible lateral movement or unusual network activity after successful container escape or privilege escalation"
+    ],
+    "how_to_detect": "Monitor for Linux kernel versions 5.1 to 5.16.1 with CONFIG_USER_NS enabled. Audit for unprivileged or containerized processes invoking fsopen() or fsconfig() syscalls, especially with large or crafted parameters. Track processes that gain CAP_SYS_ADMIN in new namespaces (e.g., via unshare or setns). Review kernel logs and dmesg for memory corruption, OOPS, or crashes in fs_context.c or legacy_parse_param. Apply vendor patches or upgrade to a fixed kernel version to mitigate the vulnerability."
+  }
+}

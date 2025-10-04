@@ -1,0 +1,110 @@
+{
+  "package_info": {
+    "package_name": "webgoat/webgoat-8.0",
+    "package_manager": "docker",
+    "package_versions": "8.0:latest",
+    "why_malicious": "The WebGoat Docker image is intentionally designed for security training and contains deliberately vulnerable code and outdated third-party components. It includes several critical CVEs, such as those enabling remote code execution via unsafe deserialization (e.g., XStream) and insecure data binding (e.g., SpringShell/CVE-2022-22965). These vulnerabilities are present in exposed endpoints, making the image a realistic and exploitable target for attackers."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP request to vulnerable endpoint)",
+        "file_location": "VulnerableComponentsLesson::completed (Java class in WebGoat source)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "public AttackResult completed(@RequestParam String payload) {\n    XStream xstream = new XStream(new DomDriver());\n    xstream.setClassLoader(Contact.class.getClassLoader());\n    try {\n        Contact expl = (Contact) xstream.fromXML(payload);\n        // ...\n    }\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, when an HTTP request is made to the vulnerable endpoint, the code deserializes attacker-controlled XML using xstream.fromXML(payload), allowing untrusted data to instantiate arbitrary objects, which can result in remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Deserializing attacker-controlled XML with XStream is a well-documented remote code execution vector, as it allows attackers to supply malicious object graphs that can trigger arbitrary code execution during deserialization.",
+        "violated_expectations": "Secure applications validate or sanitize input before deserialization, or avoid deserializing untrusted data entirely. Here, untrusted XML is deserialized directly without validation, violating secure coding practices.",
+        "similar_legitimate_use": "Deserialization of trusted, internal XML data in closed environments where input is guaranteed to be safe, such as internal configuration loading.",
+        "key_indicators": [
+          "Direct use of xstream.fromXML() on HTTP request input",
+          "Absence of input validation or sanitization before deserialization",
+          "Deserialization logic exposed via a web-accessible endpoint",
+          "Use of XStream library with attacker-controlled data"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (HTTP request to vulnerable endpoint)",
+        "file_location": "RegistrationController::showForm (Java class in WebGoat source)",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "@GetMapping(\"/registration\")\npublic String showForm(UserForm userForm) {\n    return \"registration\";\n}\n\n// UserForm is a POJO with fields for username, password, etc.",
+      "code_language": "java",
+      "code_behavior": "At runtime, when an HTTP GET request is made to the /registration endpoint, the code binds user-supplied request parameters to a UserForm POJO using Spring's data binding, enabling attackers to manipulate internal object properties and potentially achieve remote code execution via the SpringShell (CVE-2022-22965) exploit.",
+      "malice_analysis": {
+        "why_suspicious": "Spring data binding on user-controlled input without property restrictions is a known vector for class loader manipulation and remote code execution, as demonstrated by the SpringShell vulnerability.",
+        "violated_expectations": "Secure implementations restrict or sanitize which properties can be set via data binding, especially for sensitive or internal fields. This code allows unrestricted binding from user input.",
+        "similar_legitimate_use": "Binding simple, validated form data to POJOs in web applications with explicit property whitelisting and input sanitization.",
+        "key_indicators": [
+          "Use of @GetMapping with POJO argument for data binding",
+          "No explicit property whitelisting or input sanitization in data binding",
+          "Endpoint is accessible over the network and accepts user-controlled parameters",
+          "Pattern matches known SpringShell exploit vectors"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted XML payload to the vulnerable endpoint exposed by VulnerableComponentsLesson.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Deserialization of attacker-controlled data."
+    },
+    {
+      "step": 2,
+      "action": "Application deserializes the XML using xstream.fromXML(), instantiating attacker-supplied objects.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Remote code execution in the application context."
+    },
+    {
+      "step": 3,
+      "action": "Attacker sends an HTTP request with crafted parameters to the /registration endpoint, leveraging Spring data binding.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Manipulation of internal Java object properties."
+    },
+    {
+      "step": 4,
+      "action": "Spring data binding assigns attacker-controlled values to sensitive fields (e.g., ClassLoader), enabling code execution.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Remote code execution via SpringShell exploit."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Deserialization of untrusted XML via xstream.fromXML() on HTTP request input",
+      "Spring MVC endpoints binding request parameters to POJOs without explicit property whitelisting or sanitization",
+      "Unvalidated external input passed directly to deserialization or data binding routines"
+    ],
+    "file_indicators": [
+      "Java classes with @RequestParam or @ModelAttribute arguments passed to deserialization routines (e.g., VulnerableComponentsLesson.java)",
+      "Endpoints with @GetMapping, @PostMapping, etc., accepting POJO arguments without property restrictions (e.g., RegistrationController.java)"
+    ],
+    "network_indicators": [
+      "HTTP requests containing XML payloads sent to endpoints such as /VulnerableComponents/attack1",
+      "HTTP requests with parameters targeting /registration or similar endpoints vulnerable to Spring data binding exploits"
+    ],
+    "how_to_detect": "Monitor for Java deserialization of untrusted data, especially via xstream.fromXML() with external input. Flag Spring MVC endpoints that bind request parameters to POJOs without explicit property whitelisting or sanitization. Use static analysis to identify code paths where user input reaches deserialization or data binding routines. Monitor network traffic for suspicious XML payloads and requests to endpoints known to be vulnerable, such as /VulnerableComponents/attack1 and /registration."
+  }
+}

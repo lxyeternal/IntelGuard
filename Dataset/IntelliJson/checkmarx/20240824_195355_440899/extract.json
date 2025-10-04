@@ -1,0 +1,115 @@
+{
+  "package_info": {
+    "package_name": "bignum",
+    "package_manager": "npm",
+    "package_versions": "0.12.2-0.13.0",
+    "why_malicious": "The package was not directly altered, but its dependency on a remote S3 bucket for binary downloads allowed an attacker to hijack the bucket and serve a malicious binary. This binary, while maintaining expected functionality, exfiltrated sensitive user data (user IDs, passwords, environment variables, hostnames) to the attacker's infrastructure, making the package supply chain-compromised and dangerous to use."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "postinstall",
+        "file_location": "bignum postinstall script (node-gyp build process, downloads .node binary from S3)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "Download and execute a .node binary from a remote S3 bucket during package installation.",
+      "code_language": "javascript (invokes native binary)",
+      "code_behavior": "During installation, the package downloads a .node binary from a remote S3 bucket and loads it into the Node.js process, enabling execution of arbitrary native code.",
+      "malice_analysis": {
+        "why_suspicious": "Downloading and executing remote binaries at install time introduces a major supply chain risk, especially if the remote source is not under the package maintainer's control.",
+        "violated_expectations": "Normal packages should not fetch and execute remote binaries from untrusted or abandoned sources during installation.",
+        "similar_legitimate_use": "Some legitimate packages download prebuilt binaries for performance, but only from trusted, controlled sources.",
+        "key_indicators": [
+          "Remote binary download at install time",
+          "Dependency on external, potentially abandoned S3 bucket",
+          "No integrity or authenticity verification of the binary"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when the .node binary is loaded and executed by Node.js)",
+        "file_location": "malicious bignum.node binary (native C/C++ code)",
+        "required_permissions": [
+          "filesystem",
+          "environment_vars",
+          "network"
+        ]
+      },
+      "code_snippet": "C/C++ code using getcwd, getuid, getpwuid, getenv, gethostname, uname, gethostbyname, socket, connect, send, close to collect and exfiltrate data.",
+      "code_language": "C/C++ (compiled to .node binary)",
+      "code_behavior": "At runtime, the binary collects the current working directory, user ID, password entry, environment variables, and host information, then exfiltrates this data via a crafted GET request (embedding the data in the user-agent header) to the attacker's hijacked S3 bucket.",
+      "malice_analysis": {
+        "why_suspicious": "Harvesting sensitive system and user data, then exfiltrating it over the network, is a classic indicator of malware.",
+        "violated_expectations": "A math library should not access user credentials, environment variables, or network resources unrelated to its function.",
+        "similar_legitimate_use": "System diagnostic tools may collect similar data, but only with user consent and never exfiltrate it covertly.",
+        "key_indicators": [
+          "Use of system calls to collect sensitive data (getuid, getpwuid, getenv, etc.)",
+          "Network socket creation and outbound connection to attacker infrastructure",
+          "Data exfiltration via user-agent header in GET request"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker hijacks abandoned S3 bucket previously used to host bignum binaries.",
+      "implemented_by": [],
+      "leads_to": "Malicious binary is uploaded to the bucket."
+    },
+    {
+      "step": 2,
+      "action": "Malicious binary is uploaded to the hijacked S3 bucket at the expected path.",
+      "implemented_by": [],
+      "leads_to": "Package installation fetches the malicious binary."
+    },
+    {
+      "step": 3,
+      "action": "During npm install, bignum's postinstall script downloads the malicious .node binary from the hijacked S3 bucket.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Malicious binary is loaded and executed in user environment."
+    },
+    {
+      "step": 4,
+      "action": "The malicious .node binary executes, harvesting sensitive data from the system and environment.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Data is prepared for exfiltration."
+    },
+    {
+      "step": 5,
+      "action": "The binary exfiltrates the harvested data to the attacker's S3 bucket using a crafted GET request with the data in the user-agent header.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker receives sensitive data from compromised systems (final goal)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Package installation triggers download of remote binary from S3 or other cloud storage.",
+      "Native binary (.node) loaded by JavaScript package accesses system/user/environment information.",
+      "Outbound network connections from native binaries to unexpected domains or S3 buckets.",
+      "Sensitive data (user IDs, environment variables, hostnames) sent in HTTP headers (e.g., user-agent)."
+    ],
+    "file_indicators": [
+      "bignum.node binary with hashes: 3c6793de04bfc8407392704b3a6cef650425e42ebc95455f3c680264c70043a7, 3ba3fd7e7a747598502c7afbe074aa0463a7def55d4d0dec6f061cd3165b5dd1",
+      "Presence of .node binaries downloaded from non-official or abandoned S3 buckets"
+    ],
+    "network_indicators": [
+      "GET requests to hijacked S3 bucket URLs with suspicious user-agent headers",
+      "Outbound connections to S3 buckets not controlled by the package maintainer"
+    ],
+    "how_to_detect": "Monitor package installation processes for remote binary downloads, especially from S3 buckets or cloud storage. Flag any .node (native) binaries that are not built locally or are fetched from untrusted sources. Analyze loaded native binaries for suspicious system calls (getuid, getenv, etc.) and unexpected network activity. Inspect outbound HTTP requests for sensitive data exfiltration, particularly in headers like user-agent. Correlate package versions and binary hashes with known IOCs."
+  }
+}

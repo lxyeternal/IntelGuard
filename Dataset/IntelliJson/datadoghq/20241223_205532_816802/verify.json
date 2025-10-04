@@ -1,0 +1,101 @@
+{
+  "package_info": {
+    "package_name": "N/A (Technique: EC2 Instance Metadata Service credential theft via SSRF)",
+    "package_manager": "N/A",
+    "package_versions": "N/A",
+    "why_malicious": "The technique leverages SSRF vulnerabilities in web applications running on AWS EC2 instances to access the Instance Metadata Service (IMDS), particularly IMDSv1 and IMDSv2, in order to steal IAM credentials. This enables attackers to escalate privileges and move laterally within the AWS environment, representing a critical cloud security risk by exposing temporary AWS credentials to unauthorized parties."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (upon SSRF exploitation by attacker-supplied input)",
+        "file_location": "N/A (web application code vulnerable to SSRF, typically in HTTP request handling logic)",
+        "required_permissions": [
+          "network (outbound HTTP access to link-local addresses)",
+          "environment_vars (to access instance metadata endpoint if required by environment)"
+        ]
+      },
+      "code_snippet": "curl http://169.254.169.254/latest/meta-data/iam/security-credentials/example-role",
+      "code_language": "shell",
+      "code_behavior": "At runtime, when the SSRF vulnerability is exploited, the code issues an HTTP GET request to the EC2 instance metadata service endpoint to retrieve IAM credentials, then returns the credentials to the attacker via the SSRF response channel, resulting in unauthorized credential exposure.",
+      "malice_analysis": {
+        "why_suspicious": "Accessing the EC2 instance metadata service, especially the IAM credentials endpoint, from application code in response to user-controlled input is highly suspicious and indicative of credential theft attempts.",
+        "violated_expectations": "Normal web applications should never access the instance metadata endpoint for IAM credentials in response to external requests, nor should they expose such sensitive data to users or external systems.",
+        "similar_legitimate_use": "Cloud automation or configuration management tools may access instance metadata for legitimate bootstrapping during instance initialization, but not in response to arbitrary or user-supplied input during normal application operation.",
+        "key_indicators": [
+          "HTTP requests to 169.254.169.254/latest/meta-data/iam/security-credentials from application code",
+          "Retrieval and exposure of AWS IAM credential data in HTTP responses",
+          "Outbound HTTP requests to link-local IPs (169.254.169.254) triggered by user input",
+          "Presence of SSRF payloads targeting metadata endpoints in application logs"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (upon SSRF exploitation, IMDSv2 session token acquisition and metadata access)",
+        "file_location": "N/A (attacker-controlled SSRF payload, typically in HTTP request handler or proxy logic)",
+        "required_permissions": [
+          "network (outbound HTTP access to link-local addresses)"
+        ]
+      },
+      "code_snippet": "TOKEN=`curl -X PUT \"http://169.254.169.254/latest/api/token\" -H \"X-aws-ec2-metadata-token-ttl-seconds: 21600\"`\ncurl -H \"X-aws-ec2-metadata-token: $TOKEN\" -v http://169.254.169.254/latest/meta-data/",
+      "code_language": "shell",
+      "code_behavior": "At runtime, when the SSRF vulnerability is exploited, the code first issues a PUT request to the IMDSv2 token endpoint to acquire a session token, then uses the token in a header to make a subsequent HTTP GET request to the instance metadata endpoint, enabling retrieval of sensitive metadata such as IAM credentials, which are then returned to the attacker via the SSRF channel.",
+      "malice_analysis": {
+        "why_suspicious": "Dynamically acquiring an IMDSv2 session token and using it to access metadata endpoints, especially in response to user-controlled input, is a strong indicator of attempts to bypass IMDSv2 protections for credential theft.",
+        "violated_expectations": "Normal application code should not perform chained PUT and GET requests to the instance metadata service for token acquisition and metadata retrieval in response to external requests, nor should it expose metadata to users.",
+        "similar_legitimate_use": "Cloud automation scripts or instance initialization routines may use this pattern for legitimate configuration, but only during controlled startup processes, not in response to arbitrary user input or web requests.",
+        "key_indicators": [
+          "PUT requests to http://169.254.169.254/latest/api/token for IMDSv2 token acquisition",
+          "Use of X-aws-ec2-metadata-token header in subsequent requests",
+          "Chained requests to /latest/api/token and /latest/meta-data/ endpoints from application code",
+          "Exposure of metadata or credential data in HTTP responses following SSRF exploitation"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker identifies and exploits an SSRF vulnerability in a web application running on an EC2 instance, enabling the attacker to control outbound HTTP requests from the instance.",
+      "implemented_by": [],
+      "leads_to": "Ability to make arbitrary HTTP requests from the EC2 instance, including to internal AWS services."
+    },
+    {
+      "step": 2,
+      "action": "Attacker uses the SSRF vulnerability to send HTTP requests to the EC2 instance metadata service endpoint (IMDSv1 or IMDSv2) to retrieve IAM credentials or other sensitive metadata.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Acquisition of temporary AWS credentials associated with the EC2 instance's IAM role, enabling further unauthorized access."
+    },
+    {
+      "step": 3,
+      "action": "Attacker uses the stolen AWS credentials to access AWS APIs, escalate privileges, or move laterally within the cloud environment.",
+      "implemented_by": [],
+      "leads_to": "Potential full compromise of AWS resources and cloud infrastructure."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "HTTP requests from application code to 169.254.169.254, especially targeting /latest/meta-data/iam/security-credentials",
+      "Chained PUT and GET requests to /latest/api/token and /latest/meta-data/ endpoints indicating IMDSv2 token acquisition and use",
+      "Unusual return of AWS credential-like data in HTTP responses to external users",
+      "Outbound HTTP requests to link-local addresses (169.254.169.254) triggered by user-supplied input"
+    ],
+    "file_indicators": [
+      "Application source code or logs containing hardcoded references to 169.254.169.254 or /latest/meta-data/iam/security-credentials",
+      "Presence of SSRF payloads in logs targeting metadata endpoints (e.g., requests to 169.254.169.254/latest/meta-data/)",
+      "Scripts or code segments that perform chained requests to /latest/api/token and /latest/meta-data/"
+    ],
+    "network_indicators": [
+      "Internal network traffic from EC2 instances to 169.254.169.254, especially following inbound web requests",
+      "Chained requests involving /latest/api/token (PUT) and /latest/meta-data/ (GET) from the same process or session",
+      "Outbound traffic from EC2 instances containing patterns matching AWS access key, secret key, or session token formats"
+    ],
+    "how_to_detect": "Monitor application and network logs for HTTP requests to the EC2 instance metadata service (169.254.169.254), focusing on requests to /latest/meta-data/iam/security-credentials and /latest/api/token, especially when triggered by user input or external requests. Flag any application behavior that returns credential-like data in HTTP responses. Use cloud security posture management tools to identify EC2 instances with IMDSv1 enabled and enforce IMDSv2 with hop limit restrictions. Instrument applications to detect and block SSRF attempts and outbound requests to link-local addresses. Correlate inbound web requests with subsequent metadata service access to identify potential exploitation."
+  }
+}

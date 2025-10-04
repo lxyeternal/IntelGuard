@@ -1,0 +1,100 @@
+{
+  "package_info": {
+    "package_name": "Gadget",
+    "package_manager": "custom Java application (no public package manager)",
+    "package_versions": "N/A (example code, but applies to any version where this pattern is present)",
+    "why_malicious": "The package contains a class that overrides the readObject() method to execute arbitrary code during deserialization, enabling attackers to trigger code execution by supplying crafted serialized objects. This violates the expected safe behavior of deserialization and can be exploited for remote code execution."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "deserialization (import-time/runtime)",
+        "file_location": "Gadget.java (class definition)",
+        "required_permissions": [
+          "filesystem",
+          "runtime execution"
+        ]
+      },
+      "code_snippet": "private final void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {\n    in.defaultReadObject();\n    command.run();\n}",
+      "code_language": "java",
+      "code_behavior": "During deserialization, the code invokes the readObject() method, which calls in.defaultReadObject() to restore fields, then immediately executes the command.run() method, resulting in arbitrary code execution if the command field is attacker-controlled.",
+      "malice_analysis": {
+        "why_suspicious": "The readObject() method is a magic method called automatically during deserialization. By invoking command.run(), it allows attacker-supplied code to execute as soon as a crafted object is deserialized.",
+        "violated_expectations": "Normally, deserialization should only restore object state, not execute arbitrary code. Overriding readObject() to run attacker-controlled code is a clear violation.",
+        "similar_legitimate_use": "readObject() is sometimes overridden for custom deserialization logic, but not for executing untrusted code.",
+        "key_indicators": [
+          "Overridden readObject() method",
+          "Execution of a method (command.run()) on a deserialized field",
+          "No validation or restriction on the command field"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "deserialization (import-time/runtime, as part of gadget chain)",
+        "file_location": "Command.java (class definition)",
+        "required_permissions": [
+          "runtime execution"
+        ]
+      },
+      "code_snippet": "public class Command implements Runnable, Serializable {\n\n   private String command;\n\n   public Command(String command) {\n       this.command = command;\n   }\n\n   @Override\n   public void run() {\n       try {\n           Runtime.getRuntime().exec(command);\n       } catch (IOException e) {\n           throw new RuntimeException(e);\n       }\n   }\n}",
+      "code_language": "java",
+      "code_behavior": "When the run() method is called (triggered by deserialization via the gadget chain), the code executes an OS command specified by the command field using Runtime.getRuntime().exec(), enabling arbitrary command execution.",
+      "malice_analysis": {
+        "why_suspicious": "The run() method executes a command string without validation, and is invoked automatically as part of the deserialization gadget chain, allowing attackers to execute arbitrary system commands.",
+        "violated_expectations": "Normal deserialization should not result in system command execution, especially from untrusted serialized data.",
+        "similar_legitimate_use": "Command pattern classes may use run() to execute safe, predefined actions, but not arbitrary attacker-supplied commands.",
+        "key_indicators": [
+          "Use of Runtime.getRuntime().exec() with unvalidated input",
+          "Implements Runnable and Serializable for chaining",
+          "No input validation or restriction"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker crafts a serialized Gadget object with a Command object as the command field, specifying a malicious command string.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Deserialization of the malicious object"
+    },
+    {
+      "step": 2,
+      "action": "Application deserializes the crafted object, triggering the readObject() method in Gadget.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Execution of command.run()"
+    },
+    {
+      "step": 3,
+      "action": "The run() method of the Command object is executed, which calls Runtime.getRuntime().exec() with the attacker-supplied command.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Arbitrary code execution on the target system"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Overridden readObject() methods that invoke methods on deserialized fields",
+      "Deserialization of objects containing fields of type Runnable or similar interfaces",
+      "Use of Runtime.getRuntime().exec() or similar APIs in deserialization code paths"
+    ],
+    "file_indicators": [
+      "Classes with readObject() methods that execute code",
+      "Serialized files with unexpected or attacker-controlled data (e.g., .ser files with manipulated fields)"
+    ],
+    "network_indicators": [
+      "Unusual outbound connections or command-and-control traffic following deserialization events (if attacker command includes network exfiltration)",
+      "Unexpected network activity from Java processes after deserialization"
+    ],
+    "how_to_detect": "Monitor for Java classes that override readObject() and invoke methods on deserialized fields, especially those that can lead to code execution (e.g., Runnable.run(), ProcessBuilder, or Runtime.exec()). Scan serialized object files for unexpected or manipulated data. Use static analysis to flag deserialization of untrusted data and dynamic monitoring to detect execution of system commands during or immediately after deserialization. Employ allow-lists for deserializable classes and serialization filters to block dangerous types."
+  }
+}

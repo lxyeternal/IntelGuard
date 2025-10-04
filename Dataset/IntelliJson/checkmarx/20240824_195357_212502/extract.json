@@ -1,0 +1,161 @@
+{
+  "package_info": {
+    "package_name": "raspap-webgui",
+    "package_manager": "manual (Debian-based systems)",
+    "package_versions": "≤ 2.6.5",
+    "why_malicious": "The package contains multiple critical vulnerabilities, including unauthenticated and authenticated OS command injection and privilege escalation, allowing attackers to execute arbitrary commands as root, leading to full system compromise."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP GET request)",
+        "file_location": "ajax/networking/get_netcfg.php",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "exec('cat ' . RASPI_DNSMASQ_PREFIX . $interface . '.conf', $return);",
+      "code_language": "php",
+      "code_behavior": "At runtime, the code takes user-supplied input from the 'iface' GET parameter, concatenates it into a shell command, and executes it, allowing arbitrary command execution if special characters are injected.",
+      "malice_analysis": {
+        "why_suspicious": "Directly concatenating unsanitized user input into a shell command enables command injection.",
+        "violated_expectations": "Normal behavior would sanitize or strictly validate input before using it in shell commands; here, user input is used unsafely.",
+        "similar_legitimate_use": "Legitimate use would involve reading configuration files based on validated interface names.",
+        "key_indicators": [
+          "Unsanitized user input in shell command",
+          "No authentication or CSRF protection for GET endpoint",
+          "Command injection via special characters (e.g., ';')"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (HTTP POST request, authenticated)",
+        "file_location": "includes/hostapd.php",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "exec('iwgetid ' . $_POST['interface'] . ' -r', $wifiNetworkID);",
+      "code_language": "php",
+      "code_behavior": "At runtime, the code takes the 'interface' POST parameter, concatenates it into a shell command, and executes it, allowing authenticated users to inject arbitrary commands.",
+      "malice_analysis": {
+        "why_suspicious": "User input is directly inserted into a shell command without sanitization, enabling command injection.",
+        "violated_expectations": "Normal behavior would validate or sanitize interface names before use in shell commands.",
+        "similar_legitimate_use": "Legitimate use would be to query wireless interface names, but only after strict validation.",
+        "key_indicators": [
+          "Direct use of POST parameter in shell command",
+          "No input sanitization",
+          "Potential for command injection"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (HTTP POST request, authenticated, triggered by QR code generation)",
+        "file_location": "app/img/wifi-qr-code.php",
+        "required_permissions": [
+          "filesystem"
+        ]
+      },
+      "code_snippet": "wpa_passphrase=$(touch /tmp/555)",
+      "code_language": "php (injected shell via config)",
+      "code_behavior": "When generating a WiFi QR code, the code reads the SSID and password from the config file, which can contain shell injection payloads (e.g., $(touch /tmp/555)), resulting in arbitrary command execution when the QR code is generated.",
+      "malice_analysis": {
+        "why_suspicious": "The application fails to sanitize special characters in SSID and password fields, allowing shell command injection.",
+        "violated_expectations": "Normal behavior would escape or reject special characters in configuration fields used in shell commands.",
+        "similar_legitimate_use": "Legitimate use would be to generate QR codes for WiFi credentials, not to execute shell commands.",
+        "key_indicators": [
+          "Special characters ($, (, )) allowed in config fields",
+          "Shell command execution via QR code generation",
+          "No comprehensive input sanitization"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "installation-time and runtime (sudoers configuration)",
+        "file_location": "/etc/sudoers.d/090_raspap",
+        "required_permissions": [
+          "root",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "www-data ALL=(ALL) NOPASSWD: /etc/raspap/lighttpd/configport.sh",
+      "code_language": "shell (sudoers file)",
+      "code_behavior": "During installation, the package configures sudoers to allow the web server user (www-data) to execute specific scripts as root without a password. If these scripts are writable by www-data, an attacker can modify them and escalate privileges to root.",
+      "malice_analysis": {
+        "why_suspicious": "Granting passwordless sudo access to scripts writable by a low-privileged user enables privilege escalation.",
+        "violated_expectations": "Normal behavior would restrict sudo access to root-owned, non-writable scripts.",
+        "similar_legitimate_use": "Legitimate use would be to allow controlled service management, but only with secure, root-owned scripts.",
+        "key_indicators": [
+          "Passwordless sudo for www-data",
+          "Writable scripts in sudoers",
+          "Potential for privilege escalation"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted GET request to /ajax/networking/get_netcfg.php with command injection payload in 'iface' parameter.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Arbitrary command execution as www-data user."
+    },
+    {
+      "step": 2,
+      "action": "Attacker leverages www-data access to modify writable scripts listed in sudoers (e.g., /etc/raspap/lighttpd/configport.sh).",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Malicious code is inserted into a script that can be executed as root."
+    },
+    {
+      "step": 3,
+      "action": "Attacker triggers execution of the modified script via sudo, escalating privileges to root.",
+      "implemented_by": [
+        "snippet_4"
+      ],
+      "leads_to": "Full root compromise of the system."
+    },
+    {
+      "step": 4,
+      "action": "Alternatively, an authenticated attacker injects commands via POST to /hostapd_conf or via SSID/password fields, which are executed during AP configuration or QR code generation.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Arbitrary command execution as www-data, which can be chained with privilege escalation."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unsanitized user input in shell command execution",
+      "Passwordless sudo access for web server user",
+      "Modification and execution of writable scripts with root privileges",
+      "Creation of unexpected files (e.g., /tmp/555, /tmp/checkinterface) via web requests"
+    ],
+    "file_indicators": [
+      "/etc/sudoers.d/090_raspap",
+      "/etc/raspap/lighttpd/configport.sh",
+      "/tmp/checkinterface",
+      "/tmp/checkssid",
+      "/tmp/checkpass",
+      "/tmp/555"
+    ],
+    "network_indicators": [
+      "Outbound HTTP requests to attacker-controlled IPs triggered by web requests",
+      "Unexpected connections from www-data or root to external hosts"
+    ],
+    "how_to_detect": "Monitor for web requests to /ajax/networking/get_netcfg.php or /hostapd_conf with suspicious parameters (e.g., containing shell metacharacters). Audit sudoers files for passwordless entries for www-data and check permissions of referenced scripts. Monitor for creation of suspicious files in /tmp and for outbound network connections initiated by www-data or root processes. Alert on modification of scripts in /etc/raspap by non-root users."
+  }
+}

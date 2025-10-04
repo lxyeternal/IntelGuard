@@ -1,0 +1,105 @@
+{
+  "package_info": {
+    "package_name": "clawcluster (example of hijackable Terraform module)",
+    "package_manager": "Terraform Registry",
+    "package_versions": "1.0.0 (and any version referenced by hijacked repo)",
+    "why_malicious": "The entire package is considered malicious because an attacker can hijack the original repository namespace after an organization rename, serve a malicious fork with arbitrary code execution payloads (e.g., reverse shell), and compromise any system that installs the module. This is enabled by the supply chain's reliance on mutable repository URLs and lack of strict identity binding between registry entries and repository ownership."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (during terraform init or apply)",
+        "file_location": "main.tf (within the hijacked Terraform module repository)",
+        "required_permissions": [
+          "filesystem",
+          "network",
+          "process_execution"
+        ]
+      },
+      "code_snippet": "resource \"null_resource\" \"malicious\" {\n  provisioner \"local-exec\" {\n    command = \"bash ./malicious.sh\"\n  }\n}",
+      "code_language": "hcl (HashiCorp Configuration Language) and shell",
+      "code_behavior": "At runtime (terraform init/apply), the code executes a local shell script (malicious.sh) on the host system using the local-exec provisioner, enabling arbitrary command execution and potential remote access.",
+      "malice_analysis": {
+        "why_suspicious": "Executing arbitrary shell scripts from a third-party module during infrastructure provisioning is highly suspicious, as it allows attackers to run any code on the host, including reverse shells or credential theft.",
+        "violated_expectations": "Normal Terraform modules should only define infrastructure resources and not execute arbitrary local commands on the user's machine. The use of local-exec to run attacker-controlled scripts is a clear deviation.",
+        "similar_legitimate_use": "Some legitimate modules may use local-exec for setup tasks, but these should be transparent, well-documented, and not perform sensitive or networked actions.",
+        "key_indicators": [
+          "local-exec provisioner running untrusted scripts",
+          "inclusion of shell scripts in module repository",
+          "lack of transparency or documentation for executed commands"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "postinstall (Composer package installation)",
+        "file_location": "composer.json (post-install-cmd script in hijacked PHP package)",
+        "required_permissions": [
+          "filesystem",
+          "process_execution",
+          "network (if script exfiltrates data)"
+        ]
+      },
+      "code_snippet": "\"scripts\": {\n  \"post-install-cmd\": [\n    \"php malicious.php\"\n  ]\n}",
+      "code_language": "json (Composer config) and php",
+      "code_behavior": "At post-install time, the code executes a PHP script (malicious.php) immediately after package installation, allowing arbitrary code execution on the target system.",
+      "malice_analysis": {
+        "why_suspicious": "Composer scripts that execute attacker-controlled code during installation can lead to immediate compromise of developer, CI/CD, or production environments.",
+        "violated_expectations": "Normal Composer packages should not execute arbitrary code on install, especially code not required for package setup or not documented.",
+        "similar_legitimate_use": "Some packages use post-install-cmd for legitimate setup (e.g., cache warmup), but these should be minimal, auditable, and not perform sensitive actions.",
+        "key_indicators": [
+          "post-install-cmd running untrusted or undocumented scripts",
+          "inclusion of new or modified PHP scripts in hijacked repo",
+          "unexpected network or filesystem activity during install"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker registers a previously used organization name after it is released due to a rename.",
+      "implemented_by": [],
+      "leads_to": "Ability to create a repository with the same name as the original, hijacking the artifact URL."
+    },
+    {
+      "step": 2,
+      "action": "Attacker forks or recreates the original repository and adds malicious payloads (e.g., local-exec in Terraform, post-install-cmd in Composer).",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Malicious code is now served to any consumer referencing the original artifact URL."
+    },
+    {
+      "step": 3,
+      "action": "Victim installs or updates the package/module, triggering execution of the malicious code (reverse shell, arbitrary PHP execution, etc).",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains code execution on victim's system (developer machine, CI/CD, or production)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Execution of local-exec provisioners in Terraform modules from untrusted sources",
+      "Composer packages with post-install-cmd scripts invoking new or modified PHP files",
+      "Unexpected process execution during package/module installation",
+      "Repository URLs in package manifests that resolve to recently created or forked repositories"
+    ],
+    "file_indicators": [
+      "main.tf or other .tf files containing local-exec with untrusted script references",
+      "composer.json with suspicious post-install-cmd entries",
+      "Presence of new shell or PHP scripts in module/package repositories after organization rename"
+    ],
+    "network_indicators": [
+      "Outbound connections initiated by Terraform or Composer install processes",
+      "Reverse shell connections to attacker-controlled IPs/domains",
+      "HTTP requests to artifact URLs that no longer redirect (301) but return 200 OK from a new repo"
+    ],
+    "how_to_detect": "Monitor for package or module installations that trigger local command execution (e.g., local-exec in Terraform, post-install-cmd in Composer). Flag any package whose repository URL has recently changed ownership or was recreated after an organization rename. Alert on installation-time network connections or process launches not typical for the package. Regularly audit package manifests for suspicious script hooks and check the provenance of referenced repositories, especially after organization renames."
+  }
+}

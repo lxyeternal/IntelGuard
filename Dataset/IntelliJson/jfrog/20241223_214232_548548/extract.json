@@ -1,0 +1,125 @@
+{
+  "package_info": {
+    "package_name": "OpenSSH",
+    "package_manager": "system package manager (e.g., apt, yum, pacman), source distribution",
+    "package_versions": "9.5p1 and earlier (prior to 9.6p1), and any implementation supporting ChaCha20-Poly1305 or CBC-EtM ciphers",
+    "why_malicious": "The affected OpenSSH versions contain a protocol-level flaw (CVE-2023-48795, Terrapin) that allows a man-in-the-middle attacker to truncate cryptographic handshake packets, resulting in security downgrades, bypass of keystroke timing obfuscation, and enabling brute-force or credential theft attacks. The flaw is not due to intentionally malicious code, but the protocol behavior enables malicious exploitation."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "handshake-time (during SSH key exchange)",
+        "file_location": "network packet stream (injected by MitM, not in codebase)",
+        "required_permissions": [
+          "network (MitM position between client and server)"
+        ]
+      },
+      "code_snippet": "MitM injects SSH2_MSG_IGNORE packet before handshake concludes (for ChaCha20-Poly1305 cipher).",
+      "code_language": "SSH protocol (binary packet injection)",
+      "code_behavior": "During handshake, the attacker injects a SSH2_MSG_IGNORE packet to manipulate sequence numbers, enabling the removal (truncation) of the EXT_INFO message from the handshake, resulting in protocol downgrade and disabling of security features.",
+      "malice_analysis": {
+        "why_suspicious": "Injection of unexpected protocol packets during handshake is not normal and is used to manipulate protocol state.",
+        "violated_expectations": "SSH handshake should only contain expected packets in a strict order; injected packets like SSH2_MSG_IGNORE are not expected and can disrupt protocol integrity.",
+        "similar_legitimate_use": "SSH2_MSG_IGNORE is a legitimate message for debugging or padding, but not during handshake or for sequence manipulation.",
+        "key_indicators": [
+          "Unexpected SSH2_MSG_IGNORE during handshake",
+          "Sequence number manipulation",
+          "EXT_INFO message missing from handshake"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "handshake-time (during SSH key exchange)",
+        "file_location": "network packet stream (injected by MitM, not in codebase)",
+        "required_permissions": [
+          "network (MitM position between client and server)"
+        ]
+      },
+      "code_snippet": "MitM injects UNKNOWN message before handshake concludes (for CBC-EtM ciphers).",
+      "code_language": "SSH protocol (binary packet injection)",
+      "code_behavior": "During handshake, the attacker injects an UNKNOWN SSH message to manipulate sequence numbers, probabilistically enabling the removal (truncation) of the EXT_INFO message from the handshake, resulting in protocol downgrade and disabling of security features.",
+      "malice_analysis": {
+        "why_suspicious": "Injection of unknown or invalid protocol packets is not expected and is used to disrupt protocol state.",
+        "violated_expectations": "SSH handshake should not contain unknown message types; this is a clear protocol violation.",
+        "similar_legitimate_use": null,
+        "key_indicators": [
+          "Unknown SSH message type during handshake",
+          "Sequence number manipulation",
+          "EXT_INFO message missing from handshake"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "handshake-time (after key exchange, before authentication)",
+        "file_location": "network packet stream (MitM truncates packet)",
+        "required_permissions": [
+          "network (MitM position between client and server)"
+        ]
+      },
+      "code_snippet": "MitM truncates the EXT_INFO message from the handshake packet stream.",
+      "code_language": "SSH protocol (binary packet manipulation)",
+      "code_behavior": "During handshake, the attacker removes the EXT_INFO message, causing the client and server to miss protocol extension negotiation, resulting in fallback to weaker signature algorithms and disabling of keystroke timing obfuscation.",
+      "malice_analysis": {
+        "why_suspicious": "Truncation of protocol packets is a clear sign of tampering and is used to force downgrade or disable security features.",
+        "violated_expectations": "EXT_INFO should always be present if both sides support it; its absence indicates manipulation.",
+        "similar_legitimate_use": null,
+        "key_indicators": [
+          "EXT_INFO message missing",
+          "Downgrade to SHA-1 or password authentication",
+          "Keystroke timing obfuscation disabled"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "MitM intercepts SSH handshake and injects a malicious packet (SSH2_MSG_IGNORE or UNKNOWN) to manipulate sequence numbers.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2"
+      ],
+      "leads_to": "Allows attacker to truncate the EXT_INFO message undetected."
+    },
+    {
+      "step": 2,
+      "action": "MitM truncates the EXT_INFO message from the handshake, removing protocol extension negotiation.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Forces downgrade of signature algorithms and disables keystroke timing obfuscation."
+    },
+    {
+      "step": 3,
+      "action": "Client and server fall back to weaker authentication (e.g., SHA-1, password-based), and keystroke timing obfuscation is bypassed.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Enables brute-force attacks, credential theft, and timing analysis attacks."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unexpected SSH2_MSG_IGNORE or UNKNOWN messages during handshake",
+      "Missing EXT_INFO message in handshake transcript",
+      "Downgrade from key-based to password-based authentication",
+      "Absence of keystroke timing obfuscation in OpenSSH 9.5+ connections"
+    ],
+    "file_indicators": [
+      "No direct file indicators (attack is network-based)",
+      "OpenSSH configuration allowing ChaCha20-Poly1305 or CBC-EtM ciphers"
+    ],
+    "network_indicators": [
+      "Presence of SSH2_MSG_IGNORE or UNKNOWN messages during handshake",
+      "EXT_INFO message missing from handshake",
+      "Abnormal sequence number patterns in SSH handshake",
+      "Downgrade in negotiated signature algorithms (e.g., fallback to SHA-1)"
+    ],
+    "how_to_detect": "Monitor SSH handshake traffic for unexpected SSH2_MSG_IGNORE or UNKNOWN messages during the key exchange phase. Alert if the EXT_INFO message is missing when both client and server support it, or if there is a downgrade in negotiated signature algorithms. Detect if keystroke timing obfuscation is not present in OpenSSH 9.5+ connections. Review SSH server/client logs for errors like 'no mutual signature algorithm' or unexpected fallback to password authentication."
+  }
+}

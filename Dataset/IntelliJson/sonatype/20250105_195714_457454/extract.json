@@ -2,75 +2,54 @@
   "package_info": {
     "package_name": "jackson-databind",
     "package_manager": "Maven (Java)",
-    "package_versions": "All versions unless patched for all listed CVEs; specifically, versions with DefaultTyping enabled and missing blacklist updates",
-    "why_malicious": "The package enables polymorphic deserialization by default (DefaultTyping), which allows attackers to supply malicious serialized objects (gadgets) that can trigger remote code execution (RCE) when deserialized. The core design makes it inherently risky unless strict developer hygiene and explicit type whitelisting are enforced. Multiple CVEs exist due to the evolving blacklist approach, but the fundamental risk persists."
+    "package_versions": "All versions unless patched for all listed CVEs; especially vulnerable when DefaultTyping is enabled",
+    "why_malicious": "The package enables polymorphic deserialization by default (DefaultTyping), which allows attackers to supply malicious serialized objects (gadgets) that can trigger remote code execution (RCE) when deserialized. The risk persists across many versions due to the evolving nature of gadget chains and the inability to fully blacklist all dangerous classes."
   },
   "malicious_snippets": [
     {
       "snippet_id": "snippet_1",
       "execution_context": {
-        "trigger": "runtime (when deserializing untrusted data with DefaultTyping enabled)",
-        "file_location": "Application code using ObjectMapper with DefaultTyping enabled",
+        "trigger": "runtime (during deserialization of untrusted data)",
+        "file_location": "application code using jackson-databind with DefaultTyping enabled",
         "required_permissions": [
-          "filesystem (to read serialized data)",
-          "arbitrary code execution (if exploit succeeds)"
+          "filesystem (if reading serialized data from disk)",
+          "network (if receiving serialized data over the network)",
+          "JVM execution"
         ]
       },
       "code_snippet": "{ \"@class\": \"BaddApp.Obj\", \"val\": [ \"java.lang.Long\", 1 ] }",
-      "code_language": "json (malicious payload for Java deserialization)",
-      "code_behavior": "This payload leverages Jackson's polymorphic deserialization to instantiate an attacker-controlled class (BaddApp.Obj) with attacker-supplied arguments, potentially triggering a gadget chain that leads to arbitrary code execution.",
+      "code_language": "json (malicious serialized payload)",
+      "code_behavior": "At runtime, the code leverages DefaultTyping to deserialize an attacker-supplied object, which instantiates a malicious gadget chain, leading to arbitrary code execution.",
       "malice_analysis": {
-        "why_suspicious": "The payload explicitly sets the @class property, allowing the attacker to control the type instantiated during deserialization. This is a classic gadget-based deserialization attack.",
-        "violated_expectations": "Normal deserialization should only instantiate safe, expected types. Here, arbitrary types can be instantiated based on attacker input.",
-        "similar_legitimate_use": "Polymorphic deserialization is legitimate when used with trusted data and a strict type whitelist.",
+        "why_suspicious": "Deserializing untrusted data with DefaultTyping enabled allows attackers to specify arbitrary classes for instantiation, enabling exploitation via gadget chains.",
+        "violated_expectations": "Normal behavior expects deserialization to be limited to safe, explicitly mapped classes. Here, arbitrary classes can be instantiated based on attacker input.",
+        "similar_legitimate_use": "Polymorphic deserialization is legitimate when all input is trusted and class mappings are tightly controlled.",
         "key_indicators": [
-          "Presence of @class in JSON input",
-          "Deserialization of attacker-controlled types",
-          "No type whitelist or blacklist enforcement"
+          "Presence of '@class' in JSON input",
+          "Deserialization of attacker-controlled class names",
+          "Use of DefaultTyping in ObjectMapper"
         ]
       }
     },
     {
       "snippet_id": "snippet_2",
       "execution_context": {
-        "trigger": "library initialization (class load time); affects all deserialization operations",
-        "file_location": "BeanDeserializerFactory.java (createBeanDeserializer method)",
+        "trigger": "library initialization (class loading)",
+        "file_location": "BeanDeserializerFactory.java (jackson-databind source)",
         "required_permissions": [
-          "none (library code, but enables dangerous behavior)"
+          "none (library-level configuration)"
         ]
       },
-      "code_snippet": "public JsonDeserializer<Object> createBeanDeserializer(DeserializationContext ctxt, JavaType type, BeanDescription beanDesc) throws JsonMappingException { ... }",
+      "code_snippet": "protected final static Set<String> DEFAULT_NO_DESER_CLASS_NAMES;\nstatic {\n  Set<String> s = new HashSet<>();\n  s.add(\"org.apache.commons.collections.functors.InvokerTransformer\");\n  s.add(\"org.apache.commons.collections.functors.InstantiateTransformer\");\n  s.add(\"org.apache.commons.collections4.functors.InvokerTransformer\");\n  s.add(\"org.apache.commons.collections4.functors.InstantiateTransformer\");\n  s.add(\"org.codehaus.groovy.runtime.ConvertedClosure\");\n  s.add(\"org.codehaus.groovy.runtime.MethodClosure\");\n  s.add(\"org.springframework.beans.factory.ObjectFactory\");\n  s.add(\"com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl\");\n  DEFAULT_NO_DESER_CLASS_NAMES = Collections.unmodifiableSet(s);\n}",
       "code_language": "java",
-      "code_behavior": "This method is responsible for creating deserializers for arbitrary Java types. When DefaultTyping is enabled, it allows instantiation of attacker-supplied classes if not blacklisted.",
+      "code_behavior": "At library initialization, the code defines a blacklist of dangerous classes to prevent their deserialization, attempting to block known gadget chains.",
       "malice_analysis": {
-        "why_suspicious": "The method enables deserialization of arbitrary types, which is dangerous if type information is attacker-controlled.",
-        "violated_expectations": "Expected behavior is to only deserialize safe, known types. This method allows dynamic type resolution based on input.",
-        "similar_legitimate_use": "Legitimate for trusted data and explicit type mapping.",
+        "why_suspicious": "While this code is a defensive measure, its presence highlights the ongoing risk: new gadget classes can emerge, and blacklisting is inherently reactive and incomplete.",
+        "violated_expectations": "A secure deserialization mechanism would whitelist only safe classes, rather than attempting to blacklist known dangerous ones.",
+        "similar_legitimate_use": "Blacklisting is a common but less secure mitigation in deserialization libraries.",
         "key_indicators": [
-          "Dynamic type resolution based on input",
-          "No strict type whitelist by default"
-        ]
-      }
-    },
-    {
-      "snippet_id": "snippet_3",
-      "execution_context": {
-        "trigger": "library initialization (static block); applies to all deserialization operations",
-        "file_location": "Class defining DEFAULT_NO_DESER_CLASS_NAMES (e.g., DeserializationConfig.java)",
-        "required_permissions": [
-          "none (library code, but controls deserialization policy)"
-        ]
-      },
-      "code_snippet": "protected final static Set<String> DEFAULT_NO_DESER_CLASS_NAMES;\nstatic {\n  Set<String> s = new HashSet<>();\n  s.add(\"org.apache.commons.collections.functors.InvokerTransformer\");\n  s.add(\"org.apache.commons.collections.functors.InstantiateTransformer\");\n  ...\n  DEFAULT_NO_DESER_CLASS_NAMES = Collections.unmodifiableSet(s);\n}",
-      "code_language": "java",
-      "code_behavior": "Defines a blacklist of dangerous classes that should not be deserialized. This is a mitigation to block known gadget classes.",
-      "malice_analysis": {
-        "why_suspicious": "The need for a growing blacklist indicates the underlying deserialization mechanism is unsafe by design.",
-        "violated_expectations": "Expected: only explicitly allowed types can be deserialized. Actual: all types allowed except those blacklisted.",
-        "similar_legitimate_use": "Blacklists are a common mitigation, but not a substitute for whitelisting.",
-        "key_indicators": [
-          "Blacklist of known dangerous classes",
-          "Reactive rather than proactive mitigation"
+          "Blacklisting of specific class names",
+          "References to known gadget classes used in RCE exploits"
         ]
       }
     }
@@ -78,7 +57,7 @@
   "attack_chain": [
     {
       "step": 1,
-      "action": "Attacker crafts a malicious JSON payload with @class property pointing to a gadget class.",
+      "action": "Attacker crafts a malicious JSON payload specifying a dangerous class via the '@class' property.",
       "implemented_by": [
         "snippet_1"
       ],
@@ -86,36 +65,43 @@
     },
     {
       "step": 2,
-      "action": "Application deserializes the payload using ObjectMapper with DefaultTyping enabled.",
+      "action": "Application deserializes the payload using jackson-databind with DefaultTyping enabled, instantiating the attacker-controlled class.",
       "implemented_by": [
-        "snippet_2"
+        "snippet_1"
       ],
-      "leads_to": "Jackson library attempts to instantiate the attacker-supplied class."
+      "leads_to": "Execution of the gadget chain."
     },
     {
       "step": 3,
-      "action": "If the class is not blacklisted, Jackson instantiates the class, triggering the gadget chain.",
+      "action": "Gadget chain triggers arbitrary code execution within the application context.",
       "implemented_by": [
-        "snippet_3"
+        "snippet_1"
       ],
-      "leads_to": "Arbitrary code execution in the application context."
+      "leads_to": "Attacker gains remote code execution on the server."
+    },
+    {
+      "step": 4,
+      "action": "Library attempts to block known dangerous classes via a blacklist.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Partial mitigation; new gadget classes may bypass blacklist."
     }
   ],
   "detection_knowledge": {
     "behavioral_signatures": [
-      "Deserialization of JSON with @class property from untrusted sources",
+      "Deserialization of JSON containing '@class' property with attacker-controlled values",
       "Use of ObjectMapper with DefaultTyping enabled",
-      "Instantiation of classes not explicitly whitelisted during deserialization"
+      "Instantiation of classes from untrusted input during deserialization"
     ],
     "file_indicators": [
-      "Application code calling objectMapper.enableDefaultTyping()",
-      "Absence of custom TypeResolverBuilder or explicit type whitelisting",
-      "Presence of large or growing blacklists in deserialization config"
+      "ObjectMapper.enableDefaultTyping() in application code",
+      "Absence of custom TypeResolverBuilder or explicit class mappings"
     ],
     "network_indicators": [
-      "Inbound requests containing @class in JSON payloads",
+      "Inbound requests containing serialized JSON with '@class' fields",
       "Unusual outbound connections following deserialization (if RCE is exploited)"
     ],
-    "how_to_detect": "Scan application code for use of ObjectMapper.enableDefaultTyping() or similar APIs. Monitor for inbound JSON payloads containing @class or other type indicators. Audit deserialization logic to ensure only explicitly allowed types are permitted. Review application logs for instantiation of unexpected classes during deserialization. Use runtime instrumentation to detect dynamic class loading from untrusted input."
+    "how_to_detect": "Monitor application code and configuration for use of DefaultTyping in jackson-databind. Inspect incoming JSON payloads for '@class' properties and block or alert on deserialization of untrusted data. Use static analysis to flag ObjectMapper.enableDefaultTyping() and dynamic analysis to detect instantiation of unexpected classes during deserialization."
   }
 }

