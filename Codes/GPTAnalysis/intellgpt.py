@@ -91,8 +91,8 @@ class IntelliLLM:
             # Clean path, remove extra spaces
             original_path = match.strip()
             
-            # Convert Windows path format to macOS format
-            # D:/Desktop/malware/IntelliGraph\Dataset\Image\... -> /Users/blue/Documents/Github/IntelliGraph/Dataset/Image/...
+            # Convert Windows path format to Linux format
+            # D:/Desktop/malware/IntelliGraph\Dataset\Image\... -> /home2/wenbo/Documents/IntelliGraph/Dataset/Image/...
             if original_path.startswith('D:/Desktop/malware/IntelliGraph'):
                 # Replace root path
                 converted_path = original_path.replace('D:/Desktop/malware/IntelliGraph', self.images_dir.replace('/Dataset/Image', ''))
@@ -303,8 +303,8 @@ class IntelliLLM:
         # Convert Stage 2 output results to string
         entities_str = json.dumps(extracted_entities, ensure_ascii=False, indent=2)
         
-        # Build verification prompt, mainly using Stage 2 output results
-        verification_prompt = self.intelli_verify_prompt.replace("{EXTRACTED_ENTITIES}", entities_str)
+        # Build verification prompt with both original content and extracted entities
+        verification_prompt = self.intelli_verify_prompt.replace("{EXTRACTED_ENTITIES}", entities_str).replace("{REPORT_TEXT}", content)
         
         # Build prompt message
         prompt_messages = [
