@@ -46,6 +46,14 @@ NUM_WORKERS = 20  # 修改这个值来控制并行度，例如: 1(单进程), 4(
 # =================================
 
 
+def unique_report_ids(verify_files):
+    """kb_id 用报告目录名，同名时加来源前缀，避免互相覆盖。"""
+    from collections import Counter
+    counts = Counter(f.parent.name for f in verify_files)
+    return {f: (f.parent.name if counts[f.parent.name] == 1 else f"{f.parent.parent.name}__{f.parent.name}")
+            for f in verify_files}
+
+
 def process_single_verify_json(verify_file_path: str) -> Optional[Dict]:
     """
     处理单个verify.json文件（在子进程中运行）
@@ -149,13 +157,17 @@ def main():
                 existing_packages = set()
         
         # 过滤出新文件（跳过已处理的）
-        new_files = [f for f in selected_files if f.parent.name not in existing_packages]
+        report_ids = unique_report_ids(all_verify_files)
+        new_files = [f for f in selected_files if report_ids[f] not in existing_packages]
         skipped_count = len(selected_files) - len(new_files)
         
         if skipped_count > 0:
             logger.info(f"✅ 跳过 {skipped_count} 个已处理的包")
         if len(new_files) == 0:
-            logger.info("✅ 所有文件都已处理，无需重新构建！")
+            logger.info("✅ 所有文件都已处理，无需重新构建！（仍会刷新聚类）")
+            from Codes.KnowledgeBase.cluster_knowledge import build_clusters
+            cl = build_clusters(kb_path)
+            logger.info(f"  - 代码簇: {len(cl['code'])}，行为簇: {len(cl['behavior'])}")
             return
         
         logger.info(f"📝 需要处理 {len(new_files)} 个新包")
@@ -179,7 +191,7 @@ def main():
                         
                         if result is not None:
                             # 复制到临时目录
-                            target_dir = temp_dir / result['kb_id']
+                            target_dir = temp_dir / report_ids[future_to_file[future]]
                             target_dir.mkdir(parents=True, exist_ok=True)
                             
                             # 保存处理后的数据
@@ -191,8 +203,7 @@ def main():
             # 单进程处理（原来的方式）
             logger.info("\n📋 使用单进程处理文件...")
             for verify_file in tqdm(new_files, desc="复制文件"):
-                package_name = verify_file.parent.name
-                target_dir = temp_dir / package_name
+                target_dir = temp_dir / report_ids[verify_file]
                 target_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(verify_file, target_dir / "verify.json")
         
@@ -237,6 +248,15 @@ def main():
         logger.info(f"  - {kb_path / 'code_embeddings.npy'}")
         logger.info(f"  - {kb_path / 'behavior_embeddings.npy'}")
         
+        # 两级 HDBSCAN 聚类，生成 clusters.json
+        logger.info("\n🔗 运行两级 HDBSCAN 知识聚类...")
+        try:
+            from Codes.KnowledgeBase.cluster_knowledge import build_clusters
+            cl = build_clusters(kb_path)
+            logger.info(f"  - 代码簇: {len(cl['code'])}，行为簇: {len(cl['behavior'])}")
+        except Exception as e:
+            logger.error(f"  聚类失败（知识库仍可用，检索退回片段级）: {e}")
+
         logger.info("\n✅ 知识库构建成功！现在可以用于恶意代码检测。")
         logger.info("=" * 80)
         

@@ -16,11 +16,9 @@ import logging
 from dataclasses import dataclass
 import numpy as np
 
-# 假设这些模块存在
-try:
-    from code_slice import LLMCodeSlicer
-except ImportError:
-    print("Warning: code_slice module not found, using mock")
+# 注意：RAGMalwareDetector 不需要导入 LLMCodeSlicer
+# 代码切片由上层 PackageMalwareDetector 完成
+# RAGMalwareDetector 只负责检测已切片的代码
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -47,6 +45,7 @@ class KnowledgeMatch:
     match_type: str  # 'code', 'behavior', or 'combined'
     code_similarity: float = 0.0  # 代码相似度（可选）
     behavior_similarity: float = 0.0  # 行为相似度（可选）
+    cluster_info: Optional[Dict[str, Any]] = None  # 所属行为簇，无聚类时为 None
 
 
 class RAGKnowledgeBase:
@@ -63,6 +62,10 @@ class RAGKnowledgeBase:
         # Embedding仍然是片段级别
         self.code_embeddings = None
         self.behavior_embeddings = None
+        # 聚类结果，可选
+        self.clusters = None
+        self.cluster_centroids = None
+        self.snippet_behavior_cluster = None
         
         # 延迟初始化（只在需要时初始化）
         self.llm_agent = None
@@ -284,6 +287,21 @@ class RAGKnowledgeBase:
         return np.array(embeddings)
     
     def _embed_single(self, text: str, prefix: str = "") -> np.ndarray:
+        """生成单个文本的 embedding，失败重试，不返回 None。"""
+        last_err = None
+        for attempt in range(3):
+            try:
+                emb = self._embed_single_once(text, prefix)
+                if emb is not None and np.asarray(emb).ndim == 1 and float(np.abs(emb).sum()) > 0:
+                    return np.asarray(emb, dtype=np.float32)
+                last_err = "empty embedding"
+            except Exception as e:
+                last_err = e
+            import time as _t
+            _t.sleep(2 * (attempt + 1))
+        raise RuntimeError(f"embedding failed after retries: {last_err}")
+
+    def _embed_single_once(self, text: str, prefix: str = "") -> np.ndarray:
         """生成单个文本的embedding"""
         if self.llm_agent is None:
             return np.random.rand(3072)
@@ -332,7 +350,11 @@ class RAGKnowledgeBase:
         )
         
         # 4. 获取Top-K片段索引
-        top_indices = np.argsort(combined_scores)[::-1][:top_k]
+        #    有聚类时先按行为簇质心锚定，再在簇内按融合分排序
+        if self.clusters is not None and len(self.cluster_centroids) > 0:
+            top_indices = self._cluster_anchored_topk(behavior_emb, combined_scores, top_k)
+        else:
+            top_indices = np.argsort(combined_scores)[::-1][:top_k]
         
         # 5. 通过片段索引查找对应的包和片段
         matches = []
@@ -376,11 +398,40 @@ class RAGKnowledgeBase:
                 similarity_score=float(combined_scores[snippet_idx]),
                 match_type='combined',
                 code_similarity=float(code_similarities[snippet_idx]),
-                behavior_similarity=float(behavior_similarities[snippet_idx])
+                behavior_similarity=float(behavior_similarities[snippet_idx]),
+                cluster_info=self.cluster_info_for(snippet_idx)
             )
             matches.append(match)
         
         return matches
+
+    def _cluster_anchored_topk(self, behavior_emb: np.ndarray, combined_scores: np.ndarray, top_k: int,
+                               n_anchor_clusters: int = 3, max_per_cluster: int = 2) -> List[int]:
+        """簇锚定检索：先选 top 簇，再按分数取片段，每簇最多 max_per_cluster 条。"""
+        q = behavior_emb / (np.linalg.norm(behavior_emb) + 1e-10)
+        cent_sims = self.cluster_centroids @ q
+        anchor = np.argsort(cent_sims)[::-1][:n_anchor_clusters]
+        anchor_ids = {self.clusters["behavior"][int(a)]["id"] for a in anchor}
+        labels = self.snippet_behavior_cluster
+        cand = set(np.where(np.isin(labels, list(anchor_ids)))[0].tolist())
+        cand.update(np.argsort(combined_scores)[::-1][: max(2 * top_k, 10)].tolist())
+        ranked = sorted(cand, key=lambda i: -combined_scores[i])
+        chosen, per_cluster = [], {}
+        for i in ranked:
+            c = int(labels[i])
+            if c >= 0 and per_cluster.get(c, 0) >= max_per_cluster:
+                continue
+            chosen.append(int(i))
+            per_cluster[c] = per_cluster.get(c, 0) + 1
+            if len(chosen) >= top_k:
+                break
+        if len(chosen) < top_k:   # fill from the global ranking if the cap was too strict
+            for i in np.argsort(combined_scores)[::-1]:
+                if int(i) not in chosen:
+                    chosen.append(int(i))
+                if len(chosen) >= top_k:
+                    break
+        return chosen
     
     @staticmethod
     def _cosine_similarity(query: np.ndarray, corpus: np.ndarray) -> np.ndarray:
@@ -445,10 +496,48 @@ class RAGKnowledgeBase:
             self.code_embeddings = np.load(code_emb_file)
             self.behavior_embeddings = np.load(behavior_emb_file)
         
+        self._load_clusters()
         logger.info(
             f"Loaded knowledge base: {len(self.packages)} packages, "
-            f"{len(self.snippet_index)} snippets"
+            f"{len(self.snippet_index)} snippets, "
+            f"{len(self.clusters['behavior']) if self.clusters else 0} behavior clusters"
         )
+
+    def _load_clusters(self):
+        cf = self.kb_path / "clusters.json"
+        cc = self.kb_path / "behavior_cluster_centroids.npy"
+        self.clusters = None
+        if cf.exists() and cc.exists():
+            try:
+                with open(cf, 'r', encoding='utf-8') as f:
+                    clusters = json.load(f)
+                if clusters.get("n_snippets") != len(self.snippet_index):
+                    logger.warning("clusters.json is stale (snippet count differs); run cluster_knowledge.py")
+                    return
+                self.clusters = clusters
+                self.cluster_centroids = np.load(cc)
+                self.snippet_behavior_cluster = np.array(clusters["snippet_behavior_cluster"])
+                self.cluster_by_id = {c["id"]: c for c in clusters["behavior"]}
+            except Exception as e:
+                logger.warning(f"failed to load clusters: {e}")
+                self.clusters = None
+
+    def cluster_summary(self) -> Dict[str, Any]:
+        if not self.clusters:
+            return {}
+        return {"behavior_clusters": len(self.clusters["behavior"]), "code_clusters": len(self.clusters["code"]),
+                "params": self.clusters["params"]}
+
+    def cluster_info_for(self, snippet_idx: int) -> Optional[Dict[str, Any]]:
+        if self.clusters is None or self.snippet_behavior_cluster is None:
+            return None
+        cid = int(self.snippet_behavior_cluster[snippet_idx])
+        if cid < 0:
+            return {"behavior_cluster": -1, "size": 1, "unified_explanation": "(unclustered / noise)"}
+        c = self.cluster_by_id[cid]
+        return {"behavior_cluster": cid, "size": c["size"], "n_packages": c["n_packages"],
+                "predicates": c["predicates"], "unified_explanation": c["unified_explanation"],
+                "representative_behavior": c["representative_behavior"], "top_triggers": c["top_triggers"]}
 
 
 class RAGMalwareDetector:
@@ -457,62 +546,75 @@ class RAGMalwareDetector:
     def __init__(
         self, 
         knowledge_base: RAGKnowledgeBase,
-        llm_agent=None
+        llm_agent=None,
+        similarity_threshold: Optional[float] = None
     ):
+        """
+        初始化RAG检测器
+        
+        Args:
+            knowledge_base: RAG知识库
+            llm_agent: LLM代理
+            similarity_threshold: 相似度阈值过滤
+                - None: 不过滤，所有检索结果都传给LLM（默认）
+                - float (如0.5): 只传相似度 >= 该阈值的结果
+                - 如果所有结果都 < 阈值，会告知LLM依靠自身知识判断
+        """
         self.kb = knowledge_base
-        self.code_slicer = LLMCodeSlicer(llm_agent=llm_agent) if llm_agent else None
+        # 注意：不需要 code_slicer，代码切片由上层 PackageMalwareDetector 完成
+        # RAGMalwareDetector 只负测已切片的代码
         self.llm_agent = llm_agent
+        self.similarity_threshold = similarity_threshold
+        self.detection_prompt = self._load_detection_prompt()
+    
+    def _load_detection_prompt(self) -> str:
+        """加载RAG检测提示词模板"""
+        prompt_path = Path(__file__).parent / "rag_detection_prompt.txt"
+        
+        if prompt_path.exists():
+            return prompt_path.read_text(encoding='utf-8')
+        else:
+            logger.warning(
+                f"Detection prompt file not found at {prompt_path}. "
+                "Using fallback prompt."
+            )
+            # 提供一个简单的fallback
+            return """Analyze if the following code is malicious.
+
+Code:
+```
+{code}
+```
+
+Behavior: {behavior_summary}
+
+Similar patterns:
+{knowledge_context}
+
+Output JSON:
+{{
+  "is_malicious": "yes/no",
+  "confidence": 0.0-1.0,
+  "malicious_behavior": "description or 'none'",
+  "reasoning": "explanation",
+  "evidence": ["evidence1", "evidence2"],
+  "matched_patterns": ["pattern1"]
+}}"""
     
     def detect_package(self, package_path: str) -> Dict[str, Any]:
         """
-        检测整个包
+        【废弃方法】检测整个包
         
-        流程：
-        1. 代码切片
-        2. 为每个切片生成行为summary
-        3. RAG检索相似知识
-        4. LLM增强分析
+        注意：此方法已废弃！请使用 PackageMalwareDetector.detect_package() 代替。
+        RAGMalwareDetector 只负责检测已切片的代码，不负责代码切片。
+        
+        保留此方法仅为向后兼容，不应在新代码中使用。
         """
-        logger.info(f"Detecting package: {package_path}")
-        
-        # 1. 代码切片
-        if self.code_slicer is None:
-            logger.warning("No code slicer available, skipping slicing")
-            return {"error": "Code slicer not initialized"}
-        
-        slice_result = self.code_slicer.slice_package(package_path)
-        
-        if not slice_result.get('files'):
-            return {"error": "No files to analyze"}
-        
-        # 2. 分析每个文件的每个切片
-        detection_results = []
-        
-        for file_result in slice_result['files']:
-            if file_result['status'] != 'success':
-                continue
-            
-            file_path = file_result['file_path']
-            
-            for slice_data in file_result.get('slices', []):
-                slice_detection = self._detect_slice(
-                    code=slice_data['code'],
-                    behavior_summary=slice_data.get('behavior_summary', ''),  # 使用切片时生成的summary
-                    file_path=file_path,
-                    slice_id=slice_data['slice_id']
-                )
-                detection_results.append(slice_detection)
-        
-        # 3. 汇总结果
-        summary = self._summarize_detection(detection_results)
-        
-        return {
-            'package_path': package_path,
-            'total_slices_analyzed': len(detection_results),
-            'malicious_slices': [r for r in detection_results if r['is_suspicious']],
-            'summary': summary,
-            'details': detection_results
-        }
+        logger.warning(
+            "⚠️  detect_package() 方法已废弃！"
+            "请使用 PackageMalwareDetector.detect_package() 代替。"
+        )
+        return {"error": "此方法已废弃，请使用 PackageMalwareDetector.detect_package()"}
     
     def _detect_slice(
         self, 
@@ -522,71 +624,13 @@ class RAGMalwareDetector:
         slice_id: str
     ) -> Dict[str, Any]:
         """
-        检测单个代码切片
+        【废弃方法】检测单个代码切片
         
-        核心步骤：
-        1. 使用切片时生成的behavior_summary（避免重复LLM调用）
-        2. RAG检索
-        3. LLM增强分析
+        注意：此方法已废弃！请使用 detect() 方法代替。
+        此方法返回的格式与 detect() 不同，不应在新代码中使用。
         """
-        # 1. 如果没有提供behavior_summary，则生成（降级处理）
-        if not behavior_summary:
-            behavior_summary = self._generate_behavior_summary(code)
-        
-        # 2. RAG检索相似知识
-        similar_matches = self.kb.retrieve_similar(
-            query_code=code,
-            query_behavior=behavior_summary,
-            top_k=5
-        )
-        
-        # 3. LLM增强分析
-        analysis_result = self._llm_enhanced_analysis(
-            code=code,
-            behavior=behavior_summary,
-            similar_matches=similar_matches
-        )
-        
-        return {
-            'slice_id': slice_id,
-            'file_path': file_path,
-            'code': code,
-            'behavior_summary': behavior_summary,
-            'similar_matches': [
-                {
-                    # 基本匹配信息
-                    'match_id': m.match_id,
-                    'source_package': m.source_package,
-                    'similarity_score': m.similarity_score,
-                    
-                    # 片段级别信息
-                    'snippet_id': m.matched_snippet.get('snippet_id', ''),
-                    'matched_code': m.matched_snippet.get('code_snippet', ''),
-                    'matched_behavior': m.matched_snippet.get('code_behavior', ''),
-                    'malice_analysis': m.matched_snippet.get('malice_analysis', {}),
-                    'execution_context': m.matched_snippet.get('execution_context', {}),
-                    
-                    # 包级别信息（关键！）
-                    'package_info': {
-                        'package_name': m.matched_snippet.get('package_name', ''),
-                        'package_manager': m.matched_snippet.get('package_manager', ''),
-                        'package_versions': m.matched_snippet.get('package_versions', ''),
-                        'why_malicious': m.matched_snippet.get('why_malicious', ''),
-                    },
-                    
-                    # 包级别的检测知识
-                    'detection_knowledge': m.matched_snippet.get('detection_knowledge', {}),
-                    
-                    # 包级别的攻击链
-                    'attack_chain': m.matched_snippet.get('attack_chain', []),
-                }
-                for m in similar_matches
-            ],
-            'is_suspicious': analysis_result['is_suspicious'],
-            'confidence': analysis_result['confidence'],
-            'reasoning': analysis_result['reasoning'],
-            'evidence': analysis_result['evidence']
-        }
+        logger.warning("⚠️  _detect_slice() 方法已废弃！请使用 detect() 方法代替。")
+        return {"error": "此方法已废弃"}
     
     def _generate_behavior_summary(self, code: str) -> str:
         """生成代码行为summary"""
@@ -620,60 +664,70 @@ Provide ONLY the behavior summary, no additional text."""
         self, 
         code: str, 
         behavior: str, 
-        similar_matches: List[KnowledgeMatch]
+        similar_matches: List[KnowledgeMatch],
+        no_match_reason: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        LLM增强分析
+        LLM增强分析（使用提示词模板）
         
         关键：将检索到的malice_analysis和示例代码作为上下文
+        
+        Args:
+            code: 代码片段
+            behavior: 行为描述
+            similar_matches: RAG检索到的相似匹配
+            no_match_reason: 无匹配的原因（如果提供，表示需要LLM依靠自身知识）
         """
-        if self.llm_agent is None or not similar_matches:
+        if self.llm_agent is None:
             return {
                 'is_suspicious': False,
+                'is_malicious': 'no',
                 'confidence': 0.0,
-                'reasoning': 'No LLM agent or no matches',
-                'evidence': []
+                'reasoning': 'No LLM agent available',
+                'evidence': [],
+                'malicious_behavior': 'none',
+                'matched_patterns': []
             }
         
-        # 构建上下文
-        context = self._build_analysis_context(similar_matches)
+        # 构建知识库上下文
+        if not similar_matches:
+            if no_match_reason:
+                # 有原因说明（被阈值过滤了），提示LLM依靠自身知识
+                knowledge_context = f"""
+**Note:** {no_match_reason}
+
+Please analyze the code based on your own knowledge of malicious code patterns, 
+common attack techniques, and security best practices.
+"""
+            else:
+                # 原始就没有匹配
+                return {
+                    'is_suspicious': False,
+                    'is_malicious': 'no',
+                    'confidence': 0.0,
+                    'reasoning': 'No similar patterns in knowledge base',
+                    'evidence': [],
+                    'malicious_behavior': 'none',
+                    'matched_patterns': []
+                }
+        else:
+            # 有匹配，构建上下文
+            knowledge_context = self._build_analysis_context(similar_matches)
         
-        prompt = f"""You are a security analyst. Analyze whether the following code is malicious.
-
-            **New Code to Analyze:**
-            ```
-            {code}
-            ```
-
-            **Behavior Summary:**
-            {behavior}
-
-            **Similar Known Malicious Patterns (from knowledge base):**
-
-            {context}
-
-            **Your Task:**
-            1. Compare the new code with the known malicious patterns
-            2. Determine if the new code is suspicious or malicious
-            3. Provide confidence score (0.0-1.0)
-            4. Explain your reasoning with specific evidence
-
-            **Output Format (JSON):**
-            {{
-            "is_suspicious": true/false,
-            "confidence": 0.0-1.0,
-            "reasoning": "detailed explanation",
-            "evidence": ["evidence 1", "evidence 2", ...]
-            }}
-
-            Provide ONLY the JSON output."""
+        # 使用模板文件填充变量
+        prompt = self.detection_prompt.format(
+            code=code,
+            behavior_summary=behavior,
+            num_matches=len(similar_matches),
+            knowledge_context=knowledge_context
+        )
 
         try:
             # 使用LLMAgent的perform_query方法
             messages = [{"role": "user", "content": prompt}]
             response = self.llm_agent.perform_query(messages, extract_json=True)
             
-            # 解析JSON响应
+            # 解析JSON响应（新格式）
             result = self._parse_llm_response(response)
             return result
         
@@ -683,7 +737,9 @@ Provide ONLY the behavior summary, no additional text."""
                 'is_suspicious': False,
                 'confidence': 0.0,
                 'reasoning': f'Analysis error: {e}',
-                'evidence': []
+                'evidence': [],
+                'malicious_behavior': 'none',
+                'matched_patterns': []
             }
     
     def _build_analysis_context(self, matches: List[KnowledgeMatch]) -> str:
@@ -714,12 +770,23 @@ Provide ONLY the behavior summary, no additional text."""
 
                 **Key Indicators:**
                 {chr(10).join('- ' + ind for ind in malice.get('key_indicators', []))}
+                {self._cluster_context(match)}
                 """)
         
         return "\n".join(context_parts)
+
+    @staticmethod
+    def _cluster_context(match: KnowledgeMatch) -> str:
+        """行为簇级别的统一解释，拼进提示词。"""
+        ci = match.cluster_info
+        if not ci or ci.get("behavior_cluster", -1) < 0:
+            return ""
+        return (f"**Behavior Concept (cluster of {ci.get('size')} known-malicious snippets from "
+                f"{ci.get('n_packages')} reports):** {ci.get('unified_explanation')}. "
+                f"Typical trigger(s): {', '.join(ci.get('top_triggers', {}).keys()) or 'n/a'}.")
     
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:
-        """解析LLM响应"""
+        """解析LLM响应（支持新的JSON格式）"""
         # 尝试提取JSON
         import re
         
@@ -732,14 +799,35 @@ Provide ONLY the behavior summary, no additional text."""
         
         try:
             result = json.loads(json_str)
+            
+            # 转换新格式到旧格式（保持向后兼容）
+            # 新格式: is_malicious (yes/no), malicious_behavior, matched_patterns
+            # 旧格式: is_suspicious (bool)
+            if 'is_malicious' in result:
+                # 转换 yes/no 为 boolean
+                is_malicious_str = str(result.get('is_malicious', 'no')).lower()
+                result['is_suspicious'] = is_malicious_str in ['yes', 'true', '1']
+            
+            # 确保所有必需字段存在
+            result.setdefault('confidence', 0.0)
+            result.setdefault('reasoning', '')
+            result.setdefault('evidence', [])
+            result.setdefault('malicious_behavior', 'none')
+            result.setdefault('matched_patterns', [])
+            
             return result
-        except json.JSONDecodeError:
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {e}\nResponse: {response[:200]}")
             # 降级处理
             return {
                 'is_suspicious': False,
+                'is_malicious': 'no',
                 'confidence': 0.0,
                 'reasoning': 'Failed to parse LLM response',
                 'evidence': [],
+                'malicious_behavior': 'none',
+                'matched_patterns': [],
                 'raw_response': response
             }
     
@@ -762,67 +850,118 @@ Provide ONLY the behavior summary, no additional text."""
     def detect(
         self, 
         code_snippet: str, 
-        code_behavior: str, 
-        malice_threshold: float = 0.5
+        code_behavior: str
     ) -> 'DetectionResult':
         """
-        简化的检测接口（用于测试）
+        RAG + LLM 检测接口
         
-        直接检测给定的代码片段和行为描述，不需要代码切片
+        流程：
+        1. RAG检索相似的恶意模式
+        2. 根据similarity_threshold过滤结果
+        3. LLM分析代码是否恶意
+        4. 只依赖LLM的is_malicious判断（yes/no）
         
         Args:
             code_snippet: 代码片段
             code_behavior: 代码行为描述
-            malice_threshold: 恶意判定阈值（默认0.5）
         
         Returns:
             DetectionResult对象
         """
-        # RAG检索相似知识
+        # 1. RAG检索相似知识
         similar_matches = self.kb.retrieve_similar(
             query_code=code_snippet,
             query_behavior=code_behavior,
             top_k=5
         )
         
-        # 计算恶意度分数（基于相似度和匹配数量）
-        if not similar_matches:
-            malice_score = 0.0
-            confidence = 1.0
-            is_malicious = False
-            explanation = "未找到相似的恶意模式"
-        else:
-            # 恶意度 = 加权相似度（top匹配权重更高）
-            weights = [1.0, 0.8, 0.6, 0.4, 0.2][:len(similar_matches)]
-            weighted_sim = sum(m.similarity_score * w for m, w in zip(similar_matches, weights))
-            malice_score = weighted_sim / sum(weights)
+        # 2. 根据相似度阈值过滤结果
+        filtered_matches = similar_matches
+        original_count = len(similar_matches)
+        
+        if self.similarity_threshold is not None and similar_matches:
+            # 过滤掉相似度低于阈值的结果
+            filtered_matches = [
+                m for m in similar_matches 
+                if m.similarity_score >= self.similarity_threshold
+            ]
             
-            # 置信度基于匹配数量和相似度方差
-            confidence = min(len(similar_matches) / 5.0, 1.0)
-            if similar_matches:
-                similarities = [m.similarity_score for m in similar_matches]
-                variance = sum((s - malice_score) ** 2 for s in similarities) / len(similarities)
-                confidence *= (1.0 - min(variance, 0.5))  # 方差越小，置信度越高
-            
-            is_malicious = malice_score >= malice_threshold
-            
-            # 生成说明
-            if is_malicious:
-                top_match = similar_matches[0]
-                snippet = top_match.matched_snippet
-                explanation = (
-                    f"检测到与已知恶意包 '{snippet['package_name']}' 的相似模式 "
-                    f"(相似度: {top_match.similarity_score:.4f})"
+            if len(filtered_matches) < original_count:
+                logger.info(
+                    f"Filtered matches: {original_count} -> {len(filtered_matches)} "
+                    f"(threshold: {self.similarity_threshold})"
+                )
+        
+        # 3. 如果没有匹配（原始就没有，或过滤后为空）
+        if not filtered_matches:
+            # 如果是因为阈值过滤导致为空，使用LLM自身知识判断
+            if original_count > 0 and self.similarity_threshold is not None:
+                logger.info(
+                    f"All {original_count} matches below threshold {self.similarity_threshold}, "
+                    "relying on LLM's own knowledge"
+                )
+                # 传递一个特殊标记，让LLM知道需要依靠自身知识
+                llm_analysis = self._llm_enhanced_analysis(
+                    code=code_snippet,
+                    behavior=code_behavior,
+                    similar_matches=[],  # 空列表表示无有效匹配
+                    no_match_reason=f"No matches above similarity threshold {self.similarity_threshold}"
                 )
             else:
-                explanation = f"相似度较低 (最高: {similar_matches[0].similarity_score:.4f})，可能为正常代码"
+                # 原始就没有匹配
+                return DetectionResult(
+                    is_malicious=False,
+                    malice_score=0.0,
+                    confidence=1.0,
+                    explanation="No similar malicious patterns found in knowledge base, classified as benign code",
+                    matched_knowledge=[]
+                )
+        else:
+            # 4. 使用LLM进行增强分析（有有效匹配）
+            llm_analysis = self._llm_enhanced_analysis(
+                code=code_snippet,
+                behavior=code_behavior,
+                similar_matches=filtered_matches
+            )
+        
+        # 5. 解析LLM结果
+        # 关键：只依赖 is_malicious (yes/no)
+        is_malicious_str = str(llm_analysis.get('is_malicious', 'no')).lower()
+        is_malicious = is_malicious_str in ['yes', 'true', '1']
+        
+        # confidence 保留但不用于判断
+        confidence = float(llm_analysis.get('confidence', 0.0))
+        
+        # 计算一个参考分数（基于相似度，但不用于判断）
+        # 使用过滤后的匹配计算分数
+        if filtered_matches:
+            weights = [1.0, 0.8, 0.6, 0.4, 0.2][:len(filtered_matches)]
+            weighted_sim = sum(m.similarity_score * w for m, w in zip(filtered_matches, weights))
+            malice_score = weighted_sim / sum(weights)
+        else:
+            malice_score = 0.0
+        
+        # 生成说明
+        reasoning = llm_analysis.get('reasoning', '')
+        malicious_behavior = llm_analysis.get('malicious_behavior', 'none')
+        
+        if is_malicious:
+            explanation = f"[LLM Judgment: Malicious] {reasoning}"
+            if malicious_behavior != 'none':
+                explanation += f" | Malicious Behavior: {malicious_behavior}"
+        else:
+            explanation = f"[LLM Judgment: Benign] {reasoning}"
+        
+        # 如果使用了阈值过滤，在说明中注明
+        if self.similarity_threshold is not None and original_count > len(filtered_matches):
+            explanation += f" | Similarity filter: {original_count} -> {len(filtered_matches)} matches (threshold: {self.similarity_threshold})"
         
         return DetectionResult(
             is_malicious=is_malicious,
-            malice_score=malice_score,
-            confidence=confidence,
-            matched_knowledge=similar_matches,
-            explanation=explanation
+            malice_score=malice_score,  # 仅供参考
+            confidence=confidence,  # 仅供参考
+            explanation=explanation,
+            matched_knowledge=filtered_matches  # 使用过滤后的匹配
         )
 
 
@@ -841,17 +980,17 @@ class DetectionResult:
 def main():
     """示例使用"""
     # 1. 构建知识库
-    kb = RAGKnowledgeBase(kb_path="/Users/blue/Documents/Github/IntelliGraph/KnowledgeBase")
+    kb = RAGKnowledgeBase(kb_path="/home2/wenbo/Documents/IntelliGraph/KnowledgeBase")
     
     # 构建知识库（首次运行）
-    # kb.build_from_verify_jsons("/Users/blue/Documents/Github/IntelliGraph/Dataset/IntelliJson")
+    # kb.build_from_verify_jsons("/home2/wenbo/Documents/IntelliGraph/Dataset/IntelliJson")
     
     # 或加载已有知识库
     try:
         kb.load_kb()
     except FileNotFoundError:
         logger.info("Building new knowledge base...")
-        kb.build_from_verify_jsons("/Users/blue/Documents/Github/IntelliGraph/Dataset/IntelliJson")
+        kb.build_from_verify_jsons("/home2/wenbo/Documents/IntelliGraph/Dataset/IntelliJson")
     
     # 2. 创建检测器
     # detector = RAGMalwareDetector(knowledge_base=kb, llm_agent=your_llm_agent)
