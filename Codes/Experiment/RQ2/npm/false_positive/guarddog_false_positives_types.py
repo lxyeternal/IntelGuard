@@ -1,12 +1,14 @@
+"""Detection types of guarddog false positives."""
 import os
 import glob
 import re
 from collections import defaultdict
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 def extract_detection_types(file_path):
-    """
-    从guarddog检测文件中提取检测类型（如obfuscation, code-execution, shady-links等）
-    """
+    """Detection types in a guarddog result file."""
     types = []
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -27,11 +29,10 @@ def extract_detection_types(file_path):
         return []
 
 def main():
-    """主函数，分析guarddog假阳性文件的检测类型"""
-    base_path = "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/npm/results"
-    output_file = "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/npm/false_positive/guarddog_false_positives_types.txt"
+    """Entry point."""
+    base_path = f"{PROJECT_ROOT}/Codes/Experiment/RQ2/npm/results"
+    output_file = f"{PROJECT_ROOT}/Codes/Experiment/RQ2/npm/false_positive/guarddog_false_positives_types.txt"
     
-    # 可以选择分析哪个数据集: "evaluation" 或 "obfuscation"
     dataset_types = ["evaluation"]
     
     false_positives = []
@@ -43,20 +44,17 @@ def main():
         benign_folder = os.path.join(base_path, dataset_type, "guarddog", "benign")
         
         if not os.path.exists(benign_folder):
-            print(f"警告: 目录不存在 {benign_folder}")
+            print(f"Warning: directory not found {benign_folder}")
             continue
             
-        print(f"开始分析目录: {benign_folder}")
+        print(f"Analyzing directory: {benign_folder}")
         
-        # 遍历每个包文件夹
         for package_name in os.listdir(benign_folder):
             package_folder = os.path.join(benign_folder, package_name)
             
-            # 确保是文件夹
             if not os.path.isdir(package_folder):
                 continue
                 
-            # 读取result.txt
             result_file = os.path.join(package_folder, "result.txt")
             if not os.path.exists(result_file):
                 continue
@@ -73,29 +71,29 @@ def main():
                     files_by_type[detection_type].append(package_identifier)
     
     with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(f"Guarddog假阳性文件类型统计 (错误地将良性识别为恶意)\n")
-        f.write(f"总共找到 {len(false_positives)} 个假阳性 (占良性样本总数 {total_benign} 的 {len(false_positives)/total_benign*100:.2f}%)\n\n")
+        f.write(f"Guarddog false positive types (benign flagged as malicious)\n")
+        f.write(f"{len(false_positives)} false positives out of {total_benign} benign packages ({len(false_positives)/total_benign*100:.2f}%)\n\n")
         
-        f.write("检测类型统计：\n")
+        f.write("Detection types:\n")
         f.write("=" * 30 + "\n")
         for detection_type, count in sorted(type_counts.items(), key=lambda x: x[1], reverse=True):
-            f.write(f"{detection_type}: {count} 个文件 ({count/len(false_positives)*100:.2f}%)\n")
+            f.write(f"{detection_type}: {count} files ({count/len(false_positives)*100:.2f}%)\n")
         
-        f.write("\n\n详细分类列表：\n")
+        f.write("\n\nPackages per type:\n")
         f.write("=" * 30 + "\n")
         for detection_type, packages in sorted(files_by_type.items(), key=lambda x: len(x[1]), reverse=True):
-            f.write(f"\n## {detection_type} ({len(packages)} 个包):\n")
+            f.write(f"\n## {detection_type} ({len(packages)} packages):\n")
             for i, package_identifier in enumerate(sorted(packages), 1):
                 f.write(f"{i}. {package_identifier}\n")
         
-        f.write("\n\n所有假阳性文件及其检测类型：\n")
+        f.write("\n\nAll false positives and their detection types:\n")
         f.write("=" * 30 + "\n")
         for i, (package_identifier, types) in enumerate(sorted(false_positives, key=lambda x: x[0]), 1):
             f.write(f"{i}. {package_identifier}\n")
-            f.write(f"   检测类型: {', '.join(types)}\n\n")
+            f.write(f"   types: {', '.join(types)}\n\n")
     
-    print(f"分析完成! 发现 {len(false_positives)} 个假阳性")
-    print(f"结果已保存到: {output_file}")
+    print(f"Done: {len(false_positives)} false positives")
+    print(f"Results written to: {output_file}")
 
 if __name__ == "__main__":
     main() 

@@ -1,3 +1,4 @@
+"""Detect npm packages with an LLM over whole files."""
 import os
 import sys
 import json
@@ -9,9 +10,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from functools import partial
 
-# 添加GPTAnalysis路径
-sys.path.append("/home2/wenbo/Documents/IntelliGraph/Codes/GPTAnalysis")
+sys.path.append(f"{PROJECT_ROOT}/Codes/GPTAnalysis")
 from llmquery import LLMAgent
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,8 +27,8 @@ DETECTION_TIMEOUT = 300
 MAX_FILES_PER_PACKAGE = 10
 
 def load_prompt_template() -> str:
-    """Load malware detection prompt template from file"""
-    prompt_file = "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/npm/malware_detect_prompt.txt"
+    """Read the detection prompt."""
+    prompt_file = f"{PROJECT_ROOT}/Codes/Experiment/RQ2/npm/malware_detect_prompt.txt"
     try:
         with open(prompt_file, 'r', encoding='utf-8') as f:
             return f.read()
@@ -38,15 +40,12 @@ def load_prompt_template() -> str:
         raise
 
 def init_worker():
-    """Initialize worker process with its own LLM agent"""
+    """Create the LLM agent of a worker."""
     global llm_agent
     llm_agent = LLMAgent()
 
 def prioritize_files(file_paths: List[str], base_path: str) -> List[str]:
-    """
-    Prioritize files with index.js and package.json first,
-    then limit to MAX_FILES_PER_PACKAGE files
-    """
+    """Order files with index.js and package.json first."""
     priority_files = []
     other_files = []
     
@@ -54,16 +53,13 @@ def prioritize_files(file_paths: List[str], base_path: str) -> List[str]:
         relative_path = os.path.relpath(file_path, base_path)
         filename = os.path.basename(file_path)
         
-        # Priority 1: index.js
         if filename == "index.js":
             priority_files.insert(0, file_path)
-        # Priority 2: package.json
         elif filename == "package.json":
             priority_files.insert(1 if priority_files else 0, file_path)
         else:
             other_files.append(file_path)
     
-    # Combine priority files and other files, limit to MAX_FILES_PER_PACKAGE
     all_files = priority_files + other_files
     return all_files[:MAX_FILES_PER_PACKAGE]
 
@@ -74,7 +70,7 @@ def process_package_worker(
     output_paths: Dict[str, str],
     malware_detect_prompt: str
 ) -> None:
-    """Function for processing a single NPM package"""
+    """Worker: detect one package."""
     data_type, package_name = task
     
     try:
@@ -92,7 +88,6 @@ def process_package_worker(
         logger.info(f"Start processing {data_type}/{package_name}...")
         start_time = time.time()
         
-        # Search for .js and .json files
         js_files = glob.glob(f"{unzip_folder_path}/**/*.js", recursive=True)
         json_files = glob.glob(f"{unzip_folder_path}/**/package.json", recursive=True)
         all_files = js_files + json_files
@@ -112,7 +107,6 @@ def process_package_worker(
                 
             return
         
-        # Prioritize and limit files
         selected_files = prioritize_files(all_files, unzip_folder_path)
         
         logger.info(f"Analyzing package {package_name} with GPT-4.1-mini ({len(selected_files)}/{len(all_files)} files)")
@@ -162,7 +156,7 @@ def process_package_worker(
 
 
 def analyze_file(file_path: str, malware_detect_prompt: str, llm_agent: LLMAgent) -> Dict[str, Any]:
-    """Use OpenAI to analyze a single JavaScript/JSON file"""
+    """Ask the LLM about one file."""
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             code_content = f.read()
@@ -174,8 +168,7 @@ def analyze_file(file_path: str, malware_detect_prompt: str, llm_agent: LLMAgent
                 "malicious_behavior": ""
             }
         
-        # Limit code content to avoid token limits
-        max_code_length = 50000  # characters
+        max_code_length = 50000
         if len(code_content) > max_code_length:
             code_content = code_content[:max_code_length] + "\n... [truncated]"
         
@@ -224,12 +217,14 @@ def analyze_file(file_path: str, malware_detect_prompt: str, llm_agent: LLMAgent
 
 
 class NPMOpenAIDetector:
+    """Run detection over the dataset."""
     def __init__(self):
-        self.base_path = "/home2/wenbo/Documents/IntelliGraph/Dataset/NPM/evaluation"
+        """Set the paths and the prompt."""
+        self.base_path = f"{PROJECT_ROOT}/Dataset/NPM/evaluation"
         self.unzip_benign_path = os.path.join(self.base_path, "unzip_benign")
         self.unzip_malware_path = os.path.join(self.base_path, "unzip_malware")
         
-        self.output_base = "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/npm/results/evaluation"
+        self.output_base = f"{PROJECT_ROOT}/Codes/Experiment/RQ2/npm/results/evaluation"
         self.output_paths = {
             "benign": os.path.join(self.output_base, "gpt-4.1-mini", "benign"),
             "malware": os.path.join(self.output_base, "gpt-4.1-mini", "malware")
@@ -245,16 +240,16 @@ class NPMOpenAIDetector:
         self.skipped_count = 0
         
     def _ensure_output_dirs(self):
-        """Ensure all output directories exist"""
+        """Create output directories."""
         for category in self.output_paths:
             os.makedirs(self.output_paths[category], exist_ok=True)
     
     def analyze_file(self, file_path: str) -> Dict[str, Any]:
-        """Use global function to analyze a single file wrapper method"""
+        """Ask the LLM about one file."""
         return analyze_file(file_path, self.malware_detect_prompt, self.llm_agent)
     
     def process_package(self, data_type: str, package_name: str) -> None:
-        """Method for processing a single package in single-process mode"""
+        """Detect one package."""
         process_package_worker(
             (data_type, package_name),
             self.unzip_benign_path,
@@ -265,7 +260,7 @@ class NPMOpenAIDetector:
         self.processed_count += 1
     
     def process_all_packages(self, num_processes=NUM_PROCESSES):
-        """Use multi-process to process all NPM packages"""
+        """Detect all packages in parallel."""
         benign_packages = [f for f in os.listdir(self.unzip_benign_path) 
                           if os.path.isdir(os.path.join(self.unzip_benign_path, f))]
         

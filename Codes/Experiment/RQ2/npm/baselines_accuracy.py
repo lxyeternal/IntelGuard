@@ -1,10 +1,13 @@
+"""Accuracy of the baseline tools on the npm dataset."""
 import os
 import json
 import glob
 import csv
 from collections import defaultdict
+from pathlib import Path
 
-# Packages to exclude from malware statistics (false positives in dataset)
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
 EXCLUDED_MALWARE_PACKAGES = {
     "seller-journey",
     "frontend-libraries",
@@ -15,7 +18,7 @@ EXCLUDED_MALWARE_PACKAGES = {
 }
 
 def calculate_metrics(true_positives, true_negatives, false_positives, false_negatives):
-    """Calculate accuracy, precision, recall and F1 score"""
+    """Accuracy, precision, recall and F1."""
     total = true_positives + true_negatives + false_positives + false_negatives
     if total == 0:
         return {
@@ -41,7 +44,7 @@ def calculate_metrics(true_positives, true_negatives, false_positives, false_neg
     }
 
 def analyze_guarddog(file_path, folder_type):
-    """Parse guarddog detection results - benign if contains "Found 0 potentially malicious indicators" """
+    """Verdict of a guarddog result file."""
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
@@ -54,7 +57,7 @@ def analyze_guarddog(file_path, folder_type):
         return "error"
 
 def analyze_ossgadget(file_path, folder_type):
-    """Parse ossgadget detection results - benign if contains "0 matches found." """
+    """Verdict of an ossgadget result file."""
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
@@ -67,7 +70,7 @@ def analyze_ossgadget(file_path, folder_type):
         return "error"
 
 def analyze_packj(file_path, folder_type):
-    """Parse packj detection results - benign if empty or contains "No risks found!" """
+    """Verdict of a packj result file."""
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
@@ -80,7 +83,7 @@ def analyze_packj(file_path, folder_type):
         return "error"
 
 def analyze_genie(file_path, folder_type):
-    """Parse genie detection results - benign if CSV is empty, malware otherwise"""
+    """Verdict of a genie result file."""
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
@@ -93,7 +96,7 @@ def analyze_genie(file_path, folder_type):
         return "error"
 
 def analyze_json_tool(file_path, folder_type):
-    """Parse JSON-based tool results (gpt-4.1-mini, malkg) - malware if is_malicious=true"""
+    """Verdict of a JSON result file."""
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             data = json.load(f)
@@ -106,9 +109,8 @@ def analyze_json_tool(file_path, folder_type):
         return "error"
 
 def analyze_socketai(package_folder_path, folder_type):
-    """Parse socketai results from package_summary.txt - malware if is_malicious=true"""
+    """Verdict of a socketai package folder."""
     try:
-        # Find package_summary.txt in the package folder
         json_file_path = os.path.join(package_folder_path, "package_summary.txt")
         
         if not os.path.exists(json_file_path):
@@ -126,7 +128,7 @@ def analyze_socketai(package_folder_path, folder_type):
         return "error"
 
 def analyze_sap_models(csv_file_path):
-    """Parse SAP model detection results from CSV file"""
+    """Per-model verdicts from the SAP CSV."""
     sap_results = {"dt": {}, "rf": {}, "xgb": {}}
 
     try:
@@ -136,10 +138,8 @@ def analyze_sap_models(csv_file_path):
                 package_name = row['Package Name']
                 type_info = row['type']
                 
-                # type_info is directly "malware" or "benign"
                 actual_label = type_info
                 
-                # Skip excluded packages from malware category
                 if actual_label == "malware" and package_name in EXCLUDED_MALWARE_PACKAGES:
                     continue
                 
@@ -147,7 +147,6 @@ def analyze_sap_models(csv_file_path):
                     model_key = model.upper()
                     prediction = int(row[model_key]) if model_key in row else 0
                     
-                    # prediction=1 means malware, 0 means benign
                     result = "malware" if prediction == 1 else "benign"
                     
                     if actual_label not in sap_results[model]:
@@ -161,7 +160,7 @@ def analyze_sap_models(csv_file_path):
         return None
 
 def analyze_malpacdetector_models(csv_file_path):
-    """Parse MalPacDetector model results - note: actual_label is "malware"/"benign" but predictions are "malicious"/"benign" """
+    """Per-model verdicts from the MalPacDetector CSV."""
     malpac_results = {"mlp": {}, "nb": {}, "svm": {}}
 
     try:
@@ -171,7 +170,6 @@ def analyze_malpacdetector_models(csv_file_path):
                 package_name = row['package_name']
                 actual_label = row['actual_label']
                 
-                # Skip excluded packages from malware category
                 if actual_label == "malware" and package_name in EXCLUDED_MALWARE_PACKAGES:
                     continue
                 
@@ -179,7 +177,6 @@ def analyze_malpacdetector_models(csv_file_path):
                     model_key = model.upper()
                     prediction = row[model_key].strip() if model_key in row else "benign"
                     
-                    # Map "malicious" to "malware" for consistent processing
                     if prediction == "malicious":
                         result = "malware"
                     else:
@@ -196,7 +193,7 @@ def analyze_malpacdetector_models(csv_file_path):
         return None
 
 def evaluate_folder_based_tool(base_path, tool_name, tool_function):
-    """Evaluate folder-based tools (guarddog, ossgadget, packj_static, packj_trace, genie)"""
+    """Evaluate a tool with one folder per package."""
     results = {
         "true_positive": 0,
         "true_negative": 0,
@@ -209,7 +206,6 @@ def evaluate_folder_based_tool(base_path, tool_name, tool_function):
         "errors": 0
     }
     
-    # Process benign samples
     benign_folder = os.path.join(base_path, tool_name, "benign")
     if os.path.exists(benign_folder):
         package_folders = [d for d in os.listdir(benign_folder) 
@@ -218,7 +214,6 @@ def evaluate_folder_based_tool(base_path, tool_name, tool_function):
         for package_name in package_folders:
             package_folder_path = os.path.join(benign_folder, package_name)
             
-            # Find appropriate file based on tool type
             if tool_name == "guarddog":
                 file_path = os.path.join(package_folder_path, "result.txt")
             elif tool_name == "ossgadget":
@@ -226,13 +221,11 @@ def evaluate_folder_based_tool(base_path, tool_name, tool_function):
             elif tool_name == "packj_trace":
                 file_path = os.path.join(package_folder_path, "result.txt")
             elif tool_name == "packj_static":
-                # packj_static uses package-version.txt format
                 txt_files = glob.glob(os.path.join(package_folder_path, "*.txt"))
                 if not txt_files:
                     continue
                 file_path = txt_files[0]
             elif tool_name == "genie":
-                # genie uses csv files
                 csv_files = glob.glob(os.path.join(package_folder_path, "*.csv"))
                 if not csv_files:
                     continue
@@ -256,20 +249,17 @@ def evaluate_folder_based_tool(base_path, tool_name, tool_function):
                 results["false_positive"] += 1
                 results["misclassified_benign"].append(package_name)
     
-    # Process malware samples
     malware_folder = os.path.join(base_path, tool_name, "malware")
     if os.path.exists(malware_folder):
         package_folders = [d for d in os.listdir(malware_folder) 
                           if os.path.isdir(os.path.join(malware_folder, d))]
         
         for package_name in package_folders:
-            # Skip excluded packages
             if package_name in EXCLUDED_MALWARE_PACKAGES:
                 continue
             
             package_folder_path = os.path.join(malware_folder, package_name)
             
-            # Find appropriate file based on tool type
             if tool_name == "guarddog":
                 file_path = os.path.join(package_folder_path, "result.txt")
             elif tool_name == "ossgadget":
@@ -277,13 +267,11 @@ def evaluate_folder_based_tool(base_path, tool_name, tool_function):
             elif tool_name == "packj_trace":
                 file_path = os.path.join(package_folder_path, "result.txt")
             elif tool_name == "packj_static":
-                # packj_static uses package-version.txt format
                 txt_files = glob.glob(os.path.join(package_folder_path, "*.txt"))
                 if not txt_files:
                     continue
                 file_path = txt_files[0]
             elif tool_name == "genie":
-                # genie uses csv files
                 csv_files = glob.glob(os.path.join(package_folder_path, "*.csv"))
                 if not csv_files:
                     continue
@@ -318,7 +306,7 @@ def evaluate_folder_based_tool(base_path, tool_name, tool_function):
     return results
 
 def evaluate_json_tool(base_path, tool_name):
-    """Evaluate JSON-based tools (gpt-4.1-mini, malkg)"""
+    """Evaluate a tool with one JSON file per package."""
     results = {
         "true_positive": 0,
         "true_negative": 0,
@@ -329,19 +317,17 @@ def evaluate_json_tool(base_path, tool_name):
         "misclassified_benign": [],
         "misclassified_malware": [],
         "errors": 0,
-        "detailed_results": {}  # Store detailed results for comparison
+        "detailed_results": {}
     }
     
-    # Process benign samples
     benign_folder = os.path.join(base_path, tool_name, "benign")
     if os.path.exists(benign_folder):
         json_files = glob.glob(os.path.join(benign_folder, "*.json"))
         
         for file_path in json_files:
-            # Extract package name, removing -result suffix if present (for GPT tools)
             package_name = os.path.basename(file_path).replace(".json", "")
             if package_name.endswith("-result"):
-                package_name = package_name[:-7]  # Remove "-result"
+                package_name = package_name[:-7]
             
             prediction = analyze_json_tool(file_path, "benign")
             if prediction == "error":
@@ -350,7 +336,6 @@ def evaluate_json_tool(base_path, tool_name):
             
             results["benign_total"] += 1
             
-            # Store detailed results
             results["detailed_results"][package_name] = {
                 "actual_label": "benign",
                 "prediction": prediction,
@@ -363,18 +348,15 @@ def evaluate_json_tool(base_path, tool_name):
                 results["false_positive"] += 1
                 results["misclassified_benign"].append(package_name)
     
-    # Process malware samples
     malware_folder = os.path.join(base_path, tool_name, "malware")
     if os.path.exists(malware_folder):
         json_files = glob.glob(os.path.join(malware_folder, "*.json"))
         
         for file_path in json_files:
-            # Extract package name, removing -result suffix if present (for GPT tools)
             package_name = os.path.basename(file_path).replace(".json", "")
             if package_name.endswith("-result"):
-                package_name = package_name[:-7]  # Remove "-result"
+                package_name = package_name[:-7]
             
-            # Skip excluded packages
             if package_name in EXCLUDED_MALWARE_PACKAGES:
                 continue
             
@@ -385,7 +367,6 @@ def evaluate_json_tool(base_path, tool_name):
             
             results["malware_total"] += 1
             
-            # Store detailed results
             results["detailed_results"][package_name] = {
                 "actual_label": "malware",
                 "prediction": prediction,
@@ -409,7 +390,7 @@ def evaluate_json_tool(base_path, tool_name):
     return results
 
 def evaluate_socketai_tool(base_path):
-    """Evaluate socketai tool which has different file structure than other tools"""
+    """Evaluate socketai."""
     results = {
         "true_positive": 0,
         "true_negative": 0,
@@ -422,7 +403,6 @@ def evaluate_socketai_tool(base_path):
         "errors": 0
     }
     
-    # Process benign samples
     benign_folder = os.path.join(base_path, "socketai", "benign")
     if os.path.exists(benign_folder):
         package_folders = [d for d in os.listdir(benign_folder) 
@@ -444,14 +424,12 @@ def evaluate_socketai_tool(base_path):
                 results["false_positive"] += 1
                 results["misclassified_benign"].append(package_name)
     
-    # Process malware samples
     malware_folder = os.path.join(base_path, "socketai", "malware")
     if os.path.exists(malware_folder):
         package_folders = [d for d in os.listdir(malware_folder) 
                           if os.path.isdir(os.path.join(malware_folder, d))]
         
         for package_name in package_folders:
-            # Skip excluded packages
             if package_name in EXCLUDED_MALWARE_PACKAGES:
                 continue
             
@@ -481,7 +459,7 @@ def evaluate_socketai_tool(base_path):
     return results
 
 def evaluate_csv_model(model_results, model_name):
-    """Evaluate CSV-based models (SAP or MalPacDetector)"""
+    """Evaluate a model from CSV verdicts."""
     results = {
         "true_positive": 0,
         "true_negative": 0,
@@ -500,7 +478,6 @@ def evaluate_csv_model(model_results, model_name):
     
     model_data = model_results[model_name]
     
-    # Process benign samples
     if "benign" in model_data:
         benign_results = model_data["benign"]
         
@@ -512,7 +489,6 @@ def evaluate_csv_model(model_results, model_name):
                 results["false_positive"] += 1
                 results["misclassified_benign"].append(package_name)
     
-    # Process malware samples
     if "malware" in model_data:
         malware_results = model_data["malware"]
         
@@ -535,10 +511,10 @@ def evaluate_csv_model(model_results, model_name):
     return results
 
 def compare_malkg_with_gpt(all_results, base_path):
-    """Compare MalKG results with GPT models"""
+    """Compare MalKG errors with the GPT models."""
     comparison_results = {
-        "malkg_correct_benign_gpt_wrong": [],  # MalKG correct (TN), GPT wrong (FP)
-        "malkg_correct_malware_gpt_wrong": []  # MalKG correct (TP), GPT wrong (FN)
+        "malkg_correct_benign_gpt_wrong": [],
+        "malkg_correct_malware_gpt_wrong": []
     }
     
     if "malkg" not in all_results or "gpt-4.1-mini" not in all_results:
@@ -547,7 +523,6 @@ def compare_malkg_with_gpt(all_results, base_path):
     malkg_results = all_results["malkg"]["detailed_results"]
     gpt_mini_results = all_results["gpt-4.1-mini"]["detailed_results"]
     
-    # Compare results
     for package_name in malkg_results:
         if package_name not in gpt_mini_results:
             continue
@@ -559,11 +534,9 @@ def compare_malkg_with_gpt(all_results, base_path):
         malkg_pred = malkg_data["prediction"]
         gpt_mini_pred = gpt_mini_data["prediction"]
         
-        # Case 1: MalKG correctly identifies benign, but GPT incorrectly identifies as malware
         if actual_label == "benign" and malkg_pred == "benign" and gpt_mini_pred == "malware":
-            # Determine source path
             if actual_label == "benign":
-                source_path = f"/home2/wenbo/Documents/IntelliGraph/Dataset/NPM/evaluation/unzip_benign/{package_name}"
+                source_path = f"{PROJECT_ROOT}/Dataset/NPM/evaluation/unzip_benign/{package_name}"
             
             comparison_results["malkg_correct_benign_gpt_wrong"].append({
                 "package_name": package_name,
@@ -572,9 +545,8 @@ def compare_malkg_with_gpt(all_results, base_path):
                 "source_path": source_path
             })
         
-        # Case 2: MalKG correctly identifies malware, but GPT incorrectly identifies as benign
         elif actual_label == "malware" and malkg_pred == "malware" and gpt_mini_pred == "benign":
-            source_path = f"/home2/wenbo/Documents/IntelliGraph/Dataset/NPM/evaluation/unzip_malware/{package_name}"
+            source_path = f"{PROJECT_ROOT}/Dataset/NPM/evaluation/unzip_malware/{package_name}"
             
             comparison_results["malkg_correct_malware_gpt_wrong"].append({
                 "package_name": package_name,
@@ -586,14 +558,13 @@ def compare_malkg_with_gpt(all_results, base_path):
     return comparison_results
 
 def save_results_to_file(all_results, output_file, comparison_results=None):
-    """Save results to text file"""
+    """Write the results table."""
     
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write("=" * 100 + "\n")
         f.write("NPM Package Malware Detection Tools Evaluation Report\n")
         f.write("=" * 100 + "\n\n")
         
-        # Summary table
         f.write("## Tool Evaluation Summary\n\n")
         f.write("| Tool Name | Total | Benign | Malware | Accuracy | Precision | Recall | F1 Score | TP | TN | FP | FN | FP Rate | FN Rate |\n")
         f.write("|" + "-" * 12 + "|" + "-" * 10 + "|" + "-" * 10 + "|" + "-" * 10 + "|" + "-" * 8 + "|" + "-" * 8 + "|" + "-" * 8 + "|" + "-" * 8 + "|" + "-" * 6 + "|" + "-" * 6 + "|" + "-" * 6 + "|" + "-" * 6 + "|" + "-" * 8 + "|" + "-" * 8 + "|\n")
@@ -625,7 +596,6 @@ def save_results_to_file(all_results, output_file, comparison_results=None):
         f.write("## Detailed Evaluation Results\n")
         f.write("=" * 100 + "\n\n")
         
-        # Detailed results
         for tool_name, tool_results in sorted(all_results.items()):
             f.write(f"\n### {tool_name}\n")
             f.write("-" * 80 + "\n\n")
@@ -657,7 +627,6 @@ def save_results_to_file(all_results, output_file, comparison_results=None):
             f.write(f"- False Negative Rate: {false_negative_rate*100:.2f}%\n")
             f.write("\n")
             
-            # False positive samples list
             if tool_results["misclassified_benign"]:
                 f.write(f"**False Positive Samples List ({len(tool_results['misclassified_benign'])} packages):**\n")
                 for i, package in enumerate(tool_results["misclassified_benign"][:20], 1):
@@ -666,7 +635,6 @@ def save_results_to_file(all_results, output_file, comparison_results=None):
                     f.write(f"... and {len(tool_results['misclassified_benign']) - 20} other packages\n")
                 f.write("\n")
             
-            # False negative samples list
             if tool_results["misclassified_malware"]:
                 f.write(f"**False Negative Samples List ({len(tool_results['misclassified_malware'])} packages):**\n")
                 for i, package in enumerate(tool_results["misclassified_malware"][:20], 1):
@@ -675,24 +643,21 @@ def save_results_to_file(all_results, output_file, comparison_results=None):
                     f.write(f"... and {len(tool_results['misclassified_malware']) - 20} other packages\n")
                 f.write("\n")
                 
-                # 特别处理malkg工具，打印完整的漏报文件路径
                 if tool_name == "malkg":
-                    f.write(f"**完整的malkg漏报文件路径:**\n")
+                    f.write(f"**malkg false negative file paths:**\n")
                     for package in tool_results["misclassified_malware"]:
-                        source_path = f"/home2/wenbo/Documents/IntelliGraph/Dataset/NPM/evaluation/unzip_malware/{package}"
+                        source_path = f"{PROJECT_ROOT}/Dataset/NPM/evaluation/unzip_malware/{package}"
                         f.write(f"{source_path}\n")
                     f.write("\n")
             
             f.write("\n")
         
-        # Add comparison results section
         if comparison_results:
             f.write("\n")
             f.write("=" * 100 + "\n")
             f.write("## MalKG vs GPT Models Comparison\n")
             f.write("=" * 100 + "\n\n")
             
-            # Case 1: MalKG correct on benign, GPT wrong
             f.write(f"### Case 1: MalKG correctly identified as benign, but GPT-4.1-mini incorrectly identified as malware\n")
             f.write(f"Total count: {len(comparison_results['malkg_correct_benign_gpt_wrong'])}\n\n")
             
@@ -706,7 +671,6 @@ def save_results_to_file(all_results, output_file, comparison_results=None):
             else:
                 f.write("No such cases found.\n\n")
             
-            # Case 2: MalKG correct on malware, GPT wrong
             f.write(f"### Case 2: MalKG correctly identified as malware, but GPT-4.1-mini incorrectly identified as benign\n")
             f.write(f"Total count: {len(comparison_results['malkg_correct_malware_gpt_wrong'])}\n\n")
             
@@ -721,7 +685,8 @@ def save_results_to_file(all_results, output_file, comparison_results=None):
                 f.write("No such cases found.\n\n")
 
 def main():
-    base_path = "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/npm/results/evaluation"
+    """Entry point."""
+    base_path = f"{PROJECT_ROOT}/Codes/Experiment/RQ2/npm/results/evaluation"
     
     print("=" * 80)
     print("Starting evaluation of NPM package malware detection tools")
@@ -729,7 +694,6 @@ def main():
     
     all_results = {}
     
-    # 1. Evaluate folder-based tools
     folder_tools = {
         "guarddog": analyze_guarddog,
         "ossgadget": analyze_ossgadget,
@@ -753,7 +717,6 @@ def main():
         if tool_results.get('errors', 0) > 0:
             print(f"  Errors: {tool_results['errors']}")
     
-    # 2. Evaluate JSON-based tools
     json_tools = ["gpt-4.1-mini", "malkg"]
     
     print("\nEvaluating JSON-based tools...")
@@ -771,7 +734,6 @@ def main():
         if tool_results.get('errors', 0) > 0:
             print(f"  Errors: {tool_results['errors']}")
     
-    # 3. Evaluate socketai
     print("\nEvaluating tool: socketai")
     socketai_results = evaluate_socketai_tool(base_path)
     all_results["socketai"] = socketai_results
@@ -785,7 +747,6 @@ def main():
     if socketai_results.get('errors', 0) > 0:
         print(f"  Errors: {socketai_results['errors']}")
     
-    # 4. Evaluate SAP models
     print("\nLoading SAP model results...")
     sap_csv_path = os.path.join(base_path, "sap", "sap_detection_results.csv")
     if os.path.exists(sap_csv_path):
@@ -807,7 +768,6 @@ def main():
     else:
         print(f"  Warning: SAP result file does not exist: {sap_csv_path}")
     
-    # 5. Evaluate MalPacDetector models
     print("\nLoading MalPacDetector model results...")
     malpac_csv_path = os.path.join(base_path, "MalPacDetector", "filtered_detection_results.csv")
     if os.path.exists(malpac_csv_path):
@@ -829,14 +789,12 @@ def main():
     else:
         print(f"  Warning: MalPacDetector result file does not exist: {malpac_csv_path}")
     
-    # Compare MalKG with GPT models
     print("\nComparing MalKG with GPT models...")
     comparison_results = compare_malkg_with_gpt(all_results, base_path)
     print(f"  MalKG correct (benign) but GPT wrong: {len(comparison_results['malkg_correct_benign_gpt_wrong'])} cases")
     print(f"  MalKG correct (malware) but GPT wrong: {len(comparison_results['malkg_correct_malware_gpt_wrong'])} cases")
     
-    # Save results
-    output_file = "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/npm/npm_tool_evaluation_results.txt"
+    output_file = f"{PROJECT_ROOT}/Codes/Experiment/RQ2/npm/npm_tool_evaluation_results.txt"
     save_results_to_file(all_results, output_file, comparison_results)
     print(f"\n\n{'='*80}")
     print(f"Evaluation complete! Detailed results saved to: {output_file}")

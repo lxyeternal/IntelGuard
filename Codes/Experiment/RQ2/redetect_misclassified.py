@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""
-Re-detect Misclassified Packages
-
-This script:
-1. Scans result directories to find misclassified packages
-   - Benign predicted as malicious (False Positive)
-   - Malware predicted as benign (False Negative)
-2. Re-runs detection on these packages using the same detection logic
-   - Same file selection (priority files + max_files limit)
-   - Same slicing logic
-   - Same RAG matching and LLM detection
-3. Overwrites original JSON files with new detection results
-"""
+"""Re-run detection on packages that MalKG misclassified."""
 
 import os
 import sys
@@ -22,12 +10,13 @@ from typing import List, Tuple, Dict, Optional
 from multiprocessing import Pool
 from datetime import datetime
 
-# Add project root to path
 project_root = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from Codes.Detect.package_detector import PackageMalwareDetector
 from Codes.GPTAnalysis.llmquery import LLMAgent
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,76 +25,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ==================== Configuration ====================
-
-# Result directories to scan
 RESULT_CONFIGS = [
     {
         "ecosystem": "npm",
         "dataset": "evaluation",
-        "result_base": "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/npm/results/evaluation/malkg",
-        "source_base": "/home2/wenbo/Documents/IntelliGraph/Dataset/NPM/evaluation",
+        "result_base": f"{PROJECT_ROOT}/Codes/Experiment/RQ2/npm/results/evaluation/malkg",
+        "source_base": f"{PROJECT_ROOT}/Dataset/NPM/evaluation",
         "package_manager": "npm",
         "max_files": 20,
-        "priority_files": ["package.json", "index.js"],  # package.json优先（包含安装脚本）
+        "priority_files": ["package.json", "index.js"],
         "file_extension": "*.js",
         "exclude_dirs": {'node_modules', '.git', 'test', 'tests', '__tests__', 'dist', 'build', 'coverage', '.nyc_output'}
     }
-    # {
-    #     "ecosystem": "pypi",
-    #     "dataset": "evaluation",
-    #     "result_base": "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/pypi/results/evaluation/malkg",
-    #     "source_base": "/home2/wenbo/Documents/IntelliGraph/Dataset/PYPI/evaluation",
-    #     "package_manager": "pypi",
-    #     "max_files": 10,
-    #     "priority_files": ["setup.py", "__init__.py"],
-    #     "file_extension": "*.py",
-    #     "exclude_dirs": {'venv', 'env', '.venv', '__pycache__', '.git', 'dist', 'build', '.egg-info', 'test', 'tests'}
-    # },
-    # {
-    #     "ecosystem": "pypi",
-    #     "dataset": "obfuscation",
-    #     "result_base": "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/pypi/results/obfuscation/malkg",
-    #     "source_base": "/home2/wenbo/Documents/IntelliGraph/Dataset/PYPI/obfuscation",
-    #     "package_manager": "pypi",
-    #     "max_files": 10,
-    #     "priority_files": ["setup.py", "__init__.py"],
-    #     "file_extension": "*.py",
-    #     "exclude_dirs": {'venv', 'env', '.venv', '__pycache__', '.git', 'dist', 'build', '.egg-info', 'test', 'tests'}
-    # }
 ]
 
-NUM_PROCESSES = 20  # Number of parallel processes
+NUM_PROCESSES = 20
 
-
-# ==================== File Selection Logic ====================
 
 def select_files(package_path: Path, config: dict, max_files: Optional[int] = 10) -> List[Path]:
-    """
-    Select files to analyze based on ecosystem configuration
-    
-    Args:
-        package_path: Package path
-        config: Configuration dictionary
-        max_files: Max number of files to analyze (excluding priority files), None means all
-        
-    Returns:
-        List of selected files
-    """
+    """Files to analyze for an ecosystem."""
     exclude_dirs = config['exclude_dirs']
     file_extension = config['file_extension']
     priority_file_names = config['priority_files']
     package_manager = config['package_manager']
     
-    # Collect all files matching the extension
     all_files = []
     for file in package_path.rglob(file_extension):
-        # Exclude specific directories
         if any(excluded in file.parts for excluded in exclude_dirs):
             continue
         all_files.append(file)
     
-    # For npm: also collect .sh files (install scripts)
     if package_manager == 'npm':
         for sh_file in package_path.rglob('*.sh'):
             if any(excluded in sh_file.parts for excluded in exclude_dirs):
@@ -113,8 +62,6 @@ def select_files(package_path: Path, config: dict, max_files: Optional[int] = 10
             if sh_file not in all_files:
                 all_files.append(sh_file)
     
-    # Add priority files explicitly (like package.json, setup.py)
-    # 递归查找所有优先文件（不限制位置，只排除特定目录）
     for priority_name in priority_file_names:
         for found_file in package_path.rglob(priority_name):
             if any(excluded in found_file.parts for excluded in exclude_dirs):
@@ -122,7 +69,6 @@ def select_files(package_path: Path, config: dict, max_files: Optional[int] = 10
             if found_file not in all_files:
                 all_files.append(found_file)
     
-    # Classify files
     priority_files = []
     normal_files = []
     
@@ -133,16 +79,13 @@ def select_files(package_path: Path, config: dict, max_files: Optional[int] = 10
         else:
             normal_files.append(file)
     
-    # Sort priority files
     priority_files.sort(key=lambda x: (
         priority_file_names.index(x.name.lower()) if x.name.lower() in [pf.lower() for pf in priority_file_names] else len(priority_file_names),
         str(x)
     ))
     
-    # Sort normal files (by path)
     normal_files.sort(key=lambda x: str(x))
     
-    # Combine results
     if max_files is None:
         selected_files = priority_files + normal_files
     else:
@@ -151,15 +94,8 @@ def select_files(package_path: Path, config: dict, max_files: Optional[int] = 10
     return selected_files
 
 
-# ==================== Find Misclassified Packages ====================
-
 def find_misclassified_packages() -> List[Dict]:
-    """
-    Scan result directories to find misclassified packages
-    
-    Returns:
-        List of misclassified package info dictionaries
-    """
+    """Misclassified packages in the result directories."""
     misclassified = []
     
     for config in RESULT_CONFIGS:
@@ -169,7 +105,6 @@ def find_misclassified_packages() -> List[Dict]:
             logger.warning(f"Result directory does not exist: {result_base}")
             continue
         
-        # Check benign folder for false positives
         benign_dir = result_base / "benign"
         if benign_dir.exists():
             for result_file in benign_dir.glob("*.json"):
@@ -177,7 +112,6 @@ def find_misclassified_packages() -> List[Dict]:
                     with open(result_file, 'r', encoding='utf-8') as f:
                         result = json.load(f)
                     
-                    # Check if benign was predicted as malicious
                     if result.get('is_malicious', False) == True:
                         misclassified.append({
                             "config": config,
@@ -192,7 +126,6 @@ def find_misclassified_packages() -> List[Dict]:
                 except Exception as e:
                     logger.error(f"Error reading {result_file}: {e}")
         
-        # Check malware folder for false negatives
         malware_dir = result_base / "malware"
         if malware_dir.exists():
             for result_file in malware_dir.glob("*.json"):
@@ -200,7 +133,6 @@ def find_misclassified_packages() -> List[Dict]:
                     with open(result_file, 'r', encoding='utf-8') as f:
                         result = json.load(f)
                     
-                    # Check if malware was predicted as benign
                     if result.get('is_malicious', False) == False:
                         misclassified.append({
                             "config": config,
@@ -218,18 +150,8 @@ def find_misclassified_packages() -> List[Dict]:
     return misclassified
 
 
-# ==================== Single Package Re-detection ====================
-
 def redetect_single_package(args: Tuple[Dict, Dict]) -> dict:
-    """
-    Re-detect a single misclassified package
-    
-    Args:
-        args: (misclassified_info, config)
-        
-    Returns:
-        Detection result dictionary
-    """
+    """Worker: detect one package again."""
     misclassified_info = args
     config = misclassified_info['config']
     package_name = misclassified_info['package_name']
@@ -238,7 +160,6 @@ def redetect_single_package(args: Tuple[Dict, Dict]) -> dict:
     try:
         logger.info(f"Re-detecting: {config['ecosystem']}/{config['dataset']}/{true_label}/{package_name}")
         
-        # 1. Locate source code directory
         source_base = Path(config['source_base'])
         package_path = source_base / f"unzip_{true_label}" / package_name
         
@@ -253,7 +174,6 @@ def redetect_single_package(args: Tuple[Dict, Dict]) -> dict:
                 "error": f"Source directory not found: {package_path}"
             }
         
-        # 2. Select files to analyze
         selected_files = select_files(package_path, config, max_files=config['max_files'])
         
         if not selected_files:
@@ -269,24 +189,21 @@ def redetect_single_package(args: Tuple[Dict, Dict]) -> dict:
         
         logger.info(f"  {package_name}: Selected {len(selected_files)} files for re-analysis")
         
-        # 3. Create detector
         llm_agent = LLMAgent()
         detector = PackageMalwareDetector(llm_agent=llm_agent)
         
-        # 4. Override file scanning logic
         def custom_scan(pkg_path, pkg_manager):
+            """Files to analyze."""
             return selected_files
         
         detector._scan_code_files = custom_scan
         
-        # 5. Execute detection
         result = detector.detect_package(
             package_path=str(package_path),
             package_manager=config['package_manager'],
             output_json=None
         )
         
-        # 6. Build result (same format as batch_rag_detect.py and batch_rag_detect_npm.py)
         result_dict = {
             "package_name": package_name,
             "dataset_type": config['dataset'],
@@ -303,7 +220,6 @@ def redetect_single_package(args: Tuple[Dict, Dict]) -> dict:
             "file_results": []
         }
         
-        # Add file-level results
         for file_result in result.file_results:
             file_dict = {
                 "file_path": file_result.file_path,
@@ -314,7 +230,6 @@ def redetect_single_package(args: Tuple[Dict, Dict]) -> dict:
                 "slice_results": []
             }
             
-            # Add slice-level results
             for slice_result in file_result.slice_results:
                 slice_dict = {
                     "slice_id": slice_result.slice_id,
@@ -331,14 +246,11 @@ def redetect_single_package(args: Tuple[Dict, Dict]) -> dict:
             
             result_dict["file_results"].append(file_dict)
         
-        # Check if result changed
         detected_label = "malware" if result.is_malicious_package else "benign"
         result_changed = (detected_label != true_label)
         
-        # Get the result file path for logging
         result_file_path = misclassified_info.get('result_file', 'N/A')
         
-        # Print with bold if result changed
         if result_changed:
             logger.info(f"\033[1m✅ {package_name}: {'MALICIOUS' if result.is_malicious_package else 'BENIGN'} "
                        f"(Files: {result.malicious_files}/{result.total_files}, "
@@ -367,30 +279,18 @@ def redetect_single_package(args: Tuple[Dict, Dict]) -> dict:
         }
 
 
-# ==================== Save Results ====================
-
 def save_redetection_result(result: dict, misclassified_info: dict):
-    """
-    Save re-detection result (overwrite original file)
-    
-    Args:
-        result: Detection result dictionary
-        misclassified_info: Original misclassified info
-    """
-    # Overwrite original file directly
+    """Overwrite the result file."""
     original_file = Path(misclassified_info['result_file'])
     
-    # Save JSON
     with open(original_file, 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
     
     logger.info(f"💾 Re-detection result saved (overwritten): {original_file}")
 
 
-# ==================== Main Function ====================
-
 def main():
-    """Main function"""
+    """Entry point."""
     
     print("\n" + "="*80)
     print("🔄 Re-detect Misclassified Packages")
@@ -398,7 +298,6 @@ def main():
     print(f"⚙️  Parallel processes: {NUM_PROCESSES}")
     print("="*80 + "\n")
     
-    # 1. Find all misclassified packages
     logger.info("Scanning result directories for misclassified packages...")
     misclassified = find_misclassified_packages()
     
@@ -408,7 +307,6 @@ def main():
     
     logger.info(f"Found {len(misclassified)} misclassified packages")
     
-    # Statistics
     fp_count = sum(1 for m in misclassified if m['error_type'] == 'false_positive')
     fn_count = sum(1 for m in misclassified if m['error_type'] == 'false_negative')
     
@@ -416,7 +314,6 @@ def main():
     print(f"  False Positives (benign → malware): {fp_count}")
     print(f"  False Negatives (malware → benign): {fn_count}")
     
-    # Group by ecosystem/dataset
     stats = {}
     for m in misclassified:
         key = f"{m['config']['ecosystem']}/{m['config']['dataset']}/{m['true_label']}"
@@ -427,7 +324,6 @@ def main():
         print(f"  {key}: {count} packages")
     print()
     
-    # 2. Re-detect packages
     logger.info(f"Starting re-detection (using {NUM_PROCESSES} processes)...")
     
     start_time = datetime.now()
@@ -438,14 +334,11 @@ def main():
     
     with Pool(processes=NUM_PROCESSES) as pool:
         for i, result in enumerate(pool.imap(redetect_single_package, misclassified), 1):
-            # Save result
             save_redetection_result(result, misclassified[i-1])
             
-            # Statistics
             if result["status"] == "success":
                 success_count += 1
-                # Check if re-detection matches true label
-                true_label = result.get("label")  # benign or malware
+                true_label = result.get("label")
                 is_malicious = result.get("is_malicious", False)
                 is_correct = (is_malicious == (true_label == "malware"))
                 
@@ -456,13 +349,11 @@ def main():
             else:
                 error_count += 1
             
-            # Display progress
             progress = (i / len(misclassified)) * 100
             logger.info(f"Progress: {i}/{len(misclassified)} ({progress:.1f}%) - "
                        f"Success: {success_count}, Corrected: {corrected_count}, "
                        f"Still Wrong: {still_wrong_count}, Failed: {error_count}")
     
-    # 3. Completion statistics
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds()
     

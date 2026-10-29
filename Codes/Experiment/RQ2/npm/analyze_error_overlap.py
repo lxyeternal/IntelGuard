@@ -1,9 +1,13 @@
+"""Overlap of the errors of JSON-based tools."""
 import os
 import json
 import glob
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 def analyze_json_tool(file_path):
-    """Parse JSON-based tool results"""
+    """Verdict of a JSON result file."""
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             data = json.load(f)
@@ -15,9 +19,9 @@ def analyze_json_tool(file_path):
         return "error"
 
 def main():
-    base_path = "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/npm/results/evaluation"
+    """Entry point."""
+    base_path = f"{PROJECT_ROOT}/Codes/Experiment/RQ2/npm/results/evaluation"
     
-    # Load malkg results
     malkg_results = {"benign": {}, "malware": {}}
     
     benign_folder = os.path.join(base_path, "malkg", "benign")
@@ -38,7 +42,6 @@ def main():
             if prediction != "error":
                 malkg_results["malware"][package_name] = prediction
     
-    # Load gpt-4.1-mini results
     gpt_mini_results = {"benign": {}, "malware": {}}
     
     benign_folder = os.path.join(base_path, "gpt-4.1-mini", "benign")
@@ -63,7 +66,6 @@ def main():
     print("Error Analysis: MalKG vs GPT-4.1-mini")
     print("=" * 80)
     
-    # Find malkg false positives (benign predicted as malware)
     malkg_fp = [pkg for pkg, pred in malkg_results["benign"].items() if pred == "malware"]
     print(f"\nMalKG False Positives (benign -> malware): {len(malkg_fp)}")
     for pkg in malkg_fp:
@@ -71,7 +73,6 @@ def main():
             gpt_pred = gpt_mini_results["benign"][pkg]
             print(f"  {pkg}: GPT-4.1-mini predicted as '{gpt_pred}'")
     
-    # Find malkg false negatives (malware predicted as benign)
     malkg_fn = [pkg for pkg, pred in malkg_results["malware"].items() if pred == "benign"]
     print(f"\nMalKG False Negatives (malware -> benign): {len(malkg_fn)}")
     for pkg in malkg_fn:
@@ -79,7 +80,6 @@ def main():
             gpt_pred = gpt_mini_results["malware"][pkg]
             print(f"  {pkg}: GPT-4.1-mini predicted as '{gpt_pred}'")
     
-    # Find gpt-4.1-mini false positives
     gpt_fp = [pkg for pkg, pred in gpt_mini_results["benign"].items() if pred == "malware"]
     print(f"\nGPT-4.1-mini False Positives (benign -> malware): {len(gpt_fp)}")
     for pkg in gpt_fp:
@@ -87,7 +87,6 @@ def main():
             malkg_pred = malkg_results["benign"][pkg]
             print(f"  {pkg}: MalKG predicted as '{malkg_pred}'")
     
-    # Find gpt-4.1-mini false negatives
     gpt_fn = [pkg for pkg, pred in gpt_mini_results["malware"].items() if pred == "benign"]
     print(f"\nGPT-4.1-mini False Negatives (malware -> benign): {len(gpt_fn)}")
     for pkg in gpt_fn:
@@ -95,12 +94,10 @@ def main():
             malkg_pred = malkg_results["malware"][pkg]
             print(f"  {pkg}: MalKG predicted as '{malkg_pred}'")
     
-    # Analyze overlap
     print("\n" + "=" * 80)
     print("Overlap Analysis")
     print("=" * 80)
     
-    # Case 1: MalKG correct on benign, GPT wrong
     case1_count = 0
     for pkg in gpt_fp:
         if pkg in malkg_results["benign"] and malkg_results["benign"][pkg] == "benign":
@@ -110,7 +107,6 @@ def main():
     
     print(f"\nCase 1 total: {case1_count}")
     
-    # Case 2: MalKG correct on malware, GPT wrong
     case2_count = 0
     for pkg in gpt_fn:
         if pkg in malkg_results["malware"] and malkg_results["malware"][pkg] == "malware":
@@ -120,7 +116,6 @@ def main():
     
     print(f"\nCase 2 total: {case2_count}")
     
-    # Check if packages exist in both tools
     print("\n" + "=" * 80)
     print("Dataset Coverage Check")
     print("=" * 80)
@@ -146,6 +141,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 

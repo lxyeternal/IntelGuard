@@ -1,3 +1,4 @@
+"""Run the baseline tools over the PyPI datasets."""
 import os
 import sys
 import subprocess
@@ -7,11 +8,13 @@ import glob
 import time
 import signal
 
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
 NUM_PROCESSES = 24
 TOOL_TIMEOUT = 600
 
 def run_with_timeout(cmd, timeout=TOOL_TIMEOUT):
-    """Run command, if timeout is exceeded, terminate the process"""
+    """Run a command with a timeout."""
     start_time = time.time()
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     
@@ -29,8 +32,10 @@ def run_with_timeout(cmd, timeout=TOOL_TIMEOUT):
         return (-1, f"Command timed out after {timeout} seconds", "", timeout)
 
 class ToolDetector:
+    """Run every tool on every package."""
     def __init__(self):
-        self.base_dir = "/home2/wenbo/Documents/IntelliGraph"
+        """Set the dataset and output paths."""
+        self.base_dir = f"{PROJECT_ROOT}"
         
         self.datasets = {
             "obfuscation": os.path.join(self.base_dir, "Dataset/PYPI/obfuscation"),
@@ -49,7 +54,7 @@ class ToolDetector:
         self.skipped_count = 0
         
     def _ensure_output_dirs(self):
-        """确保所有输出目录存在"""
+        """Create output directories."""
         for dataset_name in self.datasets:
             for tool in self.tools:
                 for data_type in self.data_types:
@@ -57,13 +62,13 @@ class ToolDetector:
                     os.makedirs(output_dir, exist_ok=True)
                     
     def _get_output_path(self, dataset_name, tool, data_type, package_name):
-        """获取输出文件路径"""
+        """Result file of a package."""
         output_dir = os.path.join(self.output_base, dataset_name, tool, data_type, package_name)
         os.makedirs(output_dir, exist_ok=True)
         return os.path.join(output_dir, "result.txt")
     
     def _find_zip_file(self, dataset_name, data_type, package_name):
-        """根据数据集、类型和包名找到对应的压缩包路径"""
+        """Archive of a package."""
         dataset_path = self.datasets[dataset_name]
         zip_base = os.path.join(dataset_path, f"zip_{data_type}")
         package_dir = os.path.join(zip_base, package_name)
@@ -77,7 +82,7 @@ class ToolDetector:
         return None
     
     def _find_unzip_dir(self, dataset_name, data_type, package_name):
-        """根据数据集、类型和包名找到对应的解压目录路径"""
+        """Unpacked directory of a package."""
         dataset_path = self.datasets[dataset_name]
         unzip_base = os.path.join(dataset_path, f"unzip_{data_type}")
         package_dir = os.path.join(unzip_base, package_name)
@@ -88,97 +93,97 @@ class ToolDetector:
         return None
     
     def run_bandit(self, unzip_folder_path, output_file):
-        """运行Bandit工具并保存结果"""
+        """Run bandit4mal."""
         if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-            print(f"跳过已处理的Bandit检测: {os.path.basename(unzip_folder_path)}")
+            print(f"Bandit result exists, skipping: {os.path.basename(unzip_folder_path)}")
             return None
             
         cmd = ["bandit", "-r", unzip_folder_path]
-        print(f"开始Bandit检测: {os.path.basename(unzip_folder_path)}")
+        print(f"Running Bandit: {os.path.basename(unzip_folder_path)}")
         return_code, stdout, stderr, execution_time = run_with_timeout(cmd)
         
         if return_code == -1:
-            print(f"Bandit检测超时: {os.path.basename(unzip_folder_path)}, 跳过")
+            print(f"Bandit timed out: {os.path.basename(unzip_folder_path)}")
             return None
         else:
             output = stdout if stdout.strip() else "benign"
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(output)
-            print(f"Bandit检测完成: {os.path.basename(unzip_folder_path)}, 用时: {execution_time:.2f}秒")
+            print(f"Bandit done: {os.path.basename(unzip_folder_path)} in {execution_time:.2f}s")
             return output
     
     def run_guarddog(self, zip_file_path, output_file):
-        """运行Guarddog工具并保存结果"""
+        """Run guarddog."""
         if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-            print(f"跳过已处理的Guarddog检测: {os.path.basename(zip_file_path)}")
+            print(f"Guarddog result exists, skipping: {os.path.basename(zip_file_path)}")
             return None
             
         cmd = ["guarddog", "pypi", "scan", zip_file_path]
-        print(f"开始Guarddog检测: {os.path.basename(zip_file_path)}")
+        print(f"Running Guarddog: {os.path.basename(zip_file_path)}")
         return_code, stdout, stderr, execution_time = run_with_timeout(cmd)
         
         if return_code == -1:
-            print(f"Guarddog检测超时: {os.path.basename(zip_file_path)}, 跳过")
+            print(f"Guarddog timed out: {os.path.basename(zip_file_path)}")
             return None
         else:
             output = stdout if stdout.strip() else "benign"
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(output)
-            print(f"Guarddog检测完成: {os.path.basename(zip_file_path)}, 用时: {execution_time:.2f}秒")
+            print(f"Guarddog done: {os.path.basename(zip_file_path)} in {execution_time:.2f}s")
             return output
     
     def run_ossgadget(self, unzip_folder_path, output_file):
-        """运行OSS Gadget工具并保存结果"""
+        """Run OSS Gadget."""
         if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-            print(f"跳过已处理的OSSGadget检测: {os.path.basename(unzip_folder_path)}")
+            print(f"OSSGadget result exists, skipping: {os.path.basename(unzip_folder_path)}")
             return None
             
-        cmd = ["/home2/wenbo/Documents/PyPIAgent/Tools/OSSGadget/oss-detect-backdoor", unzip_folder_path]
-        print(f"开始OSSGadget检测: {os.path.basename(unzip_folder_path)}")
+        cmd = [os.environ.get("OSSGADGET_BIN", "oss-detect-backdoor"), unzip_folder_path]
+        print(f"Running OSSGadget: {os.path.basename(unzip_folder_path)}")
         return_code, stdout, stderr, execution_time = run_with_timeout(cmd)
         
         if return_code == -1:
-            print(f"OSSGadget检测超时: {os.path.basename(unzip_folder_path)}, 跳过")
+            print(f"OSSGadget timed out: {os.path.basename(unzip_folder_path)}")
             return None
         else:
             output = stdout if stdout.strip() else "benign"
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(output)
-            print(f"OSSGadget检测完成: {os.path.basename(unzip_folder_path)}, 用时: {execution_time:.2f}秒")
+            print(f"OSSGadget done: {os.path.basename(unzip_folder_path)} in {execution_time:.2f}s")
             return output
     
     def run_pypiwarehouse(self, unzip_folder_path, output_file):
-        """运行PyPI Warehouse工具并保存结果"""
+        """Run the PyPI Warehouse rules."""
         if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-            print(f"跳过已处理的PyPIWarehouse检测: {os.path.basename(unzip_folder_path)}")
+            print(f"PyPIWarehouse result exists, skipping: {os.path.basename(unzip_folder_path)}")
             return None
             
-        cmd = ["yara", "-r", "-s", "/home2/wenbo/Documents/PyPIAgent/Tools/PyPIWarehouse/setup_py_rules.yara", unzip_folder_path]
-        print(f"开始PyPIWarehouse检测: {os.path.basename(unzip_folder_path)}")
+        cmd = ["yara", "-r", "-s", os.environ.get("PYPIWAREHOUSE_RULES", "setup_py_rules.yara"), unzip_folder_path]
+        print(f"Running PyPIWarehouse: {os.path.basename(unzip_folder_path)}")
         return_code, stdout, stderr, execution_time = run_with_timeout(cmd)
         
         if return_code == -1:
-            print(f"PyPIWarehouse检测超时: {os.path.basename(unzip_folder_path)}, 跳过")
+            print(f"PyPIWarehouse timed out: {os.path.basename(unzip_folder_path)}")
             return None
         else:
             output = stdout if stdout.strip() else "benign"
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(output)
-            print(f"PyPIWarehouse检测完成: {os.path.basename(unzip_folder_path)}, 用时: {execution_time:.2f}秒")
+            print(f"PyPIWarehouse done: {os.path.basename(unzip_folder_path)} in {execution_time:.2f}s")
             return output
     
     def run_aura(self, unzip_folder_path, output_file):
-        """运行Aura工具并保存结果"""
+        """Run Aura."""
         if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-            print(f"跳过已处理的Aura检测: {os.path.basename(unzip_folder_path)}")
+            print(f"Aura result exists, skipping: {os.path.basename(unzip_folder_path)}")
             return None
             
         cmd = ["aura", "scan", unzip_folder_path]
-        print(f"开始Aura检测: {os.path.basename(unzip_folder_path)}")
+        print(f"Running Aura: {os.path.basename(unzip_folder_path)}")
         return_code, stdout, stderr, execution_time = run_with_timeout(cmd)
         
         if return_code == -1:
-            print(f"Aura检测超时: {os.path.basename(unzip_folder_path)}, 跳过")
+            print(f"Aura timed out: {os.path.basename(unzip_folder_path)}")
             return None
         else:
             if ("No code detections has been triggered" in stdout) or (stdout.strip() == ""):
@@ -188,17 +193,17 @@ class ToolDetector:
             
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(output)
-            print(f"Aura检测完成: {os.path.basename(unzip_folder_path)}, 用时: {execution_time:.2f}秒")
+            print(f"Aura done: {os.path.basename(unzip_folder_path)} in {execution_time:.2f}s")
             return output
     
     def process_package(self, dataset_name, data_type, package_name):
-        """处理单个包，调用所有检测工具并保存结果"""
+        """Run all tools on one package."""
         try:
             unzip_folder_path = self._find_unzip_dir(dataset_name, data_type, package_name)
             zip_file_path = self._find_zip_file(dataset_name, data_type, package_name)
             
             if not unzip_folder_path:
-                print(f"警告: 找不到解压目录 {package_name}")
+                print(f"Warning: no unpacked dir for {package_name}")
                 return
                 
             output_files = {
@@ -216,50 +221,50 @@ class ToolDetector:
                     break
                     
             if all_processed:
-                print(f"跳过已完全处理的包: {dataset_name}/{data_type}/{package_name}")
+                print(f"All results exist, skipping: {dataset_name}/{data_type}/{package_name}")
                 self.skipped_count += 1
                 return
                 
-            print(f"正在处理 {dataset_name}/{data_type}/{package_name}...")
+            print(f"Processing {dataset_name}/{data_type}/{package_name}...")
             
             if not os.path.exists(output_files["bandit4mal"]) or os.path.getsize(output_files["bandit4mal"]) == 0:
                 if unzip_folder_path:
                     self.run_bandit(unzip_folder_path, output_files["bandit4mal"])
                 else:
-                    print(f"警告: 找不到解压目录 {package_name}，跳过Bandit检测")
+                    print(f"Warning: no unpacked dir for {package_name}, skipping Bandit")
             
             if (not os.path.exists(output_files["guarddog"]) or os.path.getsize(output_files["guarddog"]) == 0):
                 if zip_file_path:
                     self.run_guarddog(zip_file_path, output_files["guarddog"])
                 else:
-                    print(f"警告: 找不到对应的压缩包 {package_name}，跳过Guarddog检测")
+                    print(f"Warning: no archive for {package_name}, skipping Guarddog")
             
             if not os.path.exists(output_files["ossgadget"]) or os.path.getsize(output_files["ossgadget"]) == 0:
                 if unzip_folder_path:
                     self.run_ossgadget(unzip_folder_path, output_files["ossgadget"])
                 else:
-                    print(f"警告: 找不到解压目录 {package_name}，跳过OSSGadget检测")
+                    print(f"Warning: no unpacked dir for {package_name}, skipping OSSGadget")
             
             if not os.path.exists(output_files["pypiwarehouse"]) or os.path.getsize(output_files["pypiwarehouse"]) == 0:
                 if unzip_folder_path:
                     self.run_pypiwarehouse(unzip_folder_path, output_files["pypiwarehouse"])
                 else:
-                    print(f"警告: 找不到解压目录 {package_name}，跳过PyPIWarehouse检测")
+                    print(f"Warning: no unpacked dir for {package_name}, skipping PyPIWarehouse")
             
             if not os.path.exists(output_files["aura"]) or os.path.getsize(output_files["aura"]) == 0:
                 if unzip_folder_path:
                     self.run_aura(unzip_folder_path, output_files["aura"])
                 else:
-                    print(f"警告: 找不到解压目录 {package_name}，跳过Aura检测")
+                    print(f"Warning: no unpacked dir for {package_name}, skipping Aura")
             
-            print(f"完成处理 {dataset_name}/{data_type}/{package_name}")
+            print(f"Finished {dataset_name}/{data_type}/{package_name}")
             self.processed_count += 1
             
         except Exception as e:
-            print(f"处理 {dataset_name}/{data_type}/{package_name} 时出错: {str(e)}")
+            print(f"Error processing {dataset_name}/{data_type}/{package_name}: {str(e)}")
     
     def collect_packages(self, dataset_name):
-        """收集指定数据集中的所有包名"""
+        """Package names of a dataset."""
         dataset_path = self.datasets[dataset_name]
         benign_path = os.path.join(dataset_path, "unzip_benign")
         malware_path = os.path.join(dataset_path, "unzip_malware")
@@ -279,12 +284,12 @@ class ToolDetector:
         return tasks
         
     def process_dataset(self, dataset_name, num_processes=NUM_PROCESSES):
-        """处理指定数据集中的所有包"""
-        print(f"开始处理数据集: {dataset_name}")
+        """Run all tools on one dataset."""
+        print(f"Processing dataset: {dataset_name}")
         
         tasks = self.collect_packages(dataset_name)
         
-        print(f"数据集 {dataset_name} 共找到 {len(tasks)} 个包")
+        print(f"{dataset_name}: {len(tasks)} packages")
         
         if num_processes > 1:
             with multiprocessing.Pool(processes=num_processes) as pool:
@@ -293,10 +298,10 @@ class ToolDetector:
             for task in tasks:
                 self.process_package(*task)
         
-        print(f"数据集 {dataset_name} 处理完成！")
+        print(f"{dataset_name} done")
         
     def process_all_datasets(self, num_processes=NUM_PROCESSES):
-        """处理所有数据集"""
+        """Run all tools on all datasets."""
         total_processed = 0
         total_skipped = 0
         
@@ -309,13 +314,13 @@ class ToolDetector:
             total_processed += self.processed_count
             total_skipped += self.skipped_count
             
-            print(f"数据集 {dataset_name} 处理结果: 新处理 {self.processed_count} 个，跳过已处理 {self.skipped_count} 个")
+            print(f"{dataset_name}: {self.processed_count} processed, {self.skipped_count} already done")
         
-        print(f"所有数据集处理完成！总计: 新处理 {total_processed} 个，跳过已处理 {total_skipped} 个")
+        print(f"All datasets done: {total_processed} processed, {total_skipped} already done")
 
 if __name__ == "__main__":
     try:
-        print("清理可能的僵尸进程...")
+        print("Cleaning up leftover processes...")
         cleanup_cmd = """
         pkill -f bandit || true
         pkill -f guarddog || true
@@ -324,11 +329,11 @@ if __name__ == "__main__":
         pkill -f aura || true
         """
         subprocess.call(cleanup_cmd, shell=True)
-        print("清理完成")
+        print("Cleanup done")
     except:
-        print("清理进程时出错，继续执行...")
+        print("Cleanup failed, continuing...")
     
-    print(f"使用 {NUM_PROCESSES} 个进程进行检测，工具超时时间: {TOOL_TIMEOUT}秒")
+    print(f"Running with {NUM_PROCESSES} processes, tool timeout {TOOL_TIMEOUT}s")
     
     detector = ToolDetector()
     detector.process_all_datasets() 

@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""
-Batch RAG Malware Detection Script
-
-Features:
-1. Batch detection for evaluation and obfuscation datasets
-2. Analyze up to a specified number of .py files per package (default 10)
-3. setup.py and __init__.py are prioritized and not counted in the limit
-4. Multi-process parallel processing
-5. Results automatically saved to corresponding directories
-"""
+"""Batch detection over the PyPI datasets."""
 
 import os
 import sys
@@ -19,13 +10,14 @@ from typing import List, Tuple, Optional
 from multiprocessing import Pool
 from datetime import datetime
 
-# 添加项目根目录到路径
 project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
 print(project_root)
 sys.path.insert(0, str(project_root))
 
 from Codes.Detect.package_detector import PackageMalwareDetector
 from Codes.GPTAnalysis.llmquery import LLMAgent
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,65 +26,38 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ==================== Configuration ====================
-
-# Dataset configuration
 DATASETS = {
     "evaluation": {
-        "benign": "/home2/wenbo/Documents/IntelliGraph/Dataset/PYPI/evaluation/unzip_benign",
-        "malware": "/home2/wenbo/Documents/IntelliGraph/Dataset/PYPI/evaluation/unzip_malware",
+        "benign": f"{PROJECT_ROOT}/Dataset/PYPI/evaluation/unzip_benign",
+        "malware": f"{PROJECT_ROOT}/Dataset/PYPI/evaluation/unzip_malware",
     },
     "obfuscation": {
-        "benign": "/home2/wenbo/Documents/IntelliGraph/Dataset/PYPI/obfuscation/unzip_benign",
-        "malware": "/home2/wenbo/Documents/IntelliGraph/Dataset/PYPI/obfuscation/unzip_malware",
+        "benign": f"{PROJECT_ROOT}/Dataset/PYPI/obfuscation/unzip_benign",
+        "malware": f"{PROJECT_ROOT}/Dataset/PYPI/obfuscation/unzip_malware",
     }
 }
 
-# Results directory configuration
-RESULT_BASE = "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/pypi/results"
+RESULT_BASE = f"{PROJECT_ROOT}/Codes/Experiment/RQ2/pypi/results"
 
-# Detection configuration
-MAX_PY_FILES = 10  # Max number of .py files to analyze, set to None to analyze all files
-NUM_PROCESSES = 20  # Number of parallel processes
-# Note: No longer using MALICE_THRESHOLD, now using LLM judgment (is_malicious: yes/no)
+MAX_PY_FILES = 10
+NUM_PROCESSES = 20
 
-# Package manager type
 PACKAGE_MANAGER = "pypi"
 
 
-# ==================== File Selection Logic ====================
-
 def select_py_files(package_path: Path, max_files: Optional[int] = 10) -> List[Path]:
-    """
-    Select Python files to analyze
-    
-    Rules:
-    1. setup.py and __init__.py are prioritized and not counted in the limit
-    2. Other files are sorted by path, up to max_files are selected
-    3. If max_files is None, select all files
-    
-    Args:
-        package_path: Package path
-        max_files: Max number of files to analyze (excluding setup.py and __init__.py), None means all
-        
-    Returns:
-        List of selected files
-    """
-    # Exclude directories
+    """Python files to analyze, priority files first."""
     exclude_dirs = {'venv', 'env', '.venv', '__pycache__', '.git', 
                    'dist', 'build', '.egg-info', 'test', 'tests'}
     
-    # Collect all .py files
     all_py_files = []
     for py_file in package_path.rglob('*.py'):
-        # Exclude specific directories
         if any(excluded in py_file.parts for excluded in exclude_dirs):
             continue
         all_py_files.append(py_file)
     
-    # Classify files
-    priority_files = []  # setup.py and __init__.py
-    normal_files = []    # Other files
+    priority_files = []
+    normal_files = []
     
     for py_file in all_py_files:
         file_name = py_file.name.lower()
@@ -101,41 +66,25 @@ def select_py_files(package_path: Path, max_files: Optional[int] = 10) -> List[P
         else:
             normal_files.append(py_file)
     
-    # Sort priority files (setup.py first)
     priority_files.sort(key=lambda x: (x.name != 'setup.py', str(x)))
     
-    # Sort normal files (by path)
     normal_files.sort(key=lambda x: str(x))
     
-    # Combine results
     if max_files is None:
-        # Analyze all files
         selected_files = priority_files + normal_files
     else:
-        # Limit quantity: priority files + up to max_files normal files
         selected_files = priority_files + normal_files[:max_files]
     
     return selected_files
 
 
-# ==================== Single Package Detection ====================
-
 def detect_single_package(args: Tuple[str, str, str, str]) -> dict:
-    """
-    Detect a single package (multi-process worker function)
-    
-    Args:
-        args: (package_path, package_name, dataset_type, label)
-        
-    Returns:
-        Detection result dictionary
-    """
+    """Worker: detect one package."""
     package_path, package_name, dataset_type, label = args
     
     try:
         logger.info(f"Starting detection: {dataset_type}/{label}/{package_name}")
         
-        # 1. 选择要分析的文件
         package_path_obj = Path(package_path)
         selected_files = select_py_files(package_path_obj, max_files=MAX_PY_FILES)
         
@@ -157,29 +106,23 @@ def detect_single_package(args: Tuple[str, str, str, str]) -> dict:
         
         logger.info(f"  {package_name}: Selected {len(selected_files)} files for analysis")
         
-        # 2. 创建检测器（每个进程独立创建，使用LLM判断）
         llm_agent = LLMAgent()
         detector = PackageMalwareDetector(llm_agent=llm_agent)
         
-        # 3. 临时修改检测器的文件扫描逻辑
-        # 保存原始方法
         original_scan = detector._scan_code_files
         
-        # 创建自定义扫描函数
         def custom_scan(pkg_path, pkg_manager):
+            """Files to analyze."""
             return selected_files
         
-        # 替换方法
         detector._scan_code_files = custom_scan
         
-        # 4. 执行检测
         result = detector.detect_package(
             package_path=package_path,
             package_manager=PACKAGE_MANAGER,
-            output_json=None  # 不在这里保存，后面统一保存
+            output_json=None
         )
         
-        # 5. 构建结果
         result_dict = {
             "package_name": package_name,
             "dataset_type": dataset_type,
@@ -196,7 +139,6 @@ def detect_single_package(args: Tuple[str, str, str, str]) -> dict:
             "file_results": []
         }
         
-        # 添加文件级别的结果
         for file_result in result.file_results:
             file_dict = {
                 "file_path": file_result.file_path,
@@ -207,7 +149,6 @@ def detect_single_package(args: Tuple[str, str, str, str]) -> dict:
                 "slice_results": []
             }
             
-            # 添加切片级别的结果
             for slice_result in file_result.slice_results:
                 slice_dict = {
                     "slice_id": slice_result.slice_id,
@@ -218,7 +159,6 @@ def detect_single_package(args: Tuple[str, str, str, str]) -> dict:
                     "behavior_summary": slice_result.behavior_summary,
                     "explanation": slice_result.explanation,
                     "matched_knowledge_count": len(slice_result.matched_knowledge),
-                    # 添加完整的 RAG 匹配信息
                     "matched_knowledge": slice_result.matched_knowledge
                 }
                 file_dict["slice_results"].append(slice_dict)
@@ -244,35 +184,15 @@ def detect_single_package(args: Tuple[str, str, str, str]) -> dict:
         }
 
 
-# ==================== Batch Detection ====================
-
 def check_result_exists(package_name: str, dataset_type: str, label: str) -> bool:
-    """
-    Check if detection result already exists for a package
-    
-    Args:
-        package_name: Package name
-        dataset_type: Dataset type (e.g., 'evaluation')
-        label: Label type (e.g., 'benign', 'malicious')
-        
-    Returns:
-        True if result exists, False otherwise
-    """
+    """Whether a result file exists."""
     output_dir = Path(RESULT_BASE) / dataset_type / "malkg" / label
     output_file = output_dir / f"{package_name}.json"
     return output_file.exists()
 
 
 def collect_packages(skip_existing: bool = True) -> List[Tuple[str, str, str, str]]:
-    """
-    Collect all packages to detect
-    
-    Args:
-        skip_existing: If True, skip packages that already have results
-    
-    Returns:
-        List of (package_path, package_name, dataset_type, label)
-    """
+    """All packages to detect."""
     packages = []
     skipped_count = 0
     
@@ -284,12 +204,10 @@ def collect_packages(skip_existing: bool = True) -> List[Tuple[str, str, str, st
                 logger.warning(f"Path does not exist, skipping: {base_path}")
                 continue
             
-            # Traverse all packages in this directory
             for package_dir in sorted(base_path_obj.iterdir()):
                 if package_dir.is_dir():
                     package_name = package_dir.name
                     
-                    # Check if result already exists
                     if skip_existing and check_result_exists(package_name, dataset_type, label):
                         skipped_count += 1
                         logger.debug(f"⏭️  Skipping {package_name} (result already exists)")
@@ -305,45 +223,35 @@ def collect_packages(skip_existing: bool = True) -> List[Tuple[str, str, str, st
     if skipped_count > 0:
         logger.info(f"⏭️  Skipped {skipped_count} packages (results already exist)")
     
-    # 排序：malware 优先分析，然后是 benign
-    # 排序规则：先按 label (malware < benign)，再按 dataset_type，最后按 package_name
     packages.sort(key=lambda x: (
-        0 if x[3] == 'malware' else 1,  # malware first
-        x[2],  # dataset_type
-        x[1]   # package_name
+        0 if x[3] == 'malware' else 1,
+        x[2],
+        x[1]
     ))
     
     return packages
 
 
 def save_result(result: dict):
-    """
-    Save detection result for a single package
-    
-    Args:
-        result: Detection result dictionary
-    """
+    """Write one result file."""
     dataset_type = result["dataset_type"]
     label = result["label"]
     package_name = result["package_name"]
     
-    # Build output path
     output_dir = Path(RESULT_BASE) / dataset_type / "malkg" / label
     output_dir.mkdir(parents=True, exist_ok=True)
     
     output_file = output_dir / f"{package_name}.json"
     
-    # Save JSON
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=2, ensure_ascii=False)
     
-    # Print absolute path for easy access
     absolute_path = output_file.resolve()
     logger.info(f"💾 Result saved: {absolute_path}")
 
 
 def main():
-    """Main function"""
+    """Entry point."""
     
     print("\n" + "="*80)
     print("🔍 Batch RAG Malware Detection System")
@@ -355,7 +263,6 @@ def main():
     print(f"📁 Results directory: {RESULT_BASE}")
     print("="*80 + "\n")
     
-    # 1. Collect all packages
     logger.info("Collecting package list...")
     packages = collect_packages(skip_existing=True)
     
@@ -365,7 +272,6 @@ def main():
     
     logger.info(f"✅ Found {len(packages)} packages")
     
-    # Statistics by dataset
     stats = {}
     for _, _, dataset_type, label in packages:
         key = f"{dataset_type}/{label}"
@@ -376,7 +282,6 @@ def main():
         print(f"  {key}: {count} packages")
     print()
     
-    # 2. Multi-process detection
     logger.info(f"Starting batch detection (using {NUM_PROCESSES} processes)...")
     
     start_time = datetime.now()
@@ -384,23 +289,18 @@ def main():
     error_count = 0
     
     with Pool(processes=NUM_PROCESSES) as pool:
-        # 使用 imap 以便实时获取结果
         for i, result in enumerate(pool.imap(detect_single_package, packages), 1):
-            # 保存结果
             save_result(result)
             
-            # 统计
             if result["status"] == "success":
                 success_count += 1
             else:
                 error_count += 1
             
-            # Display progress
             progress = (i / len(packages)) * 100
             logger.info(f"Progress: {i}/{len(packages)} ({progress:.1f}%) - "
                        f"Success: {success_count}, Failed: {error_count}")
     
-    # 3. Completion statistics
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds()
     
@@ -422,10 +322,10 @@ if __name__ == "__main__":
         exit_code = main()
         sys.exit(exit_code)
     except KeyboardInterrupt:
-        print("\n\n⚠️  用户中断，退出...")
+        print("\n\n⚠️  Interrupted, exiting...")
         sys.exit(1)
     except Exception as e:
-        logger.error(f"程序异常: {e}")
+        logger.error(f"Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

@@ -1,21 +1,19 @@
+"""Accuracy of the baseline tools on the PyPI datasets."""
 import os
 import json
 import glob
 import csv
 from collections import defaultdict
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
 def analyze_bandit4mal(package_folder_path, folder_type):
-    """
-    Analyze bandit4mal detection results
-    bandit4mal的结果保存在包名文件夹中，每个包一个文件夹    
-    在文件夹下有一个result.txt文件
-    如果txt中存在"No issues identified."字符串或者整个txt是"benign"，就证明检测为良性的，否则为恶意的
-    """
+    """Verdict of a bandit4mal result folder."""
     try:
         result_file = os.path.join(package_folder_path, "result.txt")
         if not os.path.exists(result_file):
-            # If result.txt is not found, consider it benign
             return "benign"
         
         with open(result_file, 'r', encoding='utf-8', errors='ignore') as f:
@@ -29,16 +27,10 @@ def analyze_bandit4mal(package_folder_path, folder_type):
         return "error"
 
 def analyze_guarddog(package_folder_path, folder_type):
-    """
-    Analyze guarddog detection results
-    guarddog的结果保存在包名文件夹中，每个包一个文件夹
-    在文件夹下有一个result.txt文件
-    If the txt contains "Found 0 potentially malicious indicators" string or the entire txt is "benign", it means it is benign
-    """
+    """Verdict of a guarddog result folder."""
     try:
         result_file = os.path.join(package_folder_path, "result.txt")
         if not os.path.exists(result_file):
-            # If result.txt is not found, consider it benign
             return "benign"
         
         with open(result_file, 'r', encoding='utf-8', errors='ignore') as f:
@@ -52,16 +44,10 @@ def analyze_guarddog(package_folder_path, folder_type):
         return "error"
 
 def analyze_ossgadget(package_folder_path, folder_type):
-    """
-    Analyze ossgadget detection results
-    ossgadget的结果保存在包名文件夹中，每个包一个文件夹
-    在文件夹下有一个result.txt文件
-    If the txt contains "0 matches found." or the entire txt is "benign", it means it is benign
-    """
+    """Verdict of an ossgadget result folder."""
     try:
         result_file = os.path.join(package_folder_path, "result.txt")
         if not os.path.exists(result_file):
-            # If result.txt is not found, consider it benign
             return "benign"
         
         with open(result_file, 'r', encoding='utf-8', errors='ignore') as f:
@@ -75,16 +61,10 @@ def analyze_ossgadget(package_folder_path, folder_type):
         return "error"
 
 def analyze_pypiwarehouse(package_folder_path, folder_type):
-    """
-    Analyze pypiwarehouse detection results
-    pypiwarehouse的结果保存在包名文件夹中，每个包一个文件夹
-    在文件夹下有一个result.txt文件
-    If the txt content is "benign" or empty, it means it is benign
-    """
+    """Verdict of a pypiwarehouse result folder."""
     try:
         result_file = os.path.join(package_folder_path, "result.txt")
         if not os.path.exists(result_file):
-            # If result.txt is not found, consider it benign
             return "benign"
         
         with open(result_file, 'r', encoding='utf-8', errors='ignore') as f:
@@ -98,11 +78,7 @@ def analyze_pypiwarehouse(package_folder_path, folder_type):
         return "error"
 
 def analyze_gpt41(file_path, folder_type):
-    """
-    Analyze gpt-4.1 and gpt-4.1-mini detection results
-    结果保存为包名.txt文件（实际是JSON格式）
-    If the JSON file contains "is_malicious" field and its value is true, it means it is malicious, otherwise it is benign
-    """
+    """Verdict of a GPT result file."""
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             data = json.load(f)
@@ -115,16 +91,10 @@ def analyze_gpt41(file_path, folder_type):
         return "error"
 
 def analyze_socketai(package_folder_path, folder_type):
-    """
-    Analyze socketai detection results
-    socketai的结果保存在文件夹中，每个包一个文件夹，文件夹名就是包的hash
-    在包文件夹下，有一个{hash}.txt文件（JSON格式）
-    如果{hash}.txt中的is_malicious为true，则整个包为恶意
-    """
+    """Verdict of a socketai package folder."""
     try:
         package_name = os.path.basename(package_folder_path)
         
-        # 查找{hash}.txt文件
         hash_file = os.path.join(package_folder_path, f"{package_name}.txt")
         
         if not os.path.exists(hash_file):
@@ -145,14 +115,7 @@ def analyze_socketai(package_folder_path, folder_type):
         return "error"
 
 def analyze_sap_models(csv_file_path):
-    """
-    分析SAP模型的检测结果
-    解析CSV文件并返回每个模型在每个数据集上的检测结果
-    PyPI只有evaluation和obfuscation两个数据集
-    
-    CSV格式：Package Name,dataset,label,DT,RF,XGB
-    其中label是真实标签（benign或malware），DT/RF/XGB是预测结果（0=良性，1=恶意）
-    """
+    """Per-model verdicts from the SAP CSV."""
     sap_results = {
         "evaluation": {"dt": {}, "rf": {}, "xgb": {}},
         "obfuscation": {"dt": {}, "rf": {}, "xgb": {}}
@@ -163,21 +126,18 @@ def analyze_sap_models(csv_file_path):
             reader = csv.DictReader(f)
             for row in reader:
                 package_name = row['Package Name']
-                dataset_type = row['dataset']  # obfuscation 或 evaluation
-                label = row['label']  # 真实标签：benign 或 malware
+                dataset_type = row['dataset']
+                label = row['label']
                 
                 if dataset_type not in sap_results:
                     continue
                 
-                # 对于每个模型，将预测结果转换为标签
                 for model in ['dt', 'rf', 'xgb']:
                     model_key = model.upper()
                     prediction = int(row[model_key]) if model_key in row else 0
                     
-                    # 预测结果：0=良性，1=恶意
                     predicted_label = "malware" if prediction == 1 else "benign"
                     
-                    # 按真实标签分类存储
                     if label not in sap_results[dataset_type][model]:
                         sap_results[dataset_type][model][label] = {}
                     
@@ -189,13 +149,7 @@ def analyze_sap_models(csv_file_path):
         return None
 
 def analyze_mulguard(csv_file_path):
-    """
-    分析MulGuard的检测结果
-    解析CSV文件并返回每个模型在每个数据集上的检测结果
-    
-    CSV格式：dataset,package_type,package_name,decision_tree_(dt),multi-layer_perceptron_(mlp),naive_bayes_(nb),random_forest_(rf),sgd_classifier_(svm),xgboost_(xgb)
-    其中package_type是真实标签（benign或malware），后面的列是预测结果（0/-1=良性，1=恶意）
-    """
+    """Per-model verdicts from the MulGuard CSV."""
     mulguard_results = {
         "evaluation": {
             "dt": {}, "mlp": {}, "nb": {}, "rf": {}, "svm": {}, "xgb": {}
@@ -209,14 +163,13 @@ def analyze_mulguard(csv_file_path):
         with open(csv_file_path, 'r', encoding='utf-8', errors='ignore') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                dataset_type = row['dataset']  # evaluation 或 obfuscation
-                package_type = row['package_type']  # 真实标签：benign 或 malware
+                dataset_type = row['dataset']
+                package_type = row['package_type']
                 package_name = row['package_name']
                 
                 if dataset_type not in mulguard_results:
                     continue
                 
-                # 模型名称映射
                 model_columns = {
                     'dt': 'decision_tree_(dt)',
                     'mlp': 'multi-layer_perceptron_(mlp)',
@@ -230,10 +183,8 @@ def analyze_mulguard(csv_file_path):
                     if column_name in row:
                         prediction_value = int(row[column_name])
                         
-                        # 预测结果：0/-1=良性，1=恶意
                         predicted_label = "malware" if prediction_value == 1 else "benign"
                         
-                        # 按真实标签分类存储
                         if package_type not in mulguard_results[dataset_type][model_key]:
                             mulguard_results[dataset_type][model_key][package_type] = {}
                         
@@ -245,20 +196,14 @@ def analyze_mulguard(csv_file_path):
         return None
 
 def analyze_malkg(json_file_path, folder_type):
-    """
-    分析MalKG的检测结果
-    MalKG的结果保存为JSON文件，每个包一个JSON文件
-    JSON中的is_malicious字段表示预测结果：True=恶意，False=良性
-    """
+    """Verdict of a MalKG result file."""
     try:
         with open(json_file_path, 'r', encoding='utf-8', errors='ignore') as f:
             data = json.load(f)
             
-            # 检查是否成功执行
             if data.get('status') != 'success':
                 return "error"
             
-            # 获取预测结果
             is_malicious = data.get('is_malicious', False)
             
             if is_malicious:
@@ -270,7 +215,7 @@ def analyze_malkg(json_file_path, folder_type):
         return "error"
 
 def calculate_metrics(true_positives, true_negatives, false_positives, false_negatives):
-    """计算精确度、召回率、F1分数等评价指标"""
+    """Accuracy, precision, recall and F1."""
     total = true_positives + true_negatives + false_positives + false_negatives
     if total == 0:
         return {
@@ -296,7 +241,7 @@ def calculate_metrics(true_positives, true_negatives, false_positives, false_neg
     }
 
 def evaluate_folder_based_tool(base_path, dataset_type, tool_name, tool_function):
-    """评估基于文件夹结构的工具（bandit4mal, guarddog, ossgadget, pypiwarehouse）"""
+    """Evaluate a tool with one folder per package."""
     results = {
         "true_positive": 0,
         "true_negative": 0,
@@ -308,7 +253,6 @@ def evaluate_folder_based_tool(base_path, dataset_type, tool_name, tool_function
         "misclassified_malware": []
     }
     
-    # 处理良性样本
     benign_folder = os.path.join(base_path, dataset_type, tool_name, "benign")
     if os.path.exists(benign_folder):
         benign_package_folders = [d for d in os.listdir(benign_folder) 
@@ -329,7 +273,6 @@ def evaluate_folder_based_tool(base_path, dataset_type, tool_name, tool_function
                 results["false_positive"] += 1
                 results["misclassified_benign"].append(package_name)
     
-    # 处理恶意样本
     malware_folder = os.path.join(base_path, dataset_type, tool_name, "malware")
     if os.path.exists(malware_folder):
         malware_package_folders = [d for d in os.listdir(malware_folder) 
@@ -360,7 +303,7 @@ def evaluate_folder_based_tool(base_path, dataset_type, tool_name, tool_function
     return results
 
 def evaluate_file_based_tool(base_path, dataset_type, tool_name, tool_function):
-    """评估基于文件结构的工具（gpt-4.1, gpt-4.1-mini）"""
+    """Evaluate a tool with one file per package."""
     results = {
         "true_positive": 0,
         "true_negative": 0,
@@ -370,10 +313,9 @@ def evaluate_file_based_tool(base_path, dataset_type, tool_name, tool_function):
         "malware_total": 0,
         "misclassified_benign": [],
         "misclassified_malware": [],
-        "detailed_results": {}  # Store detailed results for comparison
+        "detailed_results": {}
     }
     
-    # 处理良性样本
     benign_folder = os.path.join(base_path, dataset_type, tool_name, "benign")
     if os.path.exists(benign_folder):
         benign_txt_files = glob.glob(os.path.join(benign_folder, "*.txt"))
@@ -387,7 +329,6 @@ def evaluate_file_based_tool(base_path, dataset_type, tool_name, tool_function):
                 
             results["benign_total"] += 1
             
-            # Store detailed results
             results["detailed_results"][package_name] = {
                 "actual_label": "benign",
                 "prediction": prediction,
@@ -400,7 +341,6 @@ def evaluate_file_based_tool(base_path, dataset_type, tool_name, tool_function):
                 results["false_positive"] += 1
                 results["misclassified_benign"].append(package_name)
     
-    # 处理恶意样本
     malware_folder = os.path.join(base_path, dataset_type, tool_name, "malware")
     if os.path.exists(malware_folder):
         malware_txt_files = glob.glob(os.path.join(malware_folder, "*.txt"))
@@ -414,7 +354,6 @@ def evaluate_file_based_tool(base_path, dataset_type, tool_name, tool_function):
             
             results["malware_total"] += 1
             
-            # Store detailed results
             results["detailed_results"][package_name] = {
                 "actual_label": "malware",
                 "prediction": prediction,
@@ -438,7 +377,7 @@ def evaluate_file_based_tool(base_path, dataset_type, tool_name, tool_function):
     return results
 
 def evaluate_socketai_tool(base_path, dataset_type):
-    """专门评估socketai工具的检测效果，因为其文件结构与其他工具不同"""
+    """Evaluate socketai."""
     results = {
         "true_positive": 0,
         "true_negative": 0,
@@ -500,7 +439,7 @@ def evaluate_socketai_tool(base_path, dataset_type):
     return results
 
 def evaluate_sap_model(sap_results, dataset_type, model_name):
-    """评估SAP模型在特定数据集上的检测效果"""
+    """Evaluate one SAP model."""
     results = {
         "true_positive": 0,
         "true_negative": 0,
@@ -513,7 +452,7 @@ def evaluate_sap_model(sap_results, dataset_type, model_name):
     }
     
     if dataset_type not in sap_results or model_name not in sap_results[dataset_type]:
-        print(f"没有找到 {dataset_type} 数据集的 {model_name} 模型结果")
+        print(f"No {model_name} results for {dataset_type}")
         return results
     
     model_results = sap_results[dataset_type][model_name]
@@ -551,7 +490,7 @@ def evaluate_sap_model(sap_results, dataset_type, model_name):
     return results
 
 def evaluate_mulguard_model(mulguard_results, dataset_type, model_name):
-    """评估MulGuard模型在特定数据集上的检测效果"""
+    """Evaluate one MulGuard model."""
     results = {
         "true_positive": 0,
         "true_negative": 0,
@@ -564,7 +503,7 @@ def evaluate_mulguard_model(mulguard_results, dataset_type, model_name):
     }
     
     if dataset_type not in mulguard_results or model_name not in mulguard_results[dataset_type]:
-        print(f"没有找到 {dataset_type} 数据集的 {model_name} 模型结果")
+        print(f"No {model_name} results for {dataset_type}")
         return results
     
     model_results = mulguard_results[dataset_type][model_name]
@@ -602,7 +541,7 @@ def evaluate_mulguard_model(mulguard_results, dataset_type, model_name):
     return results
 
 def evaluate_malkg_tool(base_path, dataset_type):
-    """评估MalKG工具的检测效果，结果保存为JSON文件"""
+    """Evaluate MalKG."""
     results = {
         "true_positive": 0,
         "true_negative": 0,
@@ -612,10 +551,9 @@ def evaluate_malkg_tool(base_path, dataset_type):
         "malware_total": 0,
         "misclassified_benign": [],
         "misclassified_malware": [],
-        "detailed_results": {}  # Store detailed results for comparison
+        "detailed_results": {}
     }
     
-    # 处理良性样本
     benign_folder = os.path.join(base_path, dataset_type, "malkg", "benign")
     if os.path.exists(benign_folder):
         benign_json_files = glob.glob(os.path.join(benign_folder, "*.json"))
@@ -629,7 +567,6 @@ def evaluate_malkg_tool(base_path, dataset_type):
                 
             results["benign_total"] += 1
             
-            # Store detailed results
             results["detailed_results"][package_name] = {
                 "actual_label": "benign",
                 "prediction": prediction,
@@ -642,7 +579,6 @@ def evaluate_malkg_tool(base_path, dataset_type):
                 results["false_positive"] += 1
                 results["misclassified_benign"].append(package_name)
     
-    # 处理恶意样本
     malware_folder = os.path.join(base_path, dataset_type, "malkg", "malware")
     if os.path.exists(malware_folder):
         malware_json_files = glob.glob(os.path.join(malware_folder, "*.json"))
@@ -656,7 +592,6 @@ def evaluate_malkg_tool(base_path, dataset_type):
             
             results["malware_total"] += 1
             
-            # Store detailed results
             results["detailed_results"][package_name] = {
                 "actual_label": "malware",
                 "prediction": prediction,
@@ -680,10 +615,10 @@ def evaluate_malkg_tool(base_path, dataset_type):
     return results
 
 def compare_malkg_with_gpt(all_results, dataset_type, base_path):
-    """Compare MalKG results with GPT models (both gpt-4.1 and gpt-4.1-mini must be wrong)"""
+    """Compare MalKG errors with the GPT models."""
     comparison_results = {
-        "malkg_correct_benign_gpt_wrong": [],  # MalKG correct (TN), both GPTs wrong (FP)
-        "malkg_correct_malware_gpt_wrong": []  # MalKG correct (TP), both GPTs wrong (FN)
+        "malkg_correct_benign_gpt_wrong": [],
+        "malkg_correct_malware_gpt_wrong": []
     }
     
     if "malkg" not in all_results or "gpt-4.1-mini" not in all_results or "gpt-4.1" not in all_results:
@@ -693,7 +628,6 @@ def compare_malkg_with_gpt(all_results, dataset_type, base_path):
     gpt_mini_results = all_results["gpt-4.1-mini"]["detailed_results"]
     gpt_41_results = all_results["gpt-4.1"]["detailed_results"]
     
-    # Compare results
     for package_name in malkg_results:
         if package_name not in gpt_mini_results or package_name not in gpt_41_results:
             continue
@@ -707,13 +641,11 @@ def compare_malkg_with_gpt(all_results, dataset_type, base_path):
         gpt_mini_pred = gpt_mini_data["prediction"]
         gpt_41_pred = gpt_41_data["prediction"]
         
-        # Case 1: MalKG correctly identifies benign, but both GPTs incorrectly identify as malware
         if actual_label == "benign" and malkg_pred == "benign" and gpt_mini_pred == "malware" and gpt_41_pred == "malware":
-            # Determine source path based on dataset type
             if dataset_type == "evaluation":
-                source_path = f"/home2/wenbo/Documents/IntelliGraph/Dataset/PyPI/evaluation/unzip_benign/{package_name}"
-            else:  # obfuscation
-                source_path = f"/home2/wenbo/Documents/IntelliGraph/Dataset/PyPI/obfuscation/unzip_benign/{package_name}"
+                source_path = f"{PROJECT_ROOT}/Dataset/PyPI/evaluation/unzip_benign/{package_name}"
+            else:
+                source_path = f"{PROJECT_ROOT}/Dataset/PyPI/obfuscation/unzip_benign/{package_name}"
             
             comparison_results["malkg_correct_benign_gpt_wrong"].append({
                 "package_name": package_name,
@@ -723,12 +655,11 @@ def compare_malkg_with_gpt(all_results, dataset_type, base_path):
                 "source_path": source_path
             })
         
-        # Case 2: MalKG correctly identifies malware, but both GPTs incorrectly identify as benign
         elif actual_label == "malware" and malkg_pred == "malware" and gpt_mini_pred == "benign" and gpt_41_pred == "benign":
             if dataset_type == "evaluation":
-                source_path = f"/home2/wenbo/Documents/IntelliGraph/Dataset/PyPI/evaluation/unzip_malware/{package_name}"
-            else:  # obfuscation
-                source_path = f"/home2/wenbo/Documents/IntelliGraph/Dataset/PyPI/obfuscation/unzip_malware/{package_name}"
+                source_path = f"{PROJECT_ROOT}/Dataset/PyPI/evaluation/unzip_malware/{package_name}"
+            else:
+                source_path = f"{PROJECT_ROOT}/Dataset/PyPI/obfuscation/unzip_malware/{package_name}"
             
             comparison_results["malkg_correct_malware_gpt_wrong"].append({
                 "package_name": package_name,
@@ -741,12 +672,12 @@ def compare_malkg_with_gpt(all_results, dataset_type, base_path):
     return comparison_results
 
 def save_results_to_file(results, output_file, comparison_results=None):
-    """将结果保存到文本文件"""
+    """Write the results table."""
     with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(f"PyPI工具检测效果统计报告\n")
+        f.write(f"PyPI tool evaluation\n")
         f.write("=" * 80 + "\n\n")
         
-        f.write("| 数据集 | 工具名称 | 样本总数 | 准确率 | 精确度 | 召回率 | F1分数 | 误报数 | 漏报数 | 误报率 | 漏报率 |\n")
+        f.write("| Dataset | Tool | Samples | Accuracy | Precision | Recall | F1 | FP | FN | FPR | FNR |\n")
         f.write("| ------ | -------- | -------- | ------ | ------ | ------ | ------ | ------ | ------ | ------ | ------ |\n")
         
         for dataset_type, tools_data in results.items():
@@ -762,46 +693,45 @@ def save_results_to_file(results, output_file, comparison_results=None):
                     f"{false_positive_rate*100:.2f}% | {false_negative_rate*100:.2f}% |\n"
                 )
         
-        f.write("\n\n详细结果:\n")
+        f.write("\n\nDetails:\n")
         f.write("=" * 80 + "\n\n")
         
         for dataset_type, tools_data in results.items():
-            f.write(f"\n数据集: {dataset_type}\n")
+            f.write(f"\nDataset: {dataset_type}\n")
             f.write("-" * 80 + "\n\n")
             
             for tool_name, tool_results in tools_data.items():
-                f.write(f"\n{tool_name}详细结果:\n")
+                f.write(f"\n{tool_name}:\n")
                 f.write("-" * 40 + "\n")
-                f.write(f"良性样本总数: {tool_results['benign_total']}\n")
-                f.write(f"恶意样本总数: {tool_results['malware_total']}\n")
+                f.write(f"Benign samples: {tool_results['benign_total']}\n")
+                f.write(f"Malware samples: {tool_results['malware_total']}\n")
                 
-                f.write(f"真阳性 (TP): {tool_results['true_positive']} (正确识别恶意样本)\n")
-                f.write(f"真阴性 (TN): {tool_results['true_negative']} (正确识别良性样本)\n")
-                f.write(f"假阳性 (FP): {tool_results['false_positive']} (误报：错误地将良性识别为恶意)\n")
-                f.write(f"假阴性 (FN): {tool_results['false_negative']} (漏报：错误地将恶意识别为良性)\n")
-                f.write(f"准确率 (Accuracy): {tool_results['accuracy']*100:.2f}%\n")
-                f.write(f"精确度 (Precision): {tool_results['precision']*100:.2f}%\n")
-                f.write(f"召回率 (Recall): {tool_results['recall']*100:.2f}%\n")
-                f.write(f"F1分数: {tool_results['f1']*100:.2f}%\n")
+                f.write(f"TP: {tool_results['true_positive']}\n")
+                f.write(f"TN: {tool_results['true_negative']}\n")
+                f.write(f"FP: {tool_results['false_positive']}\n")
+                f.write(f"FN: {tool_results['false_negative']}\n")
+                f.write(f"Accuracy: {tool_results['accuracy']*100:.2f}%\n")
+                f.write(f"Precision: {tool_results['precision']*100:.2f}%\n")
+                f.write(f"Recall: {tool_results['recall']*100:.2f}%\n")
+                f.write(f"F1: {tool_results['f1']*100:.2f}%\n")
                 
                 false_positive_rate = tool_results['false_positive'] / tool_results['benign_total'] if tool_results['benign_total'] > 0 else 0
                 false_negative_rate = tool_results['false_negative'] / tool_results['malware_total'] if tool_results['malware_total'] > 0 else 0
-                f.write(f"误报率: {false_positive_rate*100:.2f}%\n")
-                f.write(f"漏报率: {false_negative_rate*100:.2f}%\n\n")
+                f.write(f"FPR: {false_positive_rate*100:.2f}%\n")
+                f.write(f"FNR: {false_negative_rate*100:.2f}%\n\n")
                 
                 if tool_results["misclassified_benign"]:
-                    f.write("误报样本列表 (良性被误判为恶意):\n")
+                    f.write("False positives:\n")
                     for package in tool_results["misclassified_benign"]:
                         f.write(f"- {package}\n")
                     f.write("\n")
                 
                 if tool_results["misclassified_malware"]:
-                    f.write("漏报样本列表 (恶意被误判为良性):\n")
+                    f.write("False negatives:\n")
                     for package in tool_results["misclassified_malware"]:
                         f.write(f"- {package}\n")
                     f.write("\n")
         
-        # Add comparison results section
         if comparison_results:
             f.write("\n")
             f.write("=" * 80 + "\n")
@@ -812,7 +742,6 @@ def save_results_to_file(results, output_file, comparison_results=None):
                 f.write(f"\n### Dataset: {dataset_type}\n")
                 f.write("-" * 80 + "\n\n")
                 
-                # Case 1: MalKG correct on benign, both GPTs wrong
                 f.write(f"#### Case 1: MalKG correctly identified as benign, but GPT-4.1 and GPT-4.1-mini both incorrectly identified as malware\n")
                 f.write(f"Total count: {len(dataset_comparison['malkg_correct_benign_gpt_wrong'])}\n\n")
                 
@@ -827,7 +756,6 @@ def save_results_to_file(results, output_file, comparison_results=None):
                 else:
                     f.write("No such cases found.\n\n")
                 
-                # Case 2: MalKG correct on malware, both GPTs wrong
                 f.write(f"#### Case 2: MalKG correctly identified as malware, but GPT-4.1 and GPT-4.1-mini both incorrectly identified as benign\n")
                 f.write(f"Total count: {len(dataset_comparison['malkg_correct_malware_gpt_wrong'])}\n\n")
                 
@@ -843,25 +771,22 @@ def save_results_to_file(results, output_file, comparison_results=None):
                     f.write("No such cases found.\n\n")
 
 def main():
-    """主函数"""
-    base_path = "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/pypi/results"
+    """Entry point."""
+    base_path = f"{PROJECT_ROOT}/Codes/Experiment/RQ2/pypi/results"
     sap_csv_paths = {
-        "evaluation": "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/pypi/results/evaluation/sap/evaluation_detection_results.csv",
-        "obfuscation": "/home2/wenbo/Documents/IntelliGraph/Codes/Experiment/RQ2/pypi/results/obfuscation/sap/obfuscation_detection_results.csv"
+        "evaluation": f"{PROJECT_ROOT}/Codes/Experiment/RQ2/pypi/results/evaluation/sap/evaluation_detection_results.csv",
+        "obfuscation": f"{PROJECT_ROOT}/Codes/Experiment/RQ2/pypi/results/obfuscation/sap/obfuscation_detection_results.csv"
     }
     dataset_types = ["evaluation", "obfuscation"]
     
-    # 统计各数据集样本数量
-    print("\n统计各数据集样本数量：")
+    print("\nSample counts per dataset:")
     
-    # 定义各种工具类型
     folder_based_tools = ["bandit4mal", "guarddog", "ossgadget", "pypiwarehouse"]
     file_based_tools = ["gpt-4.1", "gpt-4.1-mini"]
     
     for dataset_type in dataset_types:
-        print(f"\n数据集: {dataset_type}")
+        print(f"\nDataset: {dataset_type}")
         
-        # 统计文件夹结构的工具
         for tool_name in folder_based_tools:
             benign_folder = os.path.join(base_path, dataset_type, tool_name, "benign")
             malware_folder = os.path.join(base_path, dataset_type, tool_name, "malware")
@@ -876,12 +801,11 @@ def main():
                 malware_count = len([d for d in os.listdir(malware_folder) 
                                    if os.path.isdir(os.path.join(malware_folder, d))])
             
-            print(f"  工具 {tool_name}:")
-            print(f"    - 良性样本: {benign_count} 个包")
-            print(f"    - 恶意样本: {malware_count} 个包")
-            print(f"    - 总计: {benign_count + malware_count} 个包")
+            print(f"  {tool_name}:")
+            print(f"    - benign: {benign_count} packages")
+            print(f"    - malware: {malware_count} packages")
+            print(f"    - total: {benign_count + malware_count} packages")
         
-        # 统计文件结构的工具
         for tool_name in file_based_tools:
             benign_folder = os.path.join(base_path, dataset_type, tool_name, "benign")
             malware_folder = os.path.join(base_path, dataset_type, tool_name, "malware")
@@ -914,13 +838,12 @@ def main():
                     except:
                         pass
             
-            print(f"  工具 {tool_name}:")
-            print(f"    - 良性样本: {benign_count} 个包 ({benign_py_files} 个Python文件)")
-            print(f"    - 恶意样本: {malware_count} 个包 ({malware_py_files} 个Python文件)")
-            print(f"    - 总计: {benign_count + malware_count} 个包")
+            print(f"  {tool_name}:")
+            print(f"    - benign: {benign_count} packages ({benign_py_files} Python files)")
+            print(f"    - malware: {malware_count} packages ({malware_py_files} Python files)")
+            print(f"    - total: {benign_count + malware_count} packages")
         
-        # 统计socketai
-        print(f"  工具 socketai:")
+        print(f"  socketai:")
         benign_folder = os.path.join(base_path, dataset_type, "socketai", "benign")
         malware_folder = os.path.join(base_path, dataset_type, "socketai", "malware")
         
@@ -934,12 +857,11 @@ def main():
             malware_count = len([d for d in os.listdir(malware_folder) 
                                if os.path.isdir(os.path.join(malware_folder, d))])
         
-        print(f"    - 良性样本: {benign_count} 个包")
-        print(f"    - 恶意样本: {malware_count} 个包")
-        print(f"    - 总计: {benign_count + malware_count} 个包")
+        print(f"    - benign: {benign_count} packages")
+        print(f"    - malware: {malware_count} packages")
+        print(f"    - total: {benign_count + malware_count} packages")
         
-        # 统计MalKG
-        print(f"  工具 malkg:")
+        print(f"  malkg:")
         benign_folder = os.path.join(base_path, dataset_type, "malkg", "benign")
         malware_folder = os.path.join(base_path, dataset_type, "malkg", "malware")
         
@@ -953,34 +875,31 @@ def main():
             malware_json_files = glob.glob(os.path.join(malware_folder, "*.json"))
             malware_count = len(malware_json_files)
         
-        print(f"    - 良性样本: {benign_count} 个包")
-        print(f"    - 恶意样本: {malware_count} 个包")
-        print(f"    - 总计: {benign_count + malware_count} 个包")
+        print(f"    - benign: {benign_count} packages")
+        print(f"    - malware: {malware_count} packages")
+        print(f"    - total: {benign_count + malware_count} packages")
     
-    # 加载SAP结果
-    print("\n正在加载SAP模型的检测结果...")
+    print("\nLoading SAP results...")
     all_sap_results = {}
     for dataset_type in dataset_types:
-        print(f"  加载 {dataset_type} 数据集的SAP结果...")
+        print(f"  {dataset_type}...")
         sap_results = analyze_sap_models(sap_csv_paths[dataset_type])
         if sap_results:
             all_sap_results[dataset_type] = sap_results[dataset_type]
     
-    # 加载MulGuard结果
-    print("\n正在加载MulGuard模型的检测结果...")
+    print("\nLoading MulGuard results...")
     all_mulguard_results = {}
     for dataset_type in dataset_types:
-        print(f"  加载 {dataset_type} 数据集的MulGuard结果...")
+        print(f"  {dataset_type}...")
         mulguard_csv_path = os.path.join(base_path, dataset_type, "MulGuard", "predictions.csv")
         if os.path.exists(mulguard_csv_path):
             mulguard_results = analyze_mulguard(mulguard_csv_path)
             if mulguard_results and dataset_type in mulguard_results:
                 all_mulguard_results[dataset_type] = mulguard_results[dataset_type]
         else:
-            print(f"    警告：找不到 {mulguard_csv_path}")
+            print(f"    Warning: missing {mulguard_csv_path}")
     
-    # 开始评估
-    print("\n开始评估各工具...")
+    print("\nEvaluating tools...")
     results = {}
     
     folder_tool_functions = {
@@ -996,72 +915,66 @@ def main():
     }
     
     for dataset_type in dataset_types:
-        print(f"\n正在评估数据集: {dataset_type}")
+        print(f"\nEvaluating dataset: {dataset_type}")
         results[dataset_type] = {}
         
-        # 评估文件夹结构的工具
         for tool_name, tool_function in folder_tool_functions.items():
-            print(f"  正在评估工具: {tool_name}")
+            print(f"  Evaluating {tool_name}")
             tool_results = evaluate_folder_based_tool(base_path, dataset_type, tool_name, tool_function)
             results[dataset_type][tool_name] = tool_results
             
             total_samples = tool_results["benign_total"] + tool_results["malware_total"]
             print(
-                f"    样本总数: {total_samples}, 准确率: {tool_results['accuracy']*100:.2f}%, "
-                f"精确度: {tool_results['precision']*100:.2f}%, 召回率: {tool_results['recall']*100:.2f}%, "
-                f"F1: {tool_results['f1']*100:.2f}%, 误报: {tool_results['false_positive']}, "
-                f"漏报: {tool_results['false_negative']}"
+                f"    samples: {total_samples}, accuracy: {tool_results['accuracy']*100:.2f}%, "
+                f"precision: {tool_results['precision']*100:.2f}%, recall: {tool_results['recall']*100:.2f}%, "
+                f"F1: {tool_results['f1']*100:.2f}%, FP: {tool_results['false_positive']}, "
+                f"FN: {tool_results['false_negative']}"
             )
         
-        # 评估文件结构的工具
         for tool_name, tool_function in file_tool_functions.items():
-            print(f"  正在评估工具: {tool_name}")
+            print(f"  Evaluating {tool_name}")
             tool_results = evaluate_file_based_tool(base_path, dataset_type, tool_name, tool_function)
             results[dataset_type][tool_name] = tool_results
             
             total_samples = tool_results["benign_total"] + tool_results["malware_total"]
             print(
-                f"    样本总数: {total_samples}, 准确率: {tool_results['accuracy']*100:.2f}%, "
-                f"精确度: {tool_results['precision']*100:.2f}%, 召回率: {tool_results['recall']*100:.2f}%, "
-                f"F1: {tool_results['f1']*100:.2f}%, 误报: {tool_results['false_positive']}, "
-                f"漏报: {tool_results['false_negative']}"
+                f"    samples: {total_samples}, accuracy: {tool_results['accuracy']*100:.2f}%, "
+                f"precision: {tool_results['precision']*100:.2f}%, recall: {tool_results['recall']*100:.2f}%, "
+                f"F1: {tool_results['f1']*100:.2f}%, FP: {tool_results['false_positive']}, "
+                f"FN: {tool_results['false_negative']}"
             )
         
-        # 评估socketai
-        print(f"  正在评估工具: socketai")
+        print(f"  Evaluating socketai")
         socketai_results = evaluate_socketai_tool(base_path, dataset_type)
         results[dataset_type]["socketai"] = socketai_results
         
         total_samples = socketai_results["benign_total"] + socketai_results["malware_total"]
         print(
-            f"    样本总数: {total_samples}, 准确率: {socketai_results['accuracy']*100:.2f}%, "
-            f"精确度: {socketai_results['precision']*100:.2f}%, 召回率: {socketai_results['recall']*100:.2f}%, "
-            f"F1: {socketai_results['f1']*100:.2f}%, 误报: {socketai_results['false_positive']}, "
-            f"漏报: {socketai_results['false_negative']}"
+            f"    samples: {total_samples}, accuracy: {socketai_results['accuracy']*100:.2f}%, "
+            f"precision: {socketai_results['precision']*100:.2f}%, recall: {socketai_results['recall']*100:.2f}%, "
+            f"F1: {socketai_results['f1']*100:.2f}%, FP: {socketai_results['false_positive']}, "
+            f"FN: {socketai_results['false_negative']}"
         )
         
-        # 评估MalKG
-        print(f"  正在评估工具: malkg")
+        print(f"  Evaluating malkg")
         malkg_results = evaluate_malkg_tool(base_path, dataset_type)
         results[dataset_type]["malkg"] = malkg_results
         
         total_samples = malkg_results["benign_total"] + malkg_results["malware_total"]
         print(
-            f"    样本总数: {total_samples}, 准确率: {malkg_results['accuracy']*100:.2f}%, "
-            f"精确度: {malkg_results['precision']*100:.2f}%, 召回率: {malkg_results['recall']*100:.2f}%, "
-            f"F1: {malkg_results['f1']*100:.2f}%, 误报: {malkg_results['false_positive']}, "
-            f"漏报: {malkg_results['false_negative']}"
+            f"    samples: {total_samples}, accuracy: {malkg_results['accuracy']*100:.2f}%, "
+            f"precision: {malkg_results['precision']*100:.2f}%, recall: {malkg_results['recall']*100:.2f}%, "
+            f"F1: {malkg_results['f1']*100:.2f}%, FP: {malkg_results['false_positive']}, "
+            f"FN: {malkg_results['false_negative']}"
         )
         
-        # 评估SAP模型
         if dataset_type in all_sap_results:
             sap_models = ["dt", "rf", "xgb"]
             
             for model_name in sap_models:
                 tool_name = f"sap-{model_name}"
-                print(f"  正在评估工具: {tool_name}")
+                print(f"  Evaluating {tool_name}")
                 
-                # 需要构造一个包含当前数据集的sap_results字典
                 sap_results_for_eval = {dataset_type: all_sap_results[dataset_type]}
                 model_results = evaluate_sap_model(sap_results_for_eval, dataset_type, model_name)
                 
@@ -1069,21 +982,19 @@ def main():
                 
                 total_samples = model_results["benign_total"] + model_results["malware_total"]
                 print(
-                    f"    样本总数: {total_samples}, 准确率: {model_results['accuracy']*100:.2f}%, "
-                    f"精确度: {model_results['precision']*100:.2f}%, 召回率: {model_results['recall']*100:.2f}%, "
-                    f"F1: {model_results['f1']*100:.2f}%, 误报: {model_results['false_positive']}, "
-                    f"漏报: {model_results['false_negative']}"
+                    f"    samples: {total_samples}, accuracy: {model_results['accuracy']*100:.2f}%, "
+                    f"precision: {model_results['precision']*100:.2f}%, recall: {model_results['recall']*100:.2f}%, "
+                    f"F1: {model_results['f1']*100:.2f}%, FP: {model_results['false_positive']}, "
+                    f"FN: {model_results['false_negative']}"
                 )
         
-        # 评估MulGuard模型
         if dataset_type in all_mulguard_results:
             mulguard_models = ["dt", "mlp", "nb", "rf", "svm", "xgb"]
             
             for model_name in mulguard_models:
                 tool_name = f"mulguard-{model_name}"
-                print(f"  正在评估工具: {tool_name}")
+                print(f"  Evaluating {tool_name}")
                 
-                # 需要构造一个包含当前数据集的mulguard_results字典
                 mulguard_results_for_eval = {dataset_type: all_mulguard_results[dataset_type]}
                 model_results = evaluate_mulguard_model(mulguard_results_for_eval, dataset_type, model_name)
                 
@@ -1091,13 +1002,12 @@ def main():
                 
                 total_samples = model_results["benign_total"] + model_results["malware_total"]
                 print(
-                    f"    样本总数: {total_samples}, 准确率: {model_results['accuracy']*100:.2f}%, "
-                    f"精确度: {model_results['precision']*100:.2f}%, 召回率: {model_results['recall']*100:.2f}%, "
-                    f"F1: {model_results['f1']*100:.2f}%, 误报: {model_results['false_positive']}, "
-                    f"漏报: {model_results['false_negative']}"
+                    f"    samples: {total_samples}, accuracy: {model_results['accuracy']*100:.2f}%, "
+                    f"precision: {model_results['precision']*100:.2f}%, recall: {model_results['recall']*100:.2f}%, "
+                    f"F1: {model_results['f1']*100:.2f}%, FP: {model_results['false_positive']}, "
+                    f"FN: {model_results['false_negative']}"
                 )
     
-    # Compare MalKG with GPT models for each dataset
     print("\nComparing MalKG with GPT models...")
     all_comparison_results = {}
     for dataset_type in dataset_types:
@@ -1108,10 +1018,9 @@ def main():
             print(f"    MalKG correct (benign) but both GPTs wrong: {len(comparison_results['malkg_correct_benign_gpt_wrong'])} cases")
             print(f"    MalKG correct (malware) but both GPTs wrong: {len(comparison_results['malkg_correct_malware_gpt_wrong'])} cases")
     
-    # 保存结果
     output_file = "pypi_tool_evaluation_results.txt"
     save_results_to_file(results, output_file, all_comparison_results)
-    print(f"\n详细结果已保存到文件: {output_file}")
+    print(f"\nResults written to: {output_file}")
 
 
 if __name__ == "__main__":
