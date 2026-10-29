@@ -21,10 +21,10 @@ def main():
     """Command line entry point."""
     
     if len(sys.argv) < 3:
-        print("用法: python run_detection.py <包路径> <包管理器>")
-        print("包管理器: npm 或 pypi")
+        print("Usage: python run_detection.py <package_path> <package_manager>")
+        print("package_manager: npm or pypi")
         print()
-        print("示例:")
+        print("Examples:")
         print("  python run_detection.py /path/to/package pypi")
         print("  python run_detection.py /path/to/package npm")
         sys.exit(1)
@@ -33,31 +33,31 @@ def main():
     package_manager = sys.argv[2].lower()
     
     if package_manager not in ["npm", "pypi"]:
-        print(f"❌ 错误: 不支持的包管理器 '{package_manager}'")
-        print("   支持的包管理器: npm, pypi")
+        print(f"❌ Error: unsupported package manager '{package_manager}'")
+        print("   Supported: npm, pypi")
         sys.exit(1)
     
     if not Path(package_path).exists():
-        print(f"❌ 错误: 路径不存在: {package_path}")
+        print(f"❌ Error: path not found: {package_path}")
         sys.exit(1)
     
     package_name = Path(package_path).name
     output_path = project_root / "Results" / "malware_detection" / f"{package_name}_report.json"
     
     print("\n" + "="*80)
-    print("🔍 恶意包检测系统")
+    print("🔍 Malicious package detection")
     print("="*80)
-    print(f"📦 包路径: {package_path}")
-    print(f"📦 包名称: {package_name}")
-    print(f"🏷️  包管理器: {package_manager.upper()}")
-    print(f"📄 输出文件: {output_path}")
+    print(f"📦 Package path: {package_path}")
+    print(f"📦 Package name: {package_name}")
+    print(f"🏷️  Package manager: {package_manager.upper()}")
+    print(f"📄 Output file: {output_path}")
     print("="*80 + "\n")
     
     try:
-        logger.info("正在初始化检测器...")
+        logger.info("Initializing the detector...")
         detector = PackageMalwareDetector()
         
-        logger.info("开始执行检测...")
+        logger.info("Running detection...")
         result = detector.detect_package(
             package_path=package_path,
             package_manager=package_manager,
@@ -65,23 +65,23 @@ def main():
         )
         
         print("\n" + "="*80)
-        print("✅ 检测完成！")
+        print("✅ Detection finished")
         print("="*80)
         
         if result.is_malicious_package:
-            print("🔴 判定结果: 恶意包")
+            print("🔴 Verdict: malicious")
             exit_code = 1
         else:
-            print("🟢 判定结果: 正常包")
+            print("🟢 Verdict: benign")
             exit_code = 0
         
-        print(f"\n📊 详细报告已保存到: {output_path}")
+        print(f"\n📊 Report written to: {output_path}")
         print("="*80 + "\n")
         
         return exit_code
         
     except Exception as e:
-        logger.error(f"检测过程出错: {e}")
+        logger.error(f"Detection failed: {e}")
         import traceback
         traceback.print_exc()
         return 1

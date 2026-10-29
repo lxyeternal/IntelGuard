@@ -265,39 +265,39 @@ class PackageMalwareDetector:
             kb_path = os.environ.get("INTELGUARD_KB_PATH") or str(project_root / "KnowledgeBase")
 
         if llm_agent is None:
-            logger.info("未提供 llm_agent，自动创建一个 LLMAgent 实例")
+            logger.info("No llm_agent given; creating an LLMAgent")
             llm_agent = LLMAgent()
 
-        logger.info("初始化端到端恶意包检测器...")
+        logger.info("Initializing the package detector...")
 
-        logger.info("[1/3] 初始化代码切片器...")
+        logger.info("[1/3] Initializing the code slicer...")
         self.slicer = StaticCodeSlicer(llm_agent=llm_agent)
         
-        logger.info("[2/3] 加载RAG知识库...")
-        logger.info(f"   知识库路径: {kb_path}")
+        logger.info("[2/3] Loading the knowledge base...")
+        logger.info(f"   Knowledge base path: {kb_path}")
         self.kb = RAGKnowledgeBase(kb_path=kb_path)
         
         try:
             self.kb.load_kb()
-            logger.info(f"   ✓ 已加载知识库: {len(self.kb.packages)} 个恶意包, {len(self.kb.snippet_index)} 个代码片段")
+            logger.info(f"   ✓ Loaded knowledge base: {len(self.kb.packages)} packages, {len(self.kb.snippet_index)} snippets")
         except FileNotFoundError as e:
-            logger.warning(f"   ⚠️  未找到知识库文件: {e}")
-            logger.warning(f"   请先运行 Codes/KnowledgeBase/build_knowledge_base.py 构建知识库")
+            logger.warning(f"   ⚠️  Knowledge base not found: {e}")
+            logger.warning(f"   Run Codes/KnowledgeBase/build_knowledge_base.py first")
         except Exception as e:
-            logger.error(f"   ❌ 加载知识库时发生错误: {e}")
+            logger.error(f"   ❌ Failed to load the knowledge base: {e}")
             import traceback
             traceback.print_exc()
         
-        logger.info("[3/3] 初始化RAG检测器...")
+        logger.info("[3/3] Initializing the detector...")
         if similarity_threshold is not None:
-            logger.info(f"   相似度阈值过滤: {similarity_threshold}")
+            logger.info(f"   Similarity threshold: {similarity_threshold}")
         self.detector = RAGMalwareDetector(
             knowledge_base=self.kb, 
             llm_agent=llm_agent,
             similarity_threshold=similarity_threshold
         )
         
-        logger.info("✅ 检测器初始化完成！")
+        logger.info("✅ Detector ready")
     
     def detect_package(
         self, 
@@ -311,20 +311,20 @@ class PackageMalwareDetector:
         package_name = package_path.name
         
         if package_manager not in ["npm", "pypi"]:
-            raise ValueError(f"不支持的包管理器: {package_manager}，仅支持 'npm' 或 'pypi'")
+            raise ValueError(f"Unsupported package manager: {package_manager} (use 'npm' or 'pypi')")
         
         logger.info(f"\n{'='*80}")
-        logger.info(f"开始检测包: {package_name}")
-        logger.info(f"包管理器: {package_manager.upper()}")
-        logger.info(f"路径: {package_path}")
+        logger.info(f"Detecting package: {package_name}")
+        logger.info(f"Package manager: {package_manager.upper()}")
+        logger.info(f"Path: {package_path}")
         logger.info(f"{'='*80}\n")
         
         code_files = [Path(f) for f in self.slicer._scan(str(package_path), package_manager)]
         file_type = "Python" if package_manager == "pypi" else "JavaScript"
-        logger.info(f"📁 发现 {len(code_files)} 个{file_type}文件")
+        logger.info(f"📁 Found {len(code_files)} {file_type} files")
         
         if len(code_files) == 0:
-            logger.warning(f"⚠️  未发现任何{file_type}文件")
+            logger.warning(f"⚠️  No {file_type} file found")
             return self._create_empty_result(package_name, str(package_path))
         
         self.slicer.prepare_package(str(package_path), package_manager, [str(f) for f in code_files])
@@ -334,10 +334,10 @@ class PackageMalwareDetector:
         num_processes = max(1, num_processes)
         
         if num_processes == 1:
-            logger.info("🔧 使用单进程模式")
+            logger.info("🔧 Running in one process")
             file_results = self._detect_files_sequential(code_files, package_path)
         else:
-            logger.info(f"🚀 使用多进程模式 (进程数: {num_processes})")
+            logger.info(f"🚀 Running with {num_processes} processes")
             file_results = self._detect_files_parallel_presliced(code_files, num_processes, package_path)
         
         total_slices = 0
@@ -380,14 +380,14 @@ class PackageMalwareDetector:
         file_results = []
         
         for i, code_file in enumerate(code_files, 1):
-            logger.info(f"\n[{i}/{len(code_files)}] 处理文件: {code_file.relative_to(package_path)}")
+            logger.info(f"\n[{i}/{len(code_files)}] Processing {code_file.relative_to(package_path)}")
             
             file_result = self._detect_file(code_file)
             file_results.append(file_result)
             
             if file_result.status == "success":
                 status_icon = "🔴" if file_result.is_malicious else "🟢"
-                logger.info(f"  {status_icon} 切片: {file_result.total_slices}, 恶意: {file_result.malicious_slices}")
+                logger.info(f"  {status_icon} slices: {file_result.total_slices}, malicious: {file_result.malicious_slices}")
         
         return file_results
     
@@ -395,7 +395,7 @@ class PackageMalwareDetector:
         """Slice in the parent and judge in worker processes."""
         kb_path = str(self.kb.kb_path)
         jobs = [(str(f), self.slicer.slice_file(str(f)), kb_path) for f in code_files]
-        logger.info(f"  切片完成: {sum(len(j[1].get('slices', [])) for j in jobs)} 个切片，启动 {num_processes} 个工作进程...")
+        logger.info(f"  Slicing done: {sum(len(j[1].get('slices', [])) for j in jobs)} slices; starting {num_processes} workers...")
         file_results = []
         with Pool(processes=num_processes) as pool:
             for i, result in enumerate(pool.imap(_process_slices_worker, jobs), 1):
@@ -403,7 +403,7 @@ class PackageMalwareDetector:
                 relative_path = Path(result.file_path).relative_to(package_path)
                 if result.status == "success":
                     status_icon = "🔴" if result.is_malicious else "🟢"
-                    logger.info(f"[{i}/{len(jobs)}] {status_icon} {relative_path} - 切片: {result.total_slices}, 恶意: {result.malicious_slices}")
+                    logger.info(f"[{i}/{len(jobs)}] {status_icon} {relative_path} - slices: {result.total_slices}, malicious: {result.malicious_slices}")
                 else:
                     logger.info(f"[{i}/{len(jobs)}] ⚠️  {relative_path} - {result.status}")
         return file_results
@@ -456,7 +456,7 @@ class PackageMalwareDetector:
             )
             
         except Exception as e:
-            logger.error(f"处理文件出错 {file_path}: {e}")
+            logger.error(f"Error processing {file_path}: {e}")
             return FileDetectionResult(
                 file_path=str(file_path),
                 status="error",
@@ -546,29 +546,29 @@ class PackageMalwareDetector:
     def _print_summary(self, result: PackageDetectionResult):
         """Log the package verdict."""
         logger.info(f"\n{'='*80}")
-        logger.info("📊 检测结果汇总")
+        logger.info("📊 Detection summary")
         logger.info(f"{'='*80}")
         
-        verdict = "🔴 恶意包" if result.is_malicious_package else "🟢 正常包"
-        logger.info(f"\n判定结果: {verdict}")
-        logger.info(f"包名: {result.package_name}")
-        logger.info(f"\n统计信息:")
-        logger.info(f"  - 扫描文件: {result.total_files}")
-        logger.info(f"  - 成功处理: {result.processed_files}")
-        logger.info(f"  - 代码切片: {result.total_slices}")
-        logger.info(f"  - 恶意切片: {result.malicious_slices}")
+        verdict = "🔴 malicious" if result.is_malicious_package else "🟢 benign"
+        logger.info(f"\nVerdict: {verdict}")
+        logger.info(f"Package: {result.package_name}")
+        logger.info(f"\nStatistics:")
+        logger.info(f"  - files scanned: {result.total_files}")
+        logger.info(f"  - files processed: {result.processed_files}")
+        logger.info(f"  - slices: {result.total_slices}")
+        logger.info(f"  - malicious slices: {result.malicious_slices}")
         
         if result.total_slices > 0:
             malice_rate = result.malicious_slices / result.total_slices * 100
-            logger.info(f"  - 恶意率: {malice_rate:.2f}%")
+            logger.info(f"  - malicious rate: {malice_rate:.2f}%")
         
         if result.is_malicious_package:
-            logger.info(f"\n⚠️  发现恶意代码！")
-            logger.info(f"恶意文件列表:")
+            logger.info(f"\n⚠️  Malicious code found")
+            logger.info(f"Malicious files:")
             for file_result in result.file_results:
                 if file_result.is_malicious:
                     logger.info(f"  🔴 {file_result.file_path}")
-                    logger.info(f"     恶意切片: {file_result.malicious_slices}/{file_result.total_slices}")
+                    logger.info(f"     malicious slices: {file_result.malicious_slices}/{file_result.total_slices}")
         
         logger.info(f"\n{'='*80}\n")
     
@@ -580,8 +580,8 @@ class PackageMalwareDetector:
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
         
-        logger.info(f"✅ 检测结果已保存到: {output_path}")
-        logger.info(f"   文件大小: {output_path.stat().st_size / 1024:.2f} KB")
+        logger.info(f"✅ Report written to: {output_path}")
+        logger.info(f"   Size: {output_path.stat().st_size / 1024:.2f} KB")
 
 
 def batch_detect_packages(
@@ -592,7 +592,7 @@ def batch_detect_packages(
 ) -> int:
     """Detect several packages in parallel."""
     logger.info(f"\n{'='*80}")
-    logger.info(f"📦 批量检测模式：{len(package_paths)} 个包")
+    logger.info(f"📦 Batch detection: {len(package_paths)} packages")
     logger.info(f"{'='*80}\n")
     
     if kb_path is None:
@@ -608,14 +608,14 @@ def batch_detect_packages(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     if num_processes == 1:
-        logger.info("🔧 使用单进程模式")
+        logger.info("🔧 Running in one process")
         detector = PackageMalwareDetector(
             kb_path=kb_path
         )
         
         results = []
         for i, pkg_path in enumerate(package_paths, 1):
-            logger.info(f"\n[{i}/{len(package_paths)}] 检测包: {pkg_path}")
+            logger.info(f"\n[{i}/{len(package_paths)}] Detecting {pkg_path}")
             
             output_file = output_dir / f"{Path(pkg_path).name}_report.json"
             result = detector.detect_package(
@@ -626,7 +626,7 @@ def batch_detect_packages(
             )
             results.append(result)
     else:
-        logger.info(f"🚀 使用多进程模式 (进程数: {num_processes})")
+        logger.info(f"🚀 Running with {num_processes} processes")
         
         args_list = [
             (pkg_path, package_manager, kb_path)
@@ -640,25 +640,25 @@ def batch_detect_packages(
             output_file = output_dir / f"{result.package_name}_report.json"
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
-            logger.info(f"✅ 已保存: {output_file}")
+            logger.info(f"✅ Saved: {output_file}")
     
     logger.info(f"\n{'='*80}")
-    logger.info("📊 批量检测汇总")
+    logger.info("📊 Batch summary")
     logger.info(f"{'='*80}")
     
     total_packages = len(results)
     malicious_packages = sum(1 for r in results if r.is_malicious_package)
     clean_packages = total_packages - malicious_packages
     
-    logger.info(f"总包数: {total_packages}")
-    logger.info(f"🔴 恶意包: {malicious_packages}")
-    logger.info(f"🟢 正常包: {clean_packages}")
+    logger.info(f"Packages: {total_packages}")
+    logger.info(f"🔴 malicious: {malicious_packages}")
+    logger.info(f"🟢 benign: {clean_packages}")
     
     if malicious_packages > 0:
-        logger.info(f"\n⚠️  检测到 {malicious_packages} 个恶意包:")
+        logger.info(f"\n⚠️  {malicious_packages} malicious packages:")
         for result in results:
             if result.is_malicious_package:
-                logger.info(f"  🔴 {result.package_name} (恶意切片: {result.malicious_slices}/{result.total_slices})")
+                logger.info(f"  🔴 {result.package_name} (malicious slices: {result.malicious_slices}/{result.total_slices})")
     
     logger.info(f"\n{'='*80}\n")
     
@@ -670,7 +670,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='端到端恶意包检测系统（支持npm和pypi）',
+        description='Malicious package detection for npm and PyPI',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -682,24 +682,24 @@ Examples:
         """
     )
     
-    parser.add_argument('package_path', nargs='?', help='解压后的包路径（批量模式下可省略）')
+    parser.add_argument('package_path', nargs='?', help='path of the unpacked package (optional with --batch)')
     parser.add_argument('-m', '--manager', 
                        choices=['npm', 'pypi'], 
                        default='pypi',
-                       help='包管理器类型 (默认: pypi)')
-    parser.add_argument('-o', '--output', help='输出JSON文件路径')
+                       help='package manager (default: pypi)')
+    parser.add_argument('-o', '--output', help='output JSON file')
     parser.add_argument('-t', '--threshold', type=float, default=0.5, 
-                       help='恶意判定阈值 (默认: 0.5)')
-    parser.add_argument('--kb-path', help='知识库路径 (默认: 项目根目录/KnowledgeBase)')
+                       help='malice threshold (default: 0.5)')
+    parser.add_argument('--kb-path', help='knowledge base dir (default: <repo>/KnowledgeBase)')
     parser.add_argument('-j', '--jobs', type=int, default=1,
-                       help='并行处理的进程数 (1=单进程, 0=自动检测CPU核心数, >1=指定进程数, 默认: 1)')
+                       help='number of processes (0 = cpu count, default: 1)')
     parser.add_argument('--batch', nargs='+', metavar='PATH',
-                       help='批量检测多个包 (提供多个包路径)')
+                       help='detect several packages')
     
     args = parser.parse_args()
     
     if not args.batch and not args.package_path:
-        parser.error("需要提供 package_path 或使用 --batch 选项")
+        parser.error("package_path or --batch is required")
     
     if args.batch:
         return batch_detect_packages(

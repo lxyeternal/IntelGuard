@@ -13,23 +13,23 @@ from Codes.GPTAnalysis.ocr_interface import TesseractOCR
 
 def test_ocr(image_path, lang="eng"):
     """Run OCR on an image and print the result."""
-    print(f"正在识别图片: {image_path}")
-    print(f"使用语言: {lang}")
+    print(f"Recognizing image: {image_path}")
+    print(f"Language: {lang}")
     print("-" * 80)
     
     try:
         ocr = TesseractOCR(lang=lang)
         result = ocr.recognize(image_path)
         
-        print("OCR识别结果:")
+        print("OCR result:")
         print("=" * 80)
         print(result)
         print("=" * 80)
-        print(f"\n识别文本长度: {len(result)} 字符")
+        print(f"\nText length: {len(result)} characters")
         
         return result
     except Exception as e:
-        print(f"错误: {e}")
+        print(f"Error: {e}")
         return None
 
 

@@ -63,7 +63,7 @@ class RAGKnowledgeBase:
         if self._llm_initialized:
             return
         
-        logger.info("🔧 初始化Embedding模型...")
+        logger.info("🔧 Initializing the embedding model...")
         try:
             import sys
             from pathlib import Path
@@ -73,9 +73,9 @@ class RAGKnowledgeBase:
             from Codes.GPTAnalysis.llmquery import LLMAgent
             self.llm_agent = LLMAgent()
             self.embedding_model = self.llm_agent.embedding_model
-            logger.info(f"✅ 使用LLMAgent (模型: {self.embedding_model})")
+            logger.info(f"✅ Using LLMAgent (model: {self.embedding_model})")
         except Exception as e:
-            logger.warning(f"⚠️ LLMAgent初始化失败: {e}，将使用mock embeddings")
+            logger.warning(f"⚠️ LLMAgent initialization failed: {e}; using mock embeddings")
             self.llm_agent = None
         
         self._llm_initialized = True
@@ -87,9 +87,9 @@ class RAGKnowledgeBase:
         if merge_existing:
             try:
                 self.load_kb()
-                logger.info(f"📦 加载已有知识库: {len(self.packages)} 个包")
+                logger.info(f"📦 Loaded knowledge base: {len(self.packages)} packages")
             except FileNotFoundError:
-                logger.info("📦 未找到已有知识库，将从头构建")
+                logger.info("📦 No knowledge base found; building from scratch")
         
         self._init_embedding_model()
         
@@ -109,7 +109,7 @@ class RAGKnowledgeBase:
                     logger.debug(f"Skipping existing package: {kb_id}")
                     continue
                 
-                logger.info(f"📦 处理 [{idx}/{len(verify_files)}] {kb_id}")
+                logger.info(f"📦 Processing [{idx}/{len(verify_files)}] {kb_id}")
                 
                 with open(verify_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
@@ -134,7 +134,7 @@ class RAGKnowledgeBase:
                     behaviors.append(snippet.get('code_behavior', ''))
                 
                 if codes:
-                    logger.info(f"   生成 {len(codes)} 个代码片段的embeddings...")
+                    logger.info(f"   Generating embeddings for {len(codes)} snippets...")
                     new_code_embeddings = self._batch_embed(codes, prefix="Code: ")
                     new_behavior_embeddings = self._batch_embed(behaviors, prefix="Behavior: ")
                     
@@ -158,7 +158,7 @@ class RAGKnowledgeBase:
                 new_packages_count += 1
                 
                 self._save_kb()
-                logger.info(f"   ✅ 已保存到知识库（共 {len(self.packages)} 个包，{snippet_count} 个片段）")
+                logger.info(f"   ✅ Saved ({len(self.packages)} packages, {snippet_count} snippets)")
             
             except Exception as e:
                 logger.error(f"Error processing {verify_file}: {e}")
@@ -166,9 +166,9 @@ class RAGKnowledgeBase:
                 traceback.print_exc()
         
         if new_packages_count > 0:
-            logger.info(f"\n🎉 处理完成！共 {len(self.packages)} 个包，{snippet_count} 个片段")
+            logger.info(f"\n🎉 Done: {len(self.packages)} packages, {snippet_count} snippets")
         else:
-            logger.info(f"\n✅ 知识库已包含全部报告（共 {len(self.packages)} 个包）")
+            logger.info(f"\n✅ All reports are in the knowledge base ({len(self.packages)} packages)")
     
     def _generate_embeddings(self):
         """Embed all snippets."""
