@@ -1,12 +1,4 @@
-"""Unified LLM and embedding client.
-
-Routes chat completions and embeddings to one of four providers
-(openai, azure, ollama, custom) according to llm_config.json.
-
-Config path resolution (in order):
-  1. LLM_CONFIG_PATH environment variable
-  2. <this_file_grandparent>/configs/llm_config.json  (default: /app/configs/llm_config.json)
-"""
+"""LLM chat and embedding client with openai, azure, ollama and custom backends."""
 
 import json
 import logging
@@ -46,7 +38,7 @@ KNOWN_TOKEN_MODELS = frozenset({
 
 
 def _record_usage(kind: str, model: str, usage) -> None:
-    """Append one token-usage record to $LLM_USAGE_LOG (JSONL) when set; silently skip otherwise."""
+    """Append one token-usage record to the JSONL file named by LLM_USAGE_LOG."""
     path = os.environ.get("LLM_USAGE_LOG")
     if not path or usage is None:
         return
@@ -64,7 +56,9 @@ def _record_usage(kind: str, model: str, usage) -> None:
 
 
 class LLMAgent:
+    """Chat completion and embedding client configured by llm_config.json."""
     def __init__(self) -> None:
+        """Load the config and initialise the LLM and embedding clients."""
         env_path = os.environ.get("LLM_CONFIG_PATH")
         if env_path:
             self.config_path = Path(env_path)
@@ -101,6 +95,7 @@ class LLMAgent:
         ]
 
     def _load_config(self) -> Dict:
+        """Read llm_config.json."""
         if not os.path.exists(self.config_path):
             logging.warning(f"LLM config not found at {self.config_path}, using empty config")
             return {}
@@ -113,12 +108,14 @@ class LLMAgent:
 
     @staticmethod
     def _validate_provider(field: str, value: str) -> None:
+        """Raise if the provider name is not supported."""
         if value not in SUPPORTED_PROVIDERS:
             raise ValueError(
                 f"Unsupported {field} '{value}'. Choose one of {SUPPORTED_PROVIDERS}."
             )
 
     def _provider_cfg(self, section: str, provider: str) -> Dict:
+        """Return the config block of one provider."""
         section_cfg = self.config.get(section, {}) or {}
         cfg = section_cfg.get(provider)
         if not cfg:
@@ -129,12 +126,14 @@ class LLMAgent:
 
     @staticmethod
     def _require(cfg: Dict, key: str, where: str):
+        """Return a required config value or raise."""
         value = cfg.get(key)
         if value in (None, ""):
             raise ValueError(f"{where} requires '{key}' in llm_config.json")
         return value
 
     def _init_llm_client(self) -> None:
+        """Create the chat client for the configured provider."""
         provider = self.query_type
         cfg = self._provider_cfg("llm_providers", provider)
         where = f"llm_providers.{provider}"
@@ -171,6 +170,7 @@ class LLMAgent:
             self.ollama_llm_context = cfg.get("context_size", 65536)
 
     def _init_embedding_client(self) -> None:
+        """Create the embedding client for the configured provider."""
         provider = self.embedding_backend
         cfg = self._provider_cfg("embedding_providers", provider)
         where = f"embedding_providers.{provider}"
@@ -202,6 +202,7 @@ class LLMAgent:
 
     @staticmethod
     def num_tokens_from_messages(content, model: str = DEFAULT_TOKEN_COUNTING_MODEL) -> int:
+        """Count tokens of a message list with tiktoken."""
         if isinstance(content, (list, dict)):
             content = json.dumps(content, ensure_ascii=False)
         else:
@@ -219,6 +220,7 @@ class LLMAgent:
         return len(encoding.encode(content))
 
     def count_tokens(self, content: str, model: Optional[str] = None) -> int:
+        """Count tokens of a string."""
         if model is None:
             model = self.config.get("token_counting_model", DEFAULT_TOKEN_COUNTING_MODEL)
         content = str(content)
@@ -229,6 +231,7 @@ class LLMAgent:
         return len(encoding.encode(content))
 
     def token_slice(self, content: str, token_limit: Optional[int] = None) -> List[str]:
+        """Truncate a string to a token budget."""
         if token_limit is None:
             token_limit = self.config.get("token_slice_limit", 14000)
         encoding_model = self.config.get("token_counting_model", DEFAULT_TOKEN_COUNTING_MODEL)
@@ -250,6 +253,7 @@ class LLMAgent:
         return segments
 
     def _strip_thinking_tags(self, text: str) -> str:
+        """Remove <think> blocks from a reasoning model reply."""
         if not text or not isinstance(text, str):
             return text
         cleaned = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL | re.IGNORECASE)
@@ -260,6 +264,7 @@ class LLMAgent:
         return cleaned.strip()
 
     def extract_json_from_reasoning_output(self, text: str) -> str:
+        """Extract the JSON object from a model reply."""
         if not text or not isinstance(text, str):
             return text
         for pattern in self.json_patterns:
@@ -319,6 +324,7 @@ class LLMAgent:
         messages: List[Dict[str, str]],
         require_json: bool = True,
     ) -> List[Dict[str, str]]:
+        """Add JSON output instructions for reasoning models."""
         if not require_json:
             return messages
         enhanced = messages.copy()
@@ -345,6 +351,7 @@ class LLMAgent:
         reasoning_effort: Optional[str] = None,
         extract_json: Optional[bool] = None,
     ) -> str:
+        """Send a chat completion request and return the reply text."""
         max_tokens = max_tokens or self.config.get("default_max_tokens", 16000)
         temperature = (
             temperature if temperature is not None
@@ -375,7 +382,6 @@ class LLMAgent:
             messages = self.enhance_prompt_for_reasoning_model(messages, True)
 
         if not is_reasoning and response_format is None and extract_json:
-            # only force a JSON object when the caller actually expects JSON (behavior summaries are plain text)
             if self.config.get("auto_json_response", True):
                 response_format = {"type": "json_object"}
 
@@ -399,6 +405,7 @@ class LLMAgent:
         return raw
 
     def _get_current_model(self) -> str:
+        """Return the configured chat model name."""
         return getattr(self, "llm_model", "")
 
     def _build_chat_completion_params(
@@ -413,6 +420,7 @@ class LLMAgent:
         seed: int,
         reasoning_effort: Optional[str],
     ) -> Dict:
+        """Build the keyword arguments of a chat completion call."""
         params: Dict = {
             "model": self.llm_model,
             "messages": messages,
@@ -448,6 +456,7 @@ class LLMAgent:
         seed: int,
         reasoning_effort: Optional[str],
     ) -> str:
+        """Chat completion through an OpenAI-compatible endpoint."""
         wait_time = self.config.get("retry_wait_time", 10)
         wait_increment = self.config.get("retry_wait_increment", 5)
         for attempt in range(self.max_attempts):
@@ -478,6 +487,7 @@ class LLMAgent:
         response_format: Optional[Dict],
         seed: int,
     ) -> str:
+        """Chat completion through a local Ollama server."""
         wait_time = self.config.get("retry_wait_time", 10)
         wait_increment = self.config.get("retry_wait_increment", 5)
         url = f"http://{self.ollama_llm_host}:{self.ollama_llm_port}/api/chat"
@@ -513,6 +523,7 @@ class LLMAgent:
         return ""
 
     def generate_embedding(self, text: str) -> np.ndarray:
+        """Embed a text; long inputs are chunked and averaged."""
         if not text or not isinstance(text, str) or text.strip() == "":
             logging.warning("Invalid input text, returning zero vector")
             return np.zeros(self.dimension)
@@ -522,11 +533,13 @@ class LLMAgent:
         encoding_name = DEFAULT_EMBEDDING_ENCODING
 
         def batched(iterable, n):
+            """Yield fixed-size batches of an iterable."""
             it = iter(iterable)
             while (batch := tuple(islice(it, n))):
                 yield batch
 
         def chunked_tokens(s, enc_name, chunk_length):
+            """Yield token chunks of a string."""
             encoding = tiktoken.get_encoding(enc_name)
             tokens = encoding.encode(s)
             yield from batched(tokens, chunk_length)
@@ -537,6 +550,7 @@ class LLMAgent:
             retry=retry_if_not_exception_type(Exception),
         )
         def get_single_embedding(tokens_list, raw_chunk_text: str) -> List[float]:
+            """Embed one chunk."""
             try:
                 if provider in ("openai", "azure", "custom"):
                     if not getattr(self, "embedding_client", None):
@@ -583,6 +597,7 @@ class LLMAgent:
             return np.zeros(self.dimension)
 
     def _ollama_embed_one(self, text_chunk: str) -> List[float]:
+        """Embed one chunk with Ollama."""
         url = f"http://{self.ollama_embed_host}:{self.ollama_embed_port}/api/embed"
         payload = {"model": self.embedding_model, "input": text_chunk}
         response = requests.post(url, json=payload, timeout=120)

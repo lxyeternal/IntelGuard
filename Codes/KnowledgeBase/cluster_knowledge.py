@@ -1,5 +1,4 @@
-"""Two-level HDBSCAN clustering of KB snippets (code level, then behavior level).
-Writes clusters.json and behavior_cluster_centroids.npy next to knowledge_base.json."""
+"""Two-level HDBSCAN clustering of the knowledge base snippets."""
 import argparse
 import json
 import logging
@@ -16,7 +15,6 @@ sys.path.insert(0, str(project_root))
 
 logger = logging.getLogger(__name__)
 
-# predicates voted to label each behavior cluster
 PREDICATES: List[Tuple[str, str]] = [
     ("data exfiltration", r"exfiltrat|sends? .*(?:to|towards) .*(?:server|domain|url|ip|endpoint|webhook)|upload.*(?:credential|token|data)|post(?:s|ing)? .*data"),
     ("credential theft", r"credential|token|password|secret|api[_ ]?key|ssh key|\.ssh|wallet|cookie|session"),
@@ -36,6 +34,7 @@ PREDICATES: List[Tuple[str, str]] = [
 
 
 def snippet_text(snippet: Dict[str, Any], package: Dict[str, Any]) -> str:
+    """Text used to vote the predicates of a snippet."""
     m = snippet.get("malice_analysis", {}) or {}
     parts = [snippet.get("code_behavior", ""), m.get("why_suspicious", ""), m.get("violated_expectations", ""),
              " ".join(m.get("key_indicators", []) or []), str((snippet.get("execution_context") or {}).get("trigger", "")),
@@ -44,22 +43,24 @@ def snippet_text(snippet: Dict[str, Any], package: Dict[str, Any]) -> str:
 
 
 def predicates_of(text: str) -> List[str]:
+    """Predicates matched by a text."""
     return [name for name, pat in PREDICATES if re.search(pat, text)]
 
 
 def _l2(x: np.ndarray) -> np.ndarray:
+    """L2-normalise rows."""
     return x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-10)
 
 
 def _hdbscan(x: np.ndarray, min_cluster_size: int, min_samples: int, eps: float = 0.0) -> np.ndarray:
-    """HDBSCAN on L2-normalised vectors (euclidean distance there is monotone in cosine)."""
+    """HDBSCAN on L2-normalised vectors."""
     xn = _l2(x.astype(np.float64))
     eps_euclid = float(eps)
     try:
         import hdbscan
         model = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples, metric="euclidean",
                                 cluster_selection_epsilon=eps_euclid, cluster_selection_method="eom", core_dist_n_jobs=-1)
-    except ImportError:  # sklearn fallback, no epsilon
+    except ImportError:
         from sklearn.cluster import HDBSCAN
         model = HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples, metric="euclidean",
                         cluster_selection_method="eom", n_jobs=-1)
@@ -68,6 +69,7 @@ def _hdbscan(x: np.ndarray, min_cluster_size: int, min_samples: int, eps: float 
 
 def build_clusters(kb_dir: Path, code_min: int = 8, code_samples: int = 4,
                    beh_min: int = 40, beh_samples: int = 8, beh_eps: float = 0.45) -> Dict[str, Any]:
+    """Cluster the snippets and write clusters.json and the behavior centroids."""
     with open(kb_dir / "knowledge_base.json", "r", encoding="utf-8") as f:
         kb = json.load(f)
     packages = kb["packages"]
@@ -79,7 +81,6 @@ def build_clusters(kb_dir: Path, code_min: int = 8, code_samples: int = 4,
     assert code_emb.shape[0] == n == beh_emb.shape[0], f"embeddings ({code_emb.shape[0]}, {beh_emb.shape[0]}) vs index ({n})"
     logger.info(f"clustering {n} snippets (code dim {code_emb.shape[1]}, behavior dim {beh_emb.shape[1]})")
 
-    # empty snippets stay as noise (-1)
     valid_code = np.array([bool((pk[snippet_index[i][0]]["malicious_snippets"][snippet_index[i][1]].get("code_snippet") or "").strip()) for i in range(n)])
     valid_beh = np.array([bool((pk[snippet_index[i][0]]["malicious_snippets"][snippet_index[i][1]].get("code_behavior") or "").strip()) for i in range(n)])
     code_labels = np.full(n, -1, dtype=int)
@@ -91,6 +92,7 @@ def build_clusters(kb_dir: Path, code_min: int = 8, code_samples: int = 4,
     logger.info(f"level-2 behavior clusters: {len(set(beh_labels)) - (1 if -1 in beh_labels else 0)}, noise {int((beh_labels == -1).sum())}")
 
     def snippet(i: int):
+        """Return (package, snippet) for a snippet index."""
         kb_id, j = snippet_index[i]
         return pk[kb_id], pk[kb_id]["malicious_snippets"][j]
 
@@ -148,6 +150,7 @@ def build_clusters(kb_dir: Path, code_min: int = 8, code_samples: int = 4,
 
 
 def main():
+    """Command line entry point."""
     ap = argparse.ArgumentParser(description="Two-level HDBSCAN clustering of the knowledge base")
     ap.add_argument("--kb", default=str(project_root / "KnowledgeBase"))
     ap.add_argument("--code-min", type=int, default=8)

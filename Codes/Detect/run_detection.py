@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
-"""
-恶意包检测运行脚本
-
-用法示例：
-    # 检测PyPI包
-    python run_detection.py /path/to/pypi_package pypi
-    
-    # 检测npm包
-    python run_detection.py /path/to/npm_package npm
-"""
+"""Detect one package from the command line."""
 
 import sys
 from pathlib import Path
 
-# 添加项目根目录到路径
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -28,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    """主函数"""
+    """Command line entry point."""
     
     if len(sys.argv) < 3:
         print("用法: python run_detection.py <包路径> <包管理器>")
@@ -42,18 +32,15 @@ def main():
     package_path = sys.argv[1]
     package_manager = sys.argv[2].lower()
     
-    # 验证包管理器
     if package_manager not in ["npm", "pypi"]:
         print(f"❌ 错误: 不支持的包管理器 '{package_manager}'")
         print("   支持的包管理器: npm, pypi")
         sys.exit(1)
     
-    # 验证路径
     if not Path(package_path).exists():
         print(f"❌ 错误: 路径不存在: {package_path}")
         sys.exit(1)
     
-    # 设置输出路径
     package_name = Path(package_path).name
     output_path = project_root / "Results" / "malware_detection" / f"{package_name}_report.json"
     
@@ -67,13 +54,9 @@ def main():
     print("="*80 + "\n")
     
     try:
-        # 初始化检测器
         logger.info("正在初始化检测器...")
-        detector = PackageMalwareDetector(
-            malice_threshold=0.5  # 使用默认知识库路径
-        )
+        detector = PackageMalwareDetector()
         
-        # 执行检测
         logger.info("开始执行检测...")
         result = detector.detect_package(
             package_path=package_path,
@@ -81,7 +64,6 @@ def main():
             output_json=str(output_path)
         )
         
-        # 显示最终结果
         print("\n" + "="*80)
         print("✅ 检测完成！")
         print("="*80)

@@ -1,1 +1,1 @@
-# Detect module
+"""Package detection."""

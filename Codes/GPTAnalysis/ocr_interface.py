@@ -1,14 +1,6 @@
-# !/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-Lightweight Tesseract OCR wrapper that exposes both a callable interface and
-a CLI entry-point. Example usage:
-
-    from Codes.GPTAnalysis.ocr_interface import TesseractOCR
-    ocr = TesseractOCR(lang="chi_sim")
-    text = ocr.recognize("/path/to/image.png")
-"""
+"""Tesseract OCR wrapper."""
 
 import argparse
 import shutil
@@ -18,9 +10,10 @@ from typing import Iterable, List, Optional
 
 
 class TesseractOCR:
-    """Minimal helper around the `tesseract` binary."""
+    """Thin wrapper around the tesseract binary."""
 
     def __init__(self, lang: str = "eng", extra_args: Optional[Iterable[str]] = None):
+        """Set the language and extra tesseract arguments."""
         self.tesseract_bin = shutil.which("tesseract")
         if not self.tesseract_bin:
             raise RuntimeError("tesseract binary not found. Please install Tesseract OCR.")
@@ -28,7 +21,7 @@ class TesseractOCR:
         self.extra_args = list(extra_args) if extra_args else []
 
     def recognize(self, image_path: str, lang: Optional[str] = None) -> str:
-        """Run OCR on the given image and return recognized text."""
+        """Run OCR on an image and return the text."""
         image = Path(image_path).expanduser().resolve()
         if not image.exists():
             raise FileNotFoundError(f"Image not found: {image}")
@@ -55,6 +48,7 @@ class TesseractOCR:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the command line parser."""
     parser = argparse.ArgumentParser(description="Run OCR via Tesseract.")
     parser.add_argument("image", help="Path to the image to be processed.")
     parser.add_argument(
@@ -72,6 +66,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Command line entry point."""
     parser = _build_arg_parser()
     args = parser.parse_args()
     ocr = TesseractOCR(lang=args.lang, extra_args=args.extra)

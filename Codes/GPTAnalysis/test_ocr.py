@@ -1,21 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-简单的OCR测试脚本
-"""
+"""Quick OCR check on one image."""
 
 import sys
 import os
 
-# 添加项目根目录到路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from Codes.GPTAnalysis.ocr_interface import TesseractOCR
 
 
 def test_ocr(image_path, lang="eng"):
-    """测试OCR识别"""
+    """Run OCR on an image and print the result."""
     print(f"正在识别图片: {image_path}")
     print(f"使用语言: {lang}")
     print("-" * 80)
@@ -37,7 +34,6 @@ def test_ocr(image_path, lang="eng"):
 
 
 if __name__ == "__main__":
-    # 测试指定的图片
     image_path = "/home2/wenbo/Documents/IntelliGraph/Dataset/Image/bleepingcomputer/20250102_111622_779955/VSCodeFigure35B15D.png"
     
     if len(sys.argv) > 1:
