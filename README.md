@@ -18,7 +18,7 @@ guide an LLM when judging unknown packages.
 
 ```
 security reports ──► LLM extraction ──► verify.json ──► knowledge base ──► detection
-   (19 sources)      (related / extract      (per report)   (snippets, embeddings,   (slicing, retrieval,
+   (22 sources)      (related / extract      (per report)   (snippets, embeddings,   (slicing, retrieval,
                       / verify)                              behavior clusters)       LLM judgment)
 ```
 
@@ -110,9 +110,10 @@ any slice is judged malicious.
 
 ## Datasets
 
-- `Dataset/IntelliJson`: 4,420 verified reports of malicious packages from 19
+- `Dataset/IntelliJson`: 4,420 verified reports of malicious packages from 22
   intelligence sources, each with the package, its malicious snippets, behaviors,
-  attack chain and detection knowledge.
+  attack chain and detection knowledge. Sources whose articles contain no
+  relevant report after filtering have no directory here.
 - `KnowledgeBase`: the knowledge base built from these reports (7,889 snippets).
 - `Dataset/NPM/evaluation` and `Dataset/PYPI/{evaluation,obfuscation}`: the
   benign and malicious package archives used in the evaluation
